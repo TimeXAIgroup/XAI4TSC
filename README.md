@@ -10,6 +10,8 @@ XAI4TSC has two independent use cases:
 - **Importable Python package** — `pip install -e .` and use the public API in your own code,
   notebooks, or scripts.
 
+The documentation can be found here: https://timexaigroup.github.io/XAI4TSC/
+
 ---
 
 ## Installation

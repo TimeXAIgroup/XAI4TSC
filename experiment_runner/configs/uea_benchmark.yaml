@@ -1,0 +1,81 @@
+# =============================================================================
+# uea_benchmark.yaml — sweep the full UEA multivariate archive.
+#
+#     python -m experiment_runner.main --conf experiment_runner/configs/uea_benchmark.yaml
+#
+# Same minimal stack as ucr_benchmark.yaml (LeNet + Integrated Gradients +
+# Complexity). The very large UEA datasets that risk OOM are skipped entirely via
+# per-member overrides; everything else runs at full size.
+# =============================================================================
+experiment_name: "uea_benchmark"
+
+general:
+  device: "use_available"
+  reproducible: true
+  seed: 42
+
+data_config:
+  default_settings:
+    train_split: 0.8
+    val_split: 0.1
+    encode: "label"
+    allow_padding: true            # zero-pad variable-length series to the longest length
+    allow_imputation: true         # impute NaN values with the per-channel mean
+    use_predefined_splits: true    # use the official _TRAIN/_TEST splits
+  datasets:
+    - dataset: "UEA"               # expands to all 33 UEA multivariate datasets
+      overrides:                   # skip the very large datasets that risk OOM
+        DuckDuckGeese:
+          skip_dataset: true
+        PEMS-SF:
+          skip_dataset: true
+        InsectWingbeat:
+          skip_dataset: true
+        FaceDetection:
+          skip_dataset: true
+        EigenWorms:                # very long series (~17 984 timesteps)
+          skip_dataset: true
+        MotorImagery:
+          skip_dataset: true
+
+train_config:
+  default_settings:
+    train: "till_epoch"
+    hyperparams:
+      epochs: 10
+      batchsize: 8
+      loss_func: "CrossEntropy"
+      optimizer: "adam"
+      learn_rate: 0.001
+      patience: 10
+      save_best: true
+  models:
+    - model: "LeNet"               # smallest built-in model
+      init_params:
+        in_channels: null          # auto-detected per dataset
+        num_classes: null          # auto-detected per dataset
+
+explanation_config:
+  default_settings:
+    target: "predicted"
+    samples:
+      type: "random"
+      count: 10
+  explainers:
+    - method: Integrated_Gradients    # single cheap gradient explainer
+      n_steps: 10                     # more steps make the attribution more accurate
+
+evaluation_config:
+  default_settings:
+    metric_class_params:
+      normalise: true
+      abs: true
+      disable_warnings: true
+      return_aggregate: true
+    metric_call_params:
+      softmax: false
+  metrics:
+    - metric: "Complexity"           # cheapest metric (no perturbation loop)
+
+results_rel_path: "./experiments/results/"
+cache_path: "./cache/"

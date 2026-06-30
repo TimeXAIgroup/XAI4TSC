@@ -1,0 +1,73 @@
+name: Publish to PyPI
+
+# Builds the package with Poetry and uploads it to PyPI via Trusted Publishing
+# (OIDC) — no API token is stored as a secret. Triggered when a GitHub Release
+# is published, so the released code matches the tag.
+on:
+  release:
+    types: [published]
+  # Allow a manual dry run that builds + checks but never uploads.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      # Guard against PyPI/GitHub version drift: on a release, the tag (e.g.
+      # v1.0.0) must match the version in pyproject.toml (1.0.0).
+      - name: Verify tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          PKG_VERSION="$(poetry version --short)"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "pyproject version: $PKG_VERSION"
+          echo "release tag:       $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag ($TAG_VERSION) does not match pyproject version ($PKG_VERSION)"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: poetry build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    # Only on an actual published release — never on manual dry runs.
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/xai4tsc/
+    permissions:
+      id-token: write # required for Trusted Publishing (OIDC)
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

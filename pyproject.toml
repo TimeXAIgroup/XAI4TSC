@@ -1,0 +1,134 @@
+[project]
+name = "xai4tsc"
+version = "1.0.0"
+description = "An evaluation framework for eXplainable AI (XAI) methods applied to Time Series Classification (TSC)."
+authors = [
+    {name = "TimeXAI Research Group"}
+]
+maintainers = [
+    {name = "Louis Peter", email = "Louis.Peter@kite.thm.de"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+keywords = [
+    "xai",
+    "explainable-ai",
+    "interpretability",
+    "time-series",
+    "time-series-classification",
+    "captum",
+    "quantus",
+    "pytorch",
+]
+# The MIT license classifier is intentionally omitted: the SPDX `license`
+# field above already declares it (PEP 639), and mixing the two is discouraged.
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "sktime (>=0.40.1,<0.41.0)",
+    "pyyaml (>=6.0.2,<7.0.0)",
+    "shap (>=0.48.0,<0.49.0)",
+    "captum (>=0.8.0,<0.9.0)",
+    "cachetools (>=6.1.0,<7.0.0)",
+    "matplotlib (>=3.10.5,<4.0.0)",
+    "protobuf (==3.20.3)",
+    "quantus[torch] (>=0.6.0,<0.7.0)",
+    "scikit-learn (>=1.6)"
+]
+
+[project.urls]
+Homepage = "https://github.com/TimeXAIgroup/XAI4TSC"
+Repository = "https://github.com/TimeXAIgroup/XAI4TSC"
+Documentation = "https://timexaigroup.github.io/XAI4TSC/"
+"Bug Tracker" = "https://github.com/TimeXAIgroup/XAI4TSC/issues"
+Changelog = "https://github.com/TimeXAIgroup/XAI4TSC/releases"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.15.14"
+pytest = "^9.0.3"
+pytest-cov = "^7.0"
+
+
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^9.1.0"
+sphinx-autoapi = "^3.8.0"
+sphinx-rtd-theme = "^3.1.0"
+myst-parser = "^5.1.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+markers = [
+    "unit: fast tests with no I/O or training — run constantly during development",
+    "integration: full pipeline tests with real data and training — run explicitly",
+]
+
+# Coverage is opt-in: pass --cov on the command line so the default fast
+# `pytest -m unit` run stays free of measurement overhead. See CLAUDE.md.
+[tool.coverage.run]
+source = ["src/xai4tsc", "experiment_runner"]
+branch = true  # also track which if/else branches are taken, not just lines
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.ruff]
+# Source folders, specified to ease detection and support GitHub workflow.
+src = ["src", "experiment_runner"]
+preview = false
+indent-width = 4
+# 88 is the ruff/Black default; it keeps two files readable side by side on a
+# typical screen. Set explicitly so the limit is visible and intentional.
+line-length = 88
+lint.select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (real bugs: unused/undefined names)
+    "I",    # isort import sorting
+    "UP",   # pyupgrade (modern syntax)
+    "B",    # flake8-bugbear (likely bugs)
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific rules
+    "D",    # pydocstyle (numpy convention, see below)
+    "N",    # pep8-naming
+    "ANN",  # flake8-annotations (typed public API)
+]
+lint.extend-select = [
+    "D213",  # enforce summary on second docstring line (counterpart of ignored D212)
+    "D417",  # keep undocumented-param despite numpy convention
+]
+lint.ignore = [
+    "D203",    # using D211: no blank line before class docstring
+    "D212",    # using D213: summary on second docstring line
+    ### specific rules
+    "D100",
+    "D104",
+]
+lint.pydocstyle.convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "ANN",   # test functions need no type annotations
+    "D103",  # test names are self-documenting; no docstrings required
+]

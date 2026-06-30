@@ -1,0 +1,86 @@
+# =============================================================================
+# example.yaml — the go-to demo for xai4tsc (time domain).
+#
+# This is the config the runner uses by default:
+#     python -m experiment_runner.main
+#
+# It needs no download: the synthetic `freq_shapes` dataset is generated locally
+# (and cached). It trains TWO model architectures, explains them with THREE
+# time-domain XAI methods, and scores those explanations with time-domain
+# metrics.
+#
+# For the frequency / time-frequency counterpart, see `example_frequency.yaml`.
+# For an annotated reference of every available option, see `master.yaml`.
+# =============================================================================
+experiment_name: "example_time"
+
+# Generated datasets, splits, and checkpoints are cached here and reused.
+cache_path: "./cache/"
+
+general:
+  reproducible: true
+  seed: 2025
+  device: "use_available"
+
+# --- Data: synthetic localized wave-packet dataset (no download) ---
+# `freq_shapes` ships a fixed, paper-faithful pre-split dataset committed under the
+# synthetic cache dir (cache/datasets/synthetic/freq_shapes/). With `cache_path` set
+# the runner loads that pre-split layout directly, preserving the original
+# train/val/test split — so `train_split`/`val_split` and any generation
+# `init_params` below are inert for this dataset (the generator is disabled for now).
+data_config:
+  default_settings:
+    train_split: 0.8
+    val_split: 0.1
+  datasets:
+    - dataset: "freq_shapes"        # SyntheticDataset registry key
+      encode: "multihot"            # collapse multi-hot combos to class indices
+
+# --- Models: two different architectures, both trained ---
+train_config:
+  default_settings:
+    hyperparams:
+      epochs: 10
+      batchsize: 32
+      loss_func: "CrossEntropy"
+      optimizer: "adam"
+      learn_rate: 0.001
+      patience: 3
+      save_best: true
+    train: "till_epoch"
+  models:
+    - model: "LeNet"                # smallest built-in CNN
+    - model: "FCN"                  # fully-convolutional baseline
+    # in_channels / num_classes are auto-detected per dataset.
+
+# --- Explainers: three time-domain methods ---
+explanation_config:
+  default_settings:
+    target: "predicted"
+    samples:
+      type: "random"
+      count: 5
+  explainers:
+    - method: Integrated_Gradients
+    - method: Guided_Backpropagation
+    - method: TSHAP                 # exact 2-player Shapley over time windows
+      window_length: 0.1           # fraction of T per window
+      stride: 10                   # compute every 10th window start (bounds cost)
+      perturb_baseline: "centroid"
+      background_data: train_set
+
+# --- Metrics: time-domain ---
+evaluation_config:
+  default_settings:
+    metric_class_params:
+      normalise: true
+      abs: true
+      disable_warnings: true
+      return_aggregate: true
+    metric_call_params:
+      softmax: false
+  metrics:
+    - metric: "Complexity"          # cheap: counts non-zero attributions
+    - metric: "Pixel-Flipping"      # faithfulness via progressive perturbation
+
+results_rel_path: "./experiments/results/"

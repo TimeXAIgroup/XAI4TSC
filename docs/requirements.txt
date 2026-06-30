@@ -1,0 +1,6 @@
+# Documentation build dependencies (used by .github/workflows/docs.yml).
+# Keep in sync with the [tool.poetry.group.docs.dependencies] table in pyproject.toml.
+sphinx>=9.1.0,<10.0.0
+sphinx-autoapi>=3.8.0,<4.0.0
+sphinx-rtd-theme>=3.1.0,<4.0.0
+myst-parser>=5.1.0,<6.0.0

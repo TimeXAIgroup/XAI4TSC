@@ -1,0 +1,110 @@
+# =============================================================================
+# example_frequency.yaml — the frequency / time-frequency showcase for xai4tsc.
+#
+#     python -m experiment_runner.main --conf experiment_runner/configs/example_frequency.yaml
+#
+# Like `example.yaml`, this needs no download — it uses the synthetic
+# `freq_shapes` dataset, which additionally ships per-sample GROUND-TRUTH
+# localization metadata. That lets the `Time-Frequency AUC` metric score how well
+# an attribution lands on the truly discriminative frequency/time regions.
+#
+# It explains a model with FreqRISE (in both the frequency and time-frequency
+# domains) plus a frequency explanation-space wrapper, and scores those with the
+# frequency and time-frequency metrics. Domain-incompatible explainer/metric
+# pairs are skipped automatically by the runner.
+#
+# See `master.yaml` for an annotated reference of every option.
+# =============================================================================
+experiment_name: "example_frequency"
+
+cache_path: "./cache/"
+
+general:
+  reproducible: true
+  seed: 2025
+  device: "use_available"
+
+# --- Data: synthetic dataset with ground-truth localization metadata ---
+# `freq_shapes` ships a fixed, paper-faithful pre-split dataset committed under the
+# synthetic cache dir (cache/datasets/synthetic/freq_shapes/), including per-sample
+# ground-truth localization metadata. With `cache_path` set the runner loads that
+# pre-split layout directly, preserving the original split — so `train_split` /
+# `val_split` are inert here and the programmatic generator is disabled for now.
+data_config:
+  default_settings:
+    train_split: 0.8
+    val_split: 0.1
+  datasets:
+    - dataset: "freq_shapes"
+      encode: "multihot"
+
+# --- Model: one architecture (FreqRISE dominates runtime) ---
+train_config:
+  default_settings:
+    hyperparams:
+      epochs: 15
+      batchsize: 32
+      loss_func: "CrossEntropy"
+      optimizer: "adam"
+      learn_rate: 0.001
+      patience: 3
+      save_best: true
+    train: "till_epoch"
+  models:
+    - model: "FCN"
+
+# --- Explainers: frequency (FFT) and time-frequency (STFT) ---
+explanation_config:
+  default_settings:
+    target: "predicted"
+    samples:
+      type: "random"
+      count: 5
+  explainers:
+    # FreqRISE in the time-frequency domain (masks STFT coefficients) — its
+    # native showcase.
+    - method: FreqRISE
+      domain: stft                  # -> TIME_FREQUENCY
+      transform:
+        name: stft
+        params: {n_fft: 64, win_length: 64, hop_length: 32}
+      num_batches: 50               # small for a fast demo; raise for real runs
+      batch_size: 8
+      num_cells: 8                  # keep num_cells//2 < smallest STFT dim
+      probability_of_drop: 0.5
+      seed: 0
+    # Explanation-space wrapper: lift Integrated Gradients into the FFT domain.
+    # (transform must be given explicitly; omitting it would inherit master's
+    # STFT default and mismatch the FFT relevance.)
+    - method: Frequency             # -> FREQUENCY
+      base:
+        method: Integrated_Gradients
+      transform:
+        name: fft
+        params: {}
+    # Explanation-space wrapper: lift Guided Backpropagation into the STFT domain.
+    - method: TimeFrequency         # -> TIME_FREQUENCY
+      base:
+        method: Guided_Backpropagation
+      transform:
+        name: stft
+        params: {n_fft: 64, win_length: 64, hop_length: 32}
+
+# --- Metrics: frequency, time-frequency, and ground-truth localization ---
+evaluation_config:
+  default_settings:
+    metric_class_params:
+      disable_warnings: true
+      return_aggregate: true
+    metric_call_params:
+      softmax: false
+  metrics:
+    - metric: "Frequency Perturbation"        # needs a FREQUENCY explainer
+      metric_class_params:
+        features_in_step: 5                   # FFT bins perturbed per step (coarser = faster)
+    - metric: "Time-Frequency Perturbation"   # needs a TIME_FREQUENCY explainer
+      metric_class_params:
+        features_in_step: 10                  # STFT coefficients perturbed per step
+    - metric: "Time-Frequency AUC"            # ground-truth localization (freq_shapes)
+
+results_rel_path: "./experiments/results/"

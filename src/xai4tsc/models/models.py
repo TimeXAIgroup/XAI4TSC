@@ -19,7 +19,7 @@ def save_model(
     model: nn.Module,
     ckpt: dict | None = None,
     optim_state_dict: dict | None = None,
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
 ) -> None:
     """
     Save model weights, optional checkpoint information, and optimizer state.
@@ -33,7 +33,7 @@ def save_model(
         by default None
     optim_state_dict : dict, optional
         Optional optimizer state to save, by default None
-    save_path : Path, optional
+    save_path : Path or str, optional
         Path to save to, by default None
 
     Raises
@@ -43,6 +43,7 @@ def save_model(
     """
     if save_path is None:
         raise ValueError("No path supplied for saving the model!")
+    save_path = Path(save_path) if isinstance(save_path, str) else save_path
     # Save the model
     torch.save(
         {

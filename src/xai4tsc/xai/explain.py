@@ -35,7 +35,7 @@ def generate_explanation(
     samples: int = 5,
     prng: np.random.Generator | None = None,
     device: str = "cpu",
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
     visualization_type: list | None = None,
 ) -> Explanation | None:
     """
@@ -68,7 +68,7 @@ def generate_explanation(
         Random number generator to sample random indices, by default None
     device : str, optional
         Device to calculate on, by default ``"cpu"``.
-    save_path : Path, optional
+    save_path : Path | str, optional
         Path to save the explanation visualisation to, by default None
     visualization_type : list, optional
         Plot styles to render when saving, by default ``["bubbles"]``.
@@ -82,8 +82,7 @@ def generate_explanation(
         visualization_type = ["bubbles"]
     if prng is None:
         prng = np.random.default_rng()
-    # Attribution must run with Dropout/BatchNorm in inference mode, otherwise
-    # the explained forward pass is stochastic and uses batch statistics.
+
     model.eval()
     # Samples to explain are in list form
     if indices is None and samples > 0:
@@ -242,7 +241,7 @@ def _get_explanation(
 def plot_exp(
     exp: Explanation,
     norm: bool = True,
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
     visualization_type: list | None = None,
 ) -> None:
     """
@@ -254,9 +253,23 @@ def plot_exp(
     time-frequency explanations use :func:`~xai4tsc.utils.plot.plot_relevance_f`
     and :func:`~xai4tsc.utils.plot.plot_relevance_tf` respectively. For
     multi-target (time-domain) explanations one plot per class is written.
+
+
+    Parameters
+    ----------
+    exp : Explanation
+        _description_
+    norm : bool, optional
+        Whether to normalize explanation values, by default True
+    save_path : Path | str | None, optional
+        Path to save explanations too, by default None
+    visualization_type : list | None, optional
+        Type of visualization can be any of `"bubbles"`` (default), ``"background"``,
+        ``"intensity"``, ``"graph"``, or ``"bar"``, by default None
     """
     if visualization_type is None:
         visualization_type = ["bubbles"]
+    save_path = Path(save_path) if isinstance(save_path, str) else save_path
 
     if exp.explanation_domain in (Domain.FREQUENCY, Domain.TIME_FREQUENCY):
         _plot_transformed_exp(exp, save_path, visualization_type)

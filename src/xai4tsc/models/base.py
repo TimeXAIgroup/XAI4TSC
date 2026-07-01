@@ -127,7 +127,7 @@ class ModelBase(nn.Module, ABC):
         hyperparams: dict,
         data_val: np.ndarray | None = None,
         labels_val: np.ndarray | None = None,
-        save_path: str | Path | None = None,
+        save_path: Path | str | None = None,
     ) -> "ModelBase":
         """
         Run the full training loop with early stopping.
@@ -325,9 +325,10 @@ class ModelBase(nn.Module, ABC):
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
-    def save_model(self, save_path: Path) -> None:
+    def save_model(self, save_path: Path | str) -> None:
         """Save the model state dict to *save_path*."""
-        logger.info("Saving model to %s", save_path)
+        save_path = Path(save_path) if isinstance(save_path, str) else save_path
+        logger.info("Saving model to %s", str(save_path.absolute()))
         torch.save(self.state_dict(), save_path)
 
     @classmethod
@@ -373,7 +374,7 @@ class ModelBase(nn.Module, ABC):
         labels: np.ndarray,
         hyperparams: dict,
         threshold: float = 0.5,
-        save_path: str | Path | None = None,
+        save_path: Path | str | None = None,
     ) -> dict:
         """
         Evaluate on test data and return a metrics dict.
@@ -392,7 +393,7 @@ class ModelBase(nn.Module, ABC):
             Used for ``batchsize``.
         threshold : float
             Decision threshold for binary classification.
-        save_path : str or Path, optional
+        save_path : Path or str, optional
             Directory for the ROC and confusion-matrix plots.  Takes priority over
             the destination set at construction time; falls back to that value and
             finally to the current working directory.

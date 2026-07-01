@@ -81,7 +81,7 @@ class _PerturbationAnimation:
         Path
             The written GIF path.
         """
-        save_path = Path(save_path)
+        save_path = Path(save_path) if isinstance(save_path, str) else save_path
         if save_path.suffix.lower() != ".gif":
             save_path = save_path.with_suffix(".gif")
         save_path.parent.mkdir(parents=True, exist_ok=True)

@@ -90,7 +90,7 @@ exclude_lines = [
 
 [tool.ruff]
 # Source folders, specified to ease detection and support GitHub workflow.
-src = ["src", "experiment_runner"]
+src = ["src", "experiment_runner", "scripts"]
 preview = false
 indent-width = 4
 # 88 is the ruff/Black default; it keeps two files readable side by side on a

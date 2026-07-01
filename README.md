@@ -5,9 +5,9 @@ An evaluation framework for eXplainable AI (XAI) methods applied to Time Series 
 
 XAI4TSC has two independent use cases:
 
-- **Standalone experiment runner** — clone the repo, write a YAML config, run experiments from
+- **Standalone experiment runner**: Clone the repo, choose or adapt a YAML config, run experiments from
   the command line.
-- **Importable Python package** — `pip install -e .` and use the public API in your own code,
+- **Importable Python package**: `pip install xai4tsc` and use the public API in your own code,
   notebooks, or scripts.
 
 The documentation can be found here: https://timexaigroup.github.io/XAI4TSC/
@@ -20,30 +20,36 @@ The documentation can be found here: https://timexaigroup.github.io/XAI4TSC/
 
 We use Poetry for package management inside a Conda environment:
 
-1. Install the Conda environment from `environment.yml`:
+1. Clone the repository:
+	```bash
+	git clone https://github.com/TimeXAI-group/XAI4TSC.git
+	cd XAI4TSC
+	```
+2. Create a python environment (choose one of the following):  
+	2.1. Using python:
    ```bash
-   conda env create   # environment.yml is picked up automatically
-   ```
-2. Activate the environment:
-   ```bash
-   conda activate xai4tsc
-   ```
-3. Create a local virtual environment:
-   ```bash
-   python -m venv .venv
-   ```
-4. Activate the local environment:
-   ```bash
+   python -m venv .venv			 # Use python 3.12 or 3.13
    source .venv/bin/activate
    ```
-5. Confirm setup — check which `python` and `poetry` your shell uses:
-   ```bash
-   which python   # should point to the local venv
-   which poetry   # should point to the conda environment
+	2.2. Using conda:
+	 ```bash
+   conda env create          # picks up environment.yml
+   conda activate xai4tsc
    ```
-6. Install dependencies with Poetry:
+
+3. Install the dependencies (choose one of the following):  
+	3.1. Using poetry:
    ```bash
-   poetry install   # use --dry-run to preview safely
+   pip install poetry # only needed if the local python .venv is used
+   poetry install
+   ```
+	3.2. Using pip and PyPI:
+   ```bash
+   pip install xai4tsc
+   ```
+	3.3. Using pip and a local installation:
+   ```bash
+   pip install -e . 
    ```
 
 ### Package only
@@ -57,7 +63,6 @@ Or, for a local/editable install from a clone:
 ```bash
 pip install -e PATH/TO/REPOSITORY
 ```
-
 ---
 
 ## Project layout

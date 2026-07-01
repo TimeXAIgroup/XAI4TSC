@@ -87,7 +87,7 @@ def test_get_split_cache_path_length_restriction_suffix():
 @pytest.mark.unit
 def test_get_split_cache_path_is_stable_across_calls():
     # The cache key must be deterministic for identical logical params, otherwise
-    # cached splits would never be reused (see Reproducibility notes in CLAUDE.md).
+    # cached splits would never be reused.
     first = get_split_cache_path(**_base_kwargs())
     second = get_split_cache_path(**_base_kwargs())
     assert first == second

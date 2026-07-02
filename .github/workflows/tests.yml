@@ -88,10 +88,10 @@ jobs:
         run: pip install "ruff>=0.15,<0.16"
 
       - name: Lint
-        run: ruff check src/ experiment_runner/ tests/
+        run: ruff check src/ experiment_runner/ tests/ examples/ scripts/
 
       - name: Format check
-        run: ruff format --check src/ experiment_runner/ tests/
+        run: ruff format --check src/ experiment_runner/ tests/ examples/ scripts/
 
   unit:
     name: Unit tests + coverage

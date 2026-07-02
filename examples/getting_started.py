@@ -1,3 +1,4 @@
+import xai4tsc
 from xai4tsc.data import load_dataset
 from xai4tsc.evaluation.evaluate import evaluate
 from xai4tsc.models.models import load_model
@@ -13,11 +14,13 @@ def main(out_dir: str) -> None:
     out_dir : str
         Directory to safe the output to.
     """
+    # Enable package logging to the console and to <out_dir>/xai4tsc.log
+    xai4tsc.enable_logging(out_dir)
+
     # Load data (UCR download or local numpy files)
-    ds = load_dataset("GunPoint")  # UcrUeaDataset — downloads on first use
-    splits, encoder = ds.split(
-        train_split=0.8, val_split=0.1, random_state=42, encode="label"
-    )
+    ds = load_dataset("GunPoint", use_predefined_splits=True)
+    splits, encoder = ds.split(train_split=0.8, val_split=0.1, random_state=42)
+    ds.save_splits(out_dir)
     train_data, train_labels, _ = splits[0]
     test_data, test_labels, _ = splits[1]
 
@@ -65,7 +68,7 @@ def main(out_dir: str) -> None:
     )
 
     # Evaluate the explanations
-    metric_score = evaluate(
+    _ = evaluate(
         model=model,
         metric="Complexity",
         explanation=exp,
@@ -74,8 +77,7 @@ def main(out_dir: str) -> None:
         metric_class_params={"normalise": True, "abs": True, "disable_warnings": True},
         device="cpu",
     )
-    print(metric_score)
 
 
 if __name__ == "__main__":
-    main("results")
+    main("experiments/results/getting_started")

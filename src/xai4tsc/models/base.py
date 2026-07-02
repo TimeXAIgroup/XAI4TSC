@@ -544,7 +544,7 @@ class ModelBase(nn.Module, ABC):
 
         if is_binary:
             logger.info(
-                "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f"
+                "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
                 "spec=%.4f auc=%.4f f1=%.4f mcc=%.4f | TP=%d TN=%d FP=%d FN=%d",
                 self.best_epoch,
                 n,

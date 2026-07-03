@@ -1,61 +1,28 @@
 """
 Logging configuration for the xai4tsc standalone runner.
 
-Targets the ``'xai4tsc'`` named logger only — never the root logger — so the
-package remains silent when imported outside the runner context.
+Thin adapters over the package's public logging API
+(:func:`xai4tsc.enable_logging`) so handler, formatter, and level setup live in
+a single place. Targets the ``'xai4tsc'`` named logger only — never the root
+logger — so the package remains silent when imported outside the runner.
 """
 
 import logging
-import sys
 from pathlib import Path
 
-
-def _make_formatter(debug: bool) -> logging.Formatter:
-    """
-    Return a log formatter for the given verbosity level.
-
-    Parameters
-    ----------
-    debug : bool
-        If ``True``, include the logger name in the format string.
-
-    Returns
-    -------
-    logging.Formatter
-        Configured formatter instance.
-    """
-    fmt = (
-        "%(asctime)s, %(name)s, %(levelname)s: %(message)s"
-        if debug
-        else "%(asctime)s, %(levelname)s: %(message)s"
-    )
-    return logging.Formatter(fmt)
+from xai4tsc.logging_config import add_file_log, enable_logging
 
 
 def _setup_console_logging(debug: bool) -> None:
     """
     Configure console (stdout) logging for the xai4tsc standalone runner.
 
-    Targets only the ``'xai4tsc'`` logger — does not touch the root logger.
-
     Parameters
     ----------
     debug : bool
         If ``True``, set log level to DEBUG and include logger name in output.
     """
-    loglevel = logging.DEBUG if debug else logging.INFO
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(loglevel)
-    handler.setFormatter(_make_formatter(debug))
-
-    app_logger = logging.getLogger("xai4tsc")
-    app_logger.addHandler(handler)
-    app_logger.setLevel(loglevel)
-    app_logger.propagate = False  # don't bubble up to root logger
-
-    # Silence noisy third-party loggers
-    logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
-    logging.getLogger("matplotlib.colorbar").setLevel(logging.ERROR)
+    enable_logging(level=logging.DEBUG if debug else logging.INFO)
 
 
 def _add_file_logging(debug: bool, log_path: Path) -> None:
@@ -69,10 +36,4 @@ def _add_file_logging(debug: bool, log_path: Path) -> None:
     log_path : Path
         Path to the log file to write.
     """
-    loglevel = logging.DEBUG if debug else logging.INFO
-    handler = logging.FileHandler(log_path, mode="w")
-    handler.setLevel(loglevel)
-    handler.setFormatter(_make_formatter(debug))
-
-    logging.getLogger("xai4tsc").addHandler(handler)
-    logging.getLogger("xai4tsc").info("Now also logging to file: %s", str(log_path))
+    add_file_log(log_path, level=logging.DEBUG if debug else logging.INFO)

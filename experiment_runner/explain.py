@@ -150,7 +150,7 @@ def _generate_explanation(
             explainer_config["background_data"], splits
         )
 
-    base = save_path if save_path is not None else config["results_rel_path"]
+    base = save_path if save_path is not None else Path(config["results_rel_path"])
     explanation_dir = (
         base
         / "explanations"

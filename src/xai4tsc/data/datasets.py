@@ -127,7 +127,10 @@ class UcrUeaDataset(DatasetBase):
             ``(data, labels)`` with shape ``(n, C, T)`` and ``(n,)``.
         """
         ucr_name = self.name
-        extract_path = str(self.cache_dir) if self.cache_dir else None
+        extract_path = Path(self.cache_dir) if self.cache_dir else None
+        if extract_path is not None:
+            extract_path.mkdir(exist_ok=True, parents=True)
+            extract_path = extract_path.absolute()
         logger.info("Loading official %s split for '%s' via sktime…", split, ucr_name)
         try:
             data, labels = load_UCR_UEA_dataset(
@@ -184,14 +187,17 @@ class UcrUeaDataset(DatasetBase):
         """
         rng = self._split_rng or np.random.default_rng()
         ucr_name = self.name
-        extract_path = str(self.cache_dir) if self.cache_dir else None
+        extract_path = Path(self.cache_dir) if self.cache_dir else None
+        if extract_path is not None:
+            extract_path.mkdir(exist_ok=True, parents=True)
+            extract_path = extract_path.absolute()
 
         if not self.download:
             if extract_path is None:
                 raise FileNotFoundError(
                     f"Dataset '{self.name}': download=False but no cache_dir provided."
                 )
-            ts_dir = self.cache_dir / ucr_name
+            ts_dir = Path(self.cache_dir) / ucr_name
             if not ts_dir.exists() or not any(ts_dir.glob("*.ts")):
                 raise FileNotFoundError(
                     f"Dataset '{self.name}' not found in cache ({ts_dir}) "
@@ -708,7 +714,8 @@ def load_dataset(
         If ``None`` (and *name* is not a synthetic dataset), a
         :class:`UcrUeaDataset` is returned.
     cache_dir : Path | None
-        Passed through to :class:`UcrUeaDataset` when *path* is ``None``.
+        Passed through to :class:`UcrUeaDataset` when *path* is ``None``, stores
+        UCR / UEA datasets to mitigate multiple downloads.
     pad_series : bool
         If ``True``, variable-length series are zero-padded to the maximum
         series length before returning data.  Passed to the selected subclass.

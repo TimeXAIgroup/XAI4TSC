@@ -38,6 +38,7 @@ from xai4tsc.data import (
     load_dataset,
 )
 from xai4tsc.evaluation.evaluate import METRICS
+from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils.utils import merge_dicts
 from xai4tsc.xai import Domain
@@ -334,6 +335,7 @@ def main(config_path: str, debug: bool = False) -> None:
             # Step 2: Train the models
             for m_ind, model_config in enumerate(t_con["models"]):
                 model_wrapper = None
+                model_log = None
                 # Deep-copy so auto-detected values don't persist into the next
                 # dataset iteration via the shared YAML config object.
                 model_config = copy.deepcopy(model_config)
@@ -365,6 +367,13 @@ def main(config_path: str, debug: bool = False) -> None:
 
                     model_path = dataset_path / model_config["model"]
                     model_path.mkdir(parents=True, exist_ok=True)
+
+                    # Attach a per-model log file capturing this model's
+                    # training, explanation, and evaluation. Detached in the
+                    # finally below so it never leaks into the next model.
+                    model_log = add_file_log(
+                        model_path / f"{dataset['dataset']}_{model_config['model']}.log"
+                    )
 
                     # Load the model
                     model_wrapper = load_model(
@@ -589,6 +598,7 @@ def main(config_path: str, debug: bool = False) -> None:
                             del explanation
                             gc.collect()
                 finally:
+                    remove_file_log(model_log)
                     del model_wrapper
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
@@ -614,7 +624,11 @@ def main(config_path: str, debug: bool = False) -> None:
 
         # Per dataset — derive path from "dataset" column
         for dataset_name, group in df.groupby("dataset"):
-            path = Path(config["results_rel_path"]) / dataset_name / "metrics.csv"
+            path = (
+                Path(config["results_rel_path"])
+                / dataset_name
+                / f"{dataset_name}_metrics.csv"
+            )
             group.to_csv(path, index=False)
             logger.info("Dataset metrics saved to %s", path)
 
@@ -624,7 +638,7 @@ def main(config_path: str, debug: bool = False) -> None:
                 Path(config["results_rel_path"])
                 / dataset_name
                 / model_name
-                / "metrics.csv"
+                / f"{dataset_name}_{model_name}_metrics.csv"
             )
             group.to_csv(path, index=False)
             logger.info("Model metrics saved to %s", path)

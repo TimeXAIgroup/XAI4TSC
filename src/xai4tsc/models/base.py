@@ -1,11 +1,13 @@
 """``ModelBase`` ABC: training, prediction, evaluation, checkpoint persistence."""
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F  # noqa: N812 — PyTorch ecosystem convention
 from sklearn.metrics import (
@@ -127,7 +129,7 @@ class ModelBase(nn.Module, ABC):
         hyperparams: dict,
         data_val: np.ndarray | None = None,
         labels_val: np.ndarray | None = None,
-        save_path: str | Path | None = None,
+        save_path: Path | str | None = None,
     ) -> "ModelBase":
         """
         Run the full training loop with early stopping.
@@ -325,9 +327,10 @@ class ModelBase(nn.Module, ABC):
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
-    def save_model(self, save_path: Path) -> None:
+    def save_model(self, save_path: Path | str) -> None:
         """Save the model state dict to *save_path*."""
-        logger.info("Saving model to %s", save_path)
+        save_path = Path(save_path) if isinstance(save_path, str) else save_path
+        logger.info("Saving model to %s", str(save_path.absolute()))
         torch.save(self.state_dict(), save_path)
 
     @classmethod
@@ -373,7 +376,7 @@ class ModelBase(nn.Module, ABC):
         labels: np.ndarray,
         hyperparams: dict,
         threshold: float = 0.5,
-        save_path: str | Path | None = None,
+        save_path: Path | str | None = None,
     ) -> dict:
         """
         Evaluate on test data and return a metrics dict.
@@ -392,7 +395,7 @@ class ModelBase(nn.Module, ABC):
             Used for ``batchsize``.
         threshold : float
             Decision threshold for binary classification.
-        save_path : str or Path, optional
+        save_path : Path or str, optional
             Directory for the ROC and confusion-matrix plots.  Takes priority over
             the destination set at construction time; falls back to that value and
             finally to the current working directory.
@@ -440,22 +443,42 @@ class ModelBase(nn.Module, ABC):
             y_pred = np.argmax(y_probs, axis=1).astype(np.int64)
 
         n = len(y_true)
+        pos = np.sum(y_true == 1)
+        neg = np.sum(y_true == 0)
         accuracy = float((y_pred == y_true).sum()) / n if n > 0 else float("nan")
-        results = {"accuracy": f"{accuracy * 100:.2f}", "n": n}
+        results = {"n": n, "pos": pos, "neg": neg, "accuracy": f"{accuracy * 100:.2f}"}
 
-        if is_binary:
+        auc = float("nan")
+        fpr, tpr = [0, 1], [0, 1]
+        fpr_tpr_per_class = None
+
+        if len(unique_classes) < 2:
+            logger.warning("AUC undefined: only one class present in test labels.")
+        elif is_binary:
             tp = int(((y_pred == 1) & (y_true == 1)).sum())
             tn = int(((y_pred == 0) & (y_true == 0)).sum())
             fp = int(((y_pred == 1) & (y_true == 0)).sum())
             fn = int(((y_pred == 0) & (y_true == 1)).sum())
             sensitivity = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
             specificity = tn / (tn + fp) if (tn + fp) > 0 else float("nan")
+            auc = roc_auc_score(y_true, y_prob)
+            f1 = 2 * tp / (2 * tp + fp + fn)
+            tpr = tp / pos
+            tnr = tn / neg
             ppv = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
             npv = tn / (tn + fn) if (tn + fn) > 0 else float("nan")
+            fpr = 1 - tnr
+            fnr = 1 - tpr
+            _for = 1 - npv
+            fdr = 1 - ppv
+            mcc = math.sqrt(tpr * tnr * ppv * npv) - math.sqrt(fnr * fpr * _for * fdr)
             results.update(
                 {
                     "sensitivity": f"{sensitivity * 100:.2f}",
                     "specificity": f"{specificity * 100:.2f}",
+                    "auc": f"{auc:.4f}",
+                    "f1": f"{f1 * 100:.2f}",
+                    "mcc": f"{mcc * 100:.2f}",
                     "ppv": f"{ppv * 100:.2f}",
                     "npv": f"{npv * 100:.2f}",
                     "tp": tp,
@@ -465,16 +488,6 @@ class ModelBase(nn.Module, ABC):
                 }
             )
 
-        auc = float("nan")
-        fpr, tpr = [0, 1], [0, 1]
-        fpr_tpr_per_class = None
-
-        if len(unique_classes) < 2:
-            logger.warning("AUC undefined: only one class present in test labels.")
-        elif is_binary:
-            auc = roc_auc_score(y_true, y_prob)
-            fpr, tpr, _ = roc_curve(y_true, y_prob)
-            results["auc"] = f"{auc:.4f}"
         else:
             n_model_classes = y_probs.shape[1]
             partial = len(unique_classes) < n_model_classes
@@ -518,19 +531,31 @@ class ModelBase(nn.Module, ABC):
                     n_model_classes=n_model_classes,
                 )
             else:
+                fpr, tpr, _ = roc_curve(y_true, y_prob)
                 self._plot_roc(fpr, tpr, auc, self.best_epoch)
             self._plot_confusion_matrix(y_true, y_pred, self.best_epoch)
 
+            df = pd.DataFrame([results])
+            results_path = (
+                self.save_path / f"{self.name}_e{self.best_epoch}_test_results.csv"
+            )
+            df.to_csv(results_path, index=False)
+            logger.info("Test set results saved to %s", results_path)
+
         if is_binary:
             logger.info(
-                "Test results Epoch %s: n=%d acc=%.4f sens=%.4f spec=%.4f "
-                "auc=%.4f | TP=%d TN=%d FP=%d FN=%d",
+                "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
+                "spec=%.4f auc=%.4f f1=%.4f mcc=%.4f | TP=%d TN=%d FP=%d FN=%d",
                 self.best_epoch,
                 n,
+                pos,
+                neg,
                 accuracy,
                 sensitivity,
                 specificity,
                 auc,
+                f1,
+                mcc,
                 tp,
                 tn,
                 fp,
@@ -566,7 +591,7 @@ class ModelBase(nn.Module, ABC):
         plt.title("Receiver Operating Characteristic")
         plt.legend(loc="lower right")
         plt.grid(True, linestyle="--", alpha=0.6)
-        path = self.save_path / f"roc_e{best_epoch}.png"
+        path = self.save_path / f"{self.name}_e{best_epoch}_roc.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("ROC curve saved to %s", path)
         plt.close()
@@ -595,7 +620,7 @@ class ModelBase(nn.Module, ABC):
         ax.set_title(title, fontsize=10)
         ax.legend(loc="lower right", fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.6)
-        path = self.save_path / f"roc_e{best_epoch}.png"
+        path = self.save_path / f"{self.name}_e{best_epoch}_roc.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("ROC curves saved to %s", path)
         plt.close()
@@ -610,7 +635,7 @@ class ModelBase(nn.Module, ABC):
         cm = confusion_matrix(y_true, y_pred)
         ConfusionMatrixDisplay(cm).plot(ax=ax)
         ax.set_title(f"Confusion Matrix — Epoch {best_epoch}")
-        path = self.save_path / f"confusion_matrix_e{best_epoch}.png"
+        path = self.save_path / f"{self.name}_e{best_epoch}_confusion_matrix.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("Confusion matrix saved to %s", path)
         plt.close()
@@ -633,7 +658,7 @@ class ModelBase(nn.Module, ABC):
         ax2.set_title("Training Accuracy")
         ax2.grid(True, linestyle="--", alpha=0.6)
         fig.tight_layout()
-        path = self.save_path / f"training_curve_{self.name}.png"
+        path = self.save_path / f"{self.name}_training_curve.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("Training curve saved to %s", path)
         plt.close()

@@ -25,7 +25,7 @@ def plot_relevance(
     title: str | None = None,
     colorbar: bool = False,
     graph_only: bool = False,
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
     xlabel: str = "Time [ms]",
 ) -> Path | None:
     """
@@ -58,7 +58,7 @@ def plot_relevance(
         Whether to add a colourbar to the figure.
     graph_only : bool
         If ``True``, hide all axes decorations.
-    save_path : Path, optional
+    save_path : Path or str, optional
         File path to save the figure.  If ``None``, the figure is shown
         interactively.
     xlabel : str
@@ -121,6 +121,7 @@ def plot_relevance(
     timesteps = signal.shape[2]
 
     if save_path is not None:
+        save_path = Path(save_path) if isinstance(save_path, str) else save_path
         # if multiple plots are generated, create a directory
         if batch_size > 1:
             out_dir = save_path.with_suffix("")

@@ -1,9 +1,10 @@
 # XAI4TSC
+![Python version](https://img.shields.io/badge/python-3.12%20%7C%203.13%20-blue.svg)
+[![PyPI version](https://badge.fury.io/py/xai4tsc.svg)](https://badge.fury.io/py/xai4tsc)
+[![Documentation](https://github.com/TimeXAIgroup/XAI4TSC/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/TimeXAIgroup/XAI4TSC/actions/workflows/docs.yml)
 
-An evaluation framework for eXplainable AI (XAI) methods applied to Time Series Classification
-(TSC), developed by the TimeXAI Research Group.
-
-XAI4TSC has two independent use cases:
+XAI4TSC is an evaluation framework for eXplainable AI (XAI) methods applied to Time Series Classification
+(TSC). It supports an end-to-end pipeline to pick datasets, train models, generate explanations and evaluate them. XAI4TSC is developed by the TimeXAI Research Group and has two independent use cases:
 
 - **Standalone experiment runner**: Clone the repo, choose or adapt a YAML config, run experiments from
   the command line.

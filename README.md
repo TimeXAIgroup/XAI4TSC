@@ -1,4 +1,5 @@
-# XAI4TSC
+![XAI4TSC](docs/source/_static/xai4tsc_wide.png)
+
 ![Python version](https://img.shields.io/badge/python-3.12%20%7C%203.13%20-blue.svg)
 [![PyPI version](https://badge.fury.io/py/xai4tsc.svg)](https://badge.fury.io/py/xai4tsc)
 [![Documentation](https://github.com/TimeXAIgroup/XAI4TSC/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/TimeXAIgroup/XAI4TSC/actions/workflows/docs.yml)

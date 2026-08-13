@@ -171,10 +171,10 @@ explanation_config:
   default_settings:
     target: "predicted"     # "predicted", "label", "all"
     visualization_type:
-      - "bubbles"           # Available: bubbles, background, intensity, bar, graph
+      - "points"           # Available: points (default), background, intensity, bar, graph
     samples:
-      type: "by_index"      # "by_index" or "random"
-      indices: [0]          # Used when type = "by_index"
+      type: "index"      # "index" or "random"
+      indices: [0]          # Used when type = "index"
       count: 5              # Used when type = "random"
     save_exp_values: false  # true = save exp_values, indices, labels as .npy
   explainers:               # List of {method: <name>, ...} entries.

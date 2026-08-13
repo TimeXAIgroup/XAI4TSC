@@ -53,9 +53,9 @@ explanation_config:
   default_settings:
     target: "predicted"
     visualization_type:
-      - "bubbles"
+      - "points"
     samples:
-      type: "by_index"
+      type: "index"
       indices: [0, 1]
       count: 5
     save_exp_values: false

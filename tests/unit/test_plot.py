@@ -34,7 +34,7 @@ def _signal_relevance(shape=(1, 1, 20), seed=0):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "rel_type", ["bubbles", "background", "intensity", "graph", "bar", None]
+    "rel_type", ["points", "background", "intensity", "graph", "bar", None]
 )
 def test_plot_relevance_rel_types(tmp_path, rel_type):
     signal, relevance = _signal_relevance()
@@ -88,7 +88,7 @@ def test_plot_relevance_negative_relevance_uses_bwr(tmp_path):
     signal = np.zeros((1, 1, 20), dtype=np.float32)
     relevance = np.linspace(-1, 1, 20, dtype=np.float32).reshape(1, 1, 20)
     out = plot_relevance(
-        signal, relevance, rel_type="bubbles", save_path=tmp_path / "r.png"
+        signal, relevance, rel_type="points", save_path=tmp_path / "r.png"
     )
     assert out is not None
     assert out.exists()
@@ -112,7 +112,7 @@ def test_plot_relevance_graph_only_and_colorbar(tmp_path):
     out = plot_relevance(
         signal,
         relevance,
-        rel_type="bubbles",
+        rel_type="points",
         graph_only=True,
         colorbar=True,
         title="demo",
@@ -140,7 +140,7 @@ def test_plot_relevance_graph_type_skips_colorbar(tmp_path):
 def test_plot_relevance_batch_gt_1_creates_dir(tmp_path):
     signal, relevance = _signal_relevance(shape=(2, 1, 20))
     out = plot_relevance(
-        signal, relevance, rel_type="bubbles", save_path=tmp_path / "r.png"
+        signal, relevance, rel_type="points", save_path=tmp_path / "r.png"
     )
     assert out is not None
     # A directory named after the save stem is created for multi-sample output.

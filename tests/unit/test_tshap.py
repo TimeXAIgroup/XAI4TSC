@@ -12,7 +12,7 @@ from experiment_runner import explain as runner_explain
 from sklearn.preprocessing import LabelEncoder
 
 from xai4tsc.utils.perturbation import baseline_replacement, resolve_perturb_func
-from xai4tsc.xai import DataType
+from xai4tsc.xai import DataType, is_multi_target
 from xai4tsc.xai._types import Explanation
 from xai4tsc.xai.explain import generate_explanation
 from xai4tsc.xai.feature_attribution import TSHAPExplainer
@@ -191,6 +191,7 @@ def test_targets_all_path_shape():
     )
     # (n_classes, n_samples, C, T)
     assert exp.exp_values.shape == (2, 2, 1, 12)
+    assert is_multi_target(exp) is True
 
 
 # ── channel modes ─────────────────────────────────────────────────────────────

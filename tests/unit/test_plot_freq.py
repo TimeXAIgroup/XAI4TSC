@@ -106,7 +106,7 @@ def test_plot_exp_frequency_dispatch(tmp_path):
         data,
         FourierTransform(),
     )
-    plot_exp(exp, save_path=tmp_path, visualization_type=["bubbles"])
+    plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
     files = list(tmp_path.rglob("*frequency*.png"))
     assert len(files) == 2
 

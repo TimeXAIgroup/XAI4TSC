@@ -19,7 +19,7 @@ Use :func:`generate_explanation` as the main entry point. Subclass
 specialisations) to add a custom method.
 """
 
-from ._types import DataType, Domain, Explanation
+from ._types import DataType, Domain, Explanation, is_multi_target
 from .base import (
     ExplainerBase,
     GradientExplainer,
@@ -48,5 +48,6 @@ __all__ = [
     "WrapperExplainer",
     "build_explainer",
     "generate_explanation",
+    "is_multi_target",
     "register_explainer",
 ]

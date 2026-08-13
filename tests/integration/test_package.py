@@ -8,6 +8,7 @@ import xai4tsc
 from xai4tsc.data.datasets import LocalDataset
 from xai4tsc.evaluation.evaluate import evaluate
 from xai4tsc.models.models import load_model
+from xai4tsc.xai import is_multi_target
 from xai4tsc.xai.explain import generate_explanation
 
 
@@ -292,8 +293,10 @@ def test_explanation_target_modes(trained_model, split_dataset, targets):
         n_classes = len(encoder.classes_)
         assert exp.exp_values.ndim == 4
         assert exp.exp_values.shape == (n_classes, *test_data[[0, 1]].shape)
+        assert is_multi_target(exp) is True
     else:
         assert exp.exp_values.shape == test_data[[0, 1]].shape
+        assert is_multi_target(exp) is False
     assert np.all(np.isfinite(exp.exp_values))
 
 
@@ -314,13 +317,13 @@ def test_plot_exp_saves_pngs(trained_model, split_dataset, tmp_path, targets):
         indices=[0, 1],
         device="cpu",
         save_path=tmp_path,
-        visualization_type=["bubbles"],
+        visualization_type=["points"],
     )
 
+    # Plots are written flat under save_path, tagged by index — no sub-directories.
+    assert not any(p.is_dir() for p in tmp_path.iterdir())
     for idx in (0, 1):
-        sample_dir = tmp_path / f"index_{idx}"
-        assert sample_dir.is_dir()
-        pngs = list(sample_dir.glob("relevance_class_*_bubbles*.png"))
+        pngs = list(tmp_path.glob(f"relevance_index_{idx}_class_*_points*.png"))
         if targets == "all":
             # One plot per class.
             assert len(pngs) == len(encoder.classes_)

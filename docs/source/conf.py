@@ -23,7 +23,7 @@ try:
     from importlib.metadata import version as _pkg_version
 
     release = _pkg_version("xai4tsc")
-except Exception:  # noqa: BLE001 — docs build should not fail over version lookup
+except Exception:
     release = "1.0.0"
 
 # -- General configuration ---------------------------------------------------

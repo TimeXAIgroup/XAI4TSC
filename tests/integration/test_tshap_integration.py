@@ -125,8 +125,8 @@ def test_tshap_through_runner_adapter(trained_model, split_dataset, tmp_path):
     explainer_config = {
         "method": "TSHAP",
         "target": "predicted",
-        "samples": {"type": "by_index", "indices": [0, 1]},
-        "visualization_type": ["bubbles"],
+        "samples": {"type": "index", "indices": [0, 1]},
+        "visualization_type": ["points"],
         "window_length": 0.1,
         "stride": 3,
         "perturb_baseline": "centroid",

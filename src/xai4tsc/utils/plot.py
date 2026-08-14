@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def plot_relevance(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
-    rel_type: str = "bubbles",
+    rel_type: str = "points",
     rel_type_kwargs: dict | None = None,
     linewidth: float = 1.4,
     threshold: float = 0.0,
@@ -42,7 +42,7 @@ def plot_relevance(
     relevance : np.ndarray, optional
         Relevance values matching the shape of *signal*.  Defaults to zeros.
     rel_type : str
-        Visualisation style: ``"bubbles"`` (default), ``"background"``,
+        Visualisation style: ``"points"`` (default), ``"background"``,
         ``"intensity"``, ``"graph"``, ``"bar"``, or ``None``.
     rel_type_kwargs : dict
         Extra keyword arguments forwarded to :func:`add_relevance`.
@@ -139,7 +139,11 @@ def plot_relevance(
         zip(signal, relevance, strict=True)
     ):
         if save_path is not None:
-            save_path = out_dir / (save_name + f"{s_idx}" + save_filetype)
+            # Index the filename only for multi-sample batches (which also get
+            # their own directory above); a single sample keeps the caller's name
+            # verbatim, with no stray trailing "0".
+            suffix = f"{s_idx}" if batch_size > 1 else ""
+            save_path = out_dir / (save_name + suffix + save_filetype)
         nrows, ncols = channels, 1
         figsize = (10, 2.5)
         fig, axes = plt.subplots(
@@ -218,7 +222,7 @@ def add_relevance(
     relevance : np.ndarray
         1-D relevance values matching *signal*.
     rel_type : str
-        Visualisation style: ``"bubbles"`` (default), ``"background"``,
+        Visualisation style: ``"points"`` (default), ``"background"``,
         ``"intensity"``, ``"graph"``, ``"bar"``, or ``None``.
     threshold : float
         Relevance values below this absolute magnitude are suppressed.
@@ -235,13 +239,13 @@ def add_relevance(
     Axes
         The modified axes.
     """
+    # relevance threshold & boost
+    rel = np.where(
+        np.abs(relevance) >= threshold,
+        relevance + np.sign(relevance) * cmap_boost,
+        0,
+    )
     if rel_type == "background":
-        # relevance threshold & boost
-        rel = np.where(
-            np.abs(relevance) >= threshold,
-            relevance + np.sign(relevance) * cmap_boost,
-            0,
-        )
         y0, y1 = ax.get_ylim()
         rel_plt = ax.imshow(
             np.expand_dims(rel, 0),
@@ -259,27 +263,8 @@ def add_relevance(
             zorder=0,
         )
     elif rel_type == "intensity":
-        # apply thresholding and boosting
-        relevance = np.where(
-            np.abs(relevance) >= threshold,
-            relevance + np.sign(relevance) * cmap_boost,
-            0,
-        )
-        # # generate points (N, 1, 2)
-        # points = np.column_stack([np.arange(signal.shape[-1]), signal])
-        # points = points.reshape(-1, 1, 2)
-        # # generate segments (N-1, 2, 2)
-        # segments = np.concatenate([points[:-1], points[1:]], axis=1)
-
         t_len = signal.shape[-1]
         x = np.arange(t_len, dtype=float)
-
-        # apply thresholding and boosting
-        rel = np.where(
-            np.abs(relevance) >= threshold,
-            relevance + np.sign(relevance) * cmap_boost,
-            0,
-        )
 
         # midpoints y at half-steps (x=0.5, 1.5, ..., T-1.5)
         y_mid = 0.5 * (signal[:-1] + signal[1:])
@@ -326,21 +311,8 @@ def add_relevance(
         ax.add_collection(rel_plt)
         ax.autoscale()
     elif rel_type == "graph":
-        # relevance threshold & boost
-        x = np.where(
-            np.abs(relevance) >= threshold,
-            relevance + np.sign(relevance) * cmap_boost,
-            0,
-        )
         rel_plt = ax.plot(relevance, color="red", label="relevance")
     elif rel_type == "bar":
-        # apply thresholding and boosting
-        rel = np.where(
-            np.abs(relevance) >= threshold,
-            relevance + np.sign(relevance) * cmap_boost,
-            0,
-        )
-
         # get current limits
         y0, y1 = ax.get_ylim()
         bar_h = kwargs.get("bar_height", 0.05) * (y1 - y0)
@@ -361,8 +333,8 @@ def add_relevance(
         )
     elif rel_type is None:
         return ax
-    else:  # Bubbles as default
-        # relevance threshold & boost
+    else:  # points as default
+        # relevance thresholding & boost
         x = np.where(np.abs(relevance) >= threshold)[0]
         y = signal[x]
         z = relevance[x] + np.sign(relevance[x]) * cmap_boost
@@ -383,7 +355,7 @@ def add_relevance(
 def plot_relevance_f(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
-    rel_type: str = "bubbles",
+    rel_type: str = "points",
     save_path: Path | None = None,
     **kwargs: object,
 ) -> Path | None:
@@ -514,7 +486,8 @@ def plot_relevance_tf(
                 fig.colorbar(im, ax=ax)
 
         if save_path is not None:
-            last_path = out_dir / f"{save_name}{s_idx}{save_filetype}"
+            suffix = f"{s_idx}" if batch_size > 1 else ""
+            last_path = out_dir / f"{save_name}{suffix}{save_filetype}"
             plt.savefig(last_path, dpi=300)
             plt.close()
         else:

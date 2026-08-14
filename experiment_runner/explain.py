@@ -156,10 +156,10 @@ def _generate_explanation(
         / "explanations"
         / f"explanations_{_explainer_display_name(explainer_config)}"
     )
-    visualization_type = explainer_config.get("visualization_type", ["bubbles"])
+    visualization_type = explainer_config.get("visualization_type", ["points"])
 
     # Explain only certain samples addressed by index
-    if explainer_config["samples"]["type"] == "by_index":
+    if explainer_config["samples"]["type"] == "index":
         explanation = generate_explanation(
             method=explainer_config["method"],
             model=model,
@@ -186,6 +186,23 @@ def _generate_explanation(
             encoder=encoder,
             indices=None,
             samples=explainer_config["samples"]["count"],
+            prng=prng,
+            device=device,
+            save_path=explanation_dir,
+            visualization_type=visualization_type,
+        )
+    else:
+        # "all" case
+        explanation = generate_explanation(
+            method=explainer_config["method"],
+            model=model,
+            data=data,
+            labels=labels,
+            targets=explainer_config["target"],
+            params=params,
+            encoder=encoder,
+            indices=list(np.arange(len(data)).tolist()),
+            samples=len(data),
             prng=prng,
             device=device,
             save_path=explanation_dir,

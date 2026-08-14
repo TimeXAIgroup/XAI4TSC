@@ -87,7 +87,7 @@ def _explainer_config(sample_type, **extra):
 @pytest.mark.unit
 def test_by_index_branch_passes_indices(tmp_path, monkeypatch):
     calls = _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
-    cfg = _explainer_config("by_index")
+    cfg = _explainer_config("index")
     cfg["samples"]["indices"] = [0, 2]
 
     runner_explain._generate_explanation(
@@ -100,7 +100,7 @@ def test_by_index_branch_passes_indices(tmp_path, monkeypatch):
     )
 
     assert calls["indices"] == [0, 2]
-    assert "samples" not in calls  # by_index does not forward a random count
+    assert "samples" not in calls  # index does not forward a random count
     assert (
         calls["save_path"]
         == tmp_path / "explanations" / "explanations_integrated_gradients"
@@ -113,7 +113,7 @@ def test_wrapper_save_folder_uses_qualified_name(tmp_path, monkeypatch):
     cfg = {
         "method": "SIGN",
         "target": "predicted",
-        "samples": {"type": "by_index", "indices": [0, 2]},
+        "samples": {"type": "index", "indices": [0, 2]},
         "base": {"method": "Integrated_Gradients"},
     }
 
@@ -157,7 +157,7 @@ def test_random_branch_passes_count(tmp_path, monkeypatch):
 @pytest.mark.unit
 def test_save_exp_values_writes_artifacts(tmp_path, monkeypatch):
     _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
-    cfg = _explainer_config("by_index", save_exp_values=True)
+    cfg = _explainer_config("index", save_exp_values=True)
     cfg["samples"]["indices"] = [0, 2]
 
     runner_explain._generate_explanation(
@@ -179,7 +179,7 @@ def test_save_exp_values_writes_artifacts(tmp_path, monkeypatch):
 @pytest.mark.unit
 def test_inverse_transform_fallback_on_exception(tmp_path, monkeypatch):
     _patch_recorder(monkeypatch, _make_explanation(_BadEncoder()))
-    cfg = _explainer_config("by_index", save_exp_values=True)
+    cfg = _explainer_config("index", save_exp_values=True)
     cfg["samples"]["indices"] = [0, 2]
 
     runner_explain._generate_explanation(
@@ -199,7 +199,7 @@ def test_inverse_transform_fallback_on_exception(tmp_path, monkeypatch):
 @pytest.mark.unit
 def test_save_path_overrides_config_base(tmp_path, monkeypatch):
     calls = _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
-    cfg = _explainer_config("by_index")
+    cfg = _explainer_config("index")
     cfg["samples"]["indices"] = [0, 2]
     alt = tmp_path / "alt"
 

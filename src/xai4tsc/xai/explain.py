@@ -17,7 +17,7 @@ from . import (
     random_baseline,
     wrappers,
 )
-from ._types import Domain, Explanation
+from ._types import Domain, Explanation, is_multi_target
 from .base import ExplainerBase
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ def generate_explanation(
     save_path : Path | str, optional
         Path to save the explanation visualisation to, by default None
     visualization_type : list, optional
-        Plot styles to render when saving, by default ``["bubbles"]``.
+        Plot styles to render when saving, by default ``["points"]``.
 
     Returns
     -------
@@ -156,7 +156,7 @@ def _get_explanation(
     save_path : Path, optional
         Path to save visualisation to, by default None
     visualization_type : list, optional
-        Plot styles to render when saving, by default ``["bubbles"]``.
+        Plot styles to render when saving, by default ``["points"]``.
 
     Returns
     -------
@@ -169,7 +169,7 @@ def _get_explanation(
         Thrown for not implemented explanation methods.
     """
     if visualization_type is None:
-        visualization_type = ["bubbles"]
+        visualization_type = ["points"]
     # Instantiate the explainer, filtering config params to its __init__.
     explainer_key = method.lower()
     explainer_instance = build_explainer(explainer_key, params)
@@ -196,16 +196,22 @@ def _get_explanation(
 
     # Check which targets to generate explanations for
     if targets == "all":
-        # Explain all classes
+        # Explain all classes, stacking one attribution per class on a leading
+        # axis. The container is derived from what the explainer actually
+        # returns, not from `data`: frequency is (n, C, F), time-frequency is
+        # (n, C, n_freq, n_time), and freq/TF outputs may be complex.
         classes = encoder.classes_
-        # Stack array to hold explanations for each specified class
-        exp.exp_values = np.vstack(
-            [np.expand_dims(np.zeros_like(data), axis=0)] * len(classes)
-        )
+        exp_values = None
         for ind in range(len(classes)):
-            exp.exp_values[ind, ...] = explainer_instance.explain(
+            relevance = explainer_instance.explain(
                 model, exp, device, [ind] * len(data)
             )
+            if exp_values is None:
+                exp_values = np.empty(
+                    (len(classes), *relevance.shape), dtype=relevance.dtype
+                )
+            exp_values[ind] = relevance
+        exp.exp_values = exp_values
     elif targets == "label":
         # Captum targets must be per-sample integer class indices. Encoded labels
         # may be 2-D (one-hot or ordinal); collapse them back to class indices.
@@ -223,15 +229,6 @@ def _get_explanation(
         method_targets = model.predict(exp.data)[0].tolist()
         exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
 
-    # Invariant: the realized domain must be one the explainer declares it can
-    # produce. Catches a multi-capability explainer that forgot to set it.
-    if exp.explanation_domain not in explainer_instance.explanation_domains:
-        raise ValueError(
-            f"Explainer {explainer_key!r} produced explanation_domain "
-            f"{exp.explanation_domain} not in its declared explanation_domains "
-            f"{explainer_instance.explanation_domains}."
-        )
-
     # Save results as specified
     if save_path is not None:
         plot_exp(exp, save_path=save_path, visualization_type=visualization_type)
@@ -247,129 +244,103 @@ def plot_exp(
     """
     Render and save relevance plots for every sample in *exp*.
 
-    One sub-directory per sample index is created under *save_path*. The renderer
-    is chosen by ``exp.explanation_domain``: time-domain explanations use the 1-D
+    Plots are written flat under *save_path*, one file per sample (and, for
+    ``targets="all"`` explanations, per class), named
+    ``relevance_index_<idx>_class_<label>...`` so samples sharing a directory do
+    not overwrite one another. The renderer is chosen by ``exp.explanation_domain``:
+    time-domain explanations use the 1-D
     :func:`~xai4tsc.utils.plot.plot_relevance` overlay styles; frequency and
     time-frequency explanations use :func:`~xai4tsc.utils.plot.plot_relevance_f`
-    and :func:`~xai4tsc.utils.plot.plot_relevance_tf` respectively. For
-    multi-target (time-domain) explanations one plot per class is written.
-
+    and :func:`~xai4tsc.utils.plot.plot_relevance_tf` respectively. Frequency and
+    time-frequency explanations plot against the transformed signal, derived on
+    demand via ``exp.transform``.
 
     Parameters
     ----------
     exp : Explanation
-        _description_
+        The explanation to render. Multi-target ("all") explanations are detected
+        via :func:`~xai4tsc.xai.is_multi_target` (domain-aware), so a single-target
+        time-frequency explanation is not mistaken for a multi-target one.
     norm : bool, optional
-        Whether to normalize explanation values, by default True
+        Whether to normalize explanation values, by default True.
     save_path : Path | str | None, optional
-        Path to save explanations too, by default None
+        Directory to save the plots to, by default None.
     visualization_type : list | None, optional
-        Type of visualization can be any of `"bubbles"`` (default), ``"background"``,
-        ``"intensity"``, ``"graph"``, or ``"bar"``, by default None
+        Overlay styles for time / frequency plots: any of ``"points"`` (default),
+        ``"background"``, ``"intensity"``, ``"graph"``, or ``"bar"``. Ignored for
+        time-frequency, which renders a single fixed heatmap view.
+
+    Raises
+    ------
+    ValueError
+        If *exp* is a frequency / time-frequency explanation but carries no
+        ``exp.transform`` to derive the transformed signal from.
     """
     if visualization_type is None:
-        visualization_type = ["bubbles"]
+        visualization_type = ["points"]
     save_path = Path(save_path) if isinstance(save_path, str) else save_path
+    save_path.mkdir(parents=True, exist_ok=True)
 
-    if exp.explanation_domain in (Domain.FREQUENCY, Domain.TIME_FREQUENCY):
-        _plot_transformed_exp(exp, save_path, visualization_type)
-        return
-
-    n_samples = exp.data.shape[0]
-    multi_target = len(exp.exp_values.shape) == 4  # (n_classes, n_samples, C, T)
-
-    if multi_target:
-        # "all" targets: exp.exp_values shape = (n_classes, n_samples, C, T)
-        for class_ind, class_label in enumerate(exp.encoder.classes_):
-            for sample_ind in range(n_samples):
-                signal_i = exp.data[sample_ind : sample_ind + 1]
-                relevance_i = exp.exp_values[class_ind, sample_ind : sample_ind + 1]
-                sample_dir = save_path / f"index_{exp.indices[sample_ind]}"
-                sample_dir.mkdir(parents=True, exist_ok=True)
-                for vtype in visualization_type:
-                    fig_path = sample_dir / f"relevance_class_{class_label}_{vtype}.png"
-                    plot_relevance(
-                        signal_i, relevance_i, rel_type=vtype, save_path=fig_path
-                    )
-                    logger.info(
-                        "Saved explanation for sample with index %s to:\n%s",
-                        exp.indices[sample_ind],
-                        fig_path,
-                    )
-    else:
-        # Single target: exp.exp_values shape = (n_samples, C, T)
-        class_labels = exp.encoder.inverse_transform(exp.labels)
-        for sample_ind in range(n_samples):
-            signal_i = exp.data[sample_ind : sample_ind + 1]
-            relevance_i = exp.exp_values[sample_ind : sample_ind + 1]
-            sample_dir = save_path / f"index_{exp.indices[sample_ind]}"
-            sample_dir.mkdir(parents=True, exist_ok=True)
-            for vtype in visualization_type:
-                fig_path = (
-                    sample_dir
-                    / f"relevance_class_{class_labels[sample_ind]}_{vtype}.png"
-                )
-                plot_relevance(
-                    signal_i, relevance_i, rel_type=vtype, save_path=fig_path
-                )
-                logger.info(
-                    "Saved explanation for sample with index %s to:\n%s",
-                    exp.indices[sample_ind],
-                    fig_path,
-                )
-
-
-def _plot_transformed_exp(
-    exp: Explanation,
-    save_path: Path | None,
-    visualization_type: list,
-) -> None:
-    """
-    Render frequency / time-frequency explanations (single-target).
-
-    The transformed input is *derived* on demand via ``exp.transform`` rather
-    than stored on the Explanation, then handed to
-    :func:`~xai4tsc.utils.plot.plot_relevance_f` (frequency) or
-    :func:`~xai4tsc.utils.plot.plot_relevance_tf` (time-frequency).
-    """
-    if exp.transform is None:
+    is_transformed = exp.explanation_domain in (Domain.FREQUENCY, Domain.TIME_FREQUENCY)
+    if is_transformed and exp.transform is None:
         raise ValueError(
             f"Cannot plot a {exp.explanation_domain.value} explanation without "
             "exp.transform (the domain transform); none is set."
         )
-    signal = (
-        exp.transform.forward(torch.as_tensor(exp.data, dtype=torch.float32))
-        .cpu()
-        .numpy()
-    )
-    class_labels = (
-        exp.encoder.inverse_transform(exp.labels)
-        if exp.encoder is not None
-        else exp.labels
-    )
-    is_tf = exp.explanation_domain == Domain.TIME_FREQUENCY
+
+    # Frequency / time-frequency explanations plot against the transformed signal,
+    # derived on demand; time-domain explanations plot against the raw series.
+    if is_transformed:
+        signal = (
+            exp.transform.forward(torch.as_tensor(exp.data, dtype=torch.float32))
+            .cpu()
+            .numpy()
+        )
+    else:
+        signal = exp.data
+
+    multi_target = is_multi_target(exp)
+    class_labels = None if multi_target else exp.encoder.inverse_transform(exp.labels)
 
     for sample_ind in range(exp.data.shape[0]):
         signal_i = signal[sample_ind : sample_ind + 1]
-        relevance_i = exp.exp_values[sample_ind : sample_ind + 1]
-        sample_dir = save_path / f"index_{exp.indices[sample_ind]}"
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        label = class_labels[sample_ind]
-        if is_tf:
-            fig_path = sample_dir / f"relevance_class_{label}_timefrequency.png"
-            plot_relevance_tf(signal_i, relevance_i, save_path=fig_path)
+        idx = exp.indices[sample_ind]
+        # Normalise both target modes to a list of (label, relevance) pairs so the
+        # per-domain dispatch below is written once. Multi-target stacks a class
+        # axis first: exp_values[class, sample]; single-target is exp_values[sample].
+        if multi_target:
+            items = [
+                (label, exp.exp_values[class_ind, sample_ind : sample_ind + 1])
+                for class_ind, label in enumerate(exp.encoder.classes_)
+            ]
         else:
-            for vtype in visualization_type:
-                fig_path = sample_dir / f"relevance_class_{label}_frequency_{vtype}.png"
-                plot_relevance_f(
-                    signal_i, relevance_i, rel_type=vtype, save_path=fig_path
+            items = [
+                (class_labels[sample_ind], exp.exp_values[sample_ind : sample_ind + 1])
+            ]
+
+        for label, relevance_i in items:
+            base = save_path / f"relevance_index_{idx}_class_{label}"
+            if exp.explanation_domain == Domain.TIME_FREQUENCY:
+                # Time-frequency renders a single fixed heatmap view (no rel_type).
+                fig_path = Path(f"{base}_timefrequency.png")
+                plot_relevance_tf(signal_i, relevance_i, save_path=fig_path)
+            else:
+                plotter = (
+                    plot_relevance
+                    if exp.explanation_domain == Domain.TIME
+                    else plot_relevance_f
                 )
-        logger.info(
-            "Saved %s explanation for sample with index %s to:\n%s",
-            exp.explanation_domain.value,
-            exp.indices[sample_ind],
-            sample_dir,
-        )
+                infix = "" if exp.explanation_domain == Domain.TIME else "_frequency"
+                for vtype in visualization_type:
+                    fig_path = Path(f"{base}{infix}_{vtype}.png")
+                    plotter(signal_i, relevance_i, rel_type=vtype, save_path=fig_path)
+
+            logger.info(
+                "Saved %s explanation for sample with index %s to:\n%s",
+                exp.explanation_domain.value,
+                idx,
+                fig_path,
+            )
 
 
 EXPLAINERS = {

@@ -62,7 +62,14 @@ class Explanation:
     explanation_type : str
         Category of explanation, e.g. ``"feature_attribution"``.
     exp_values : np.ndarray
-        Raw explanation values; same shape as ``data``.
+        Raw explanation values. Rank depends on ``explanation_domain``: a
+        single-target explanation is ``(n_samples, C, T)`` for :attr:`Domain.TIME`
+        and :attr:`Domain.FREQUENCY` (``T`` is the coefficient count for the
+        latter) and ``(n_samples, C, n_freq, n_time)`` for
+        :attr:`Domain.TIME_FREQUENCY`. Explaining all classes (``targets="all"``)
+        prepends a leading class axis, so the rank is one higher; use
+        :func:`is_multi_target` to detect this rather than inspecting ``ndim``
+        alone.
     data : np.ndarray
         Original input samples that were explained, shape ``(N, C, T)``.
     labels : np.ndarray
@@ -104,3 +111,38 @@ class Explanation:
     explanation_domain: Domain = Domain.TIME
     transform: DomainTransform | None = None
     metadata: list | None = None
+
+
+# Rank of a *single-target* ``exp_values`` array per explanation domain. Frequency
+# is a 1-D coefficient axis like time ``(n, C, F)``; time-frequency adds a second
+# spectral axis ``(n, C, n_freq, n_time)``. Explaining all classes prepends a
+# leading class axis, so the multi-target rank is this value plus one.
+_SINGLE_TARGET_NDIM = {
+    Domain.TIME: 3,
+    Domain.FREQUENCY: 3,
+    Domain.TIME_FREQUENCY: 4,
+}
+
+
+def is_multi_target(exp: Explanation) -> bool:
+    """
+    Report whether an explanation holds one attribution per class.
+
+    A ``targets="all"`` explanation stacks a per-class attribution on a leading
+    axis, so its ``exp_values`` rank is one higher than a single-target array in
+    the same domain. Because the single-target rank differs by domain (3 for
+    time / frequency, 4 for time-frequency), the domain is required to tell a
+    multi-target array apart from a single-target time-frequency one (both 4-D).
+
+    Parameters
+    ----------
+    exp : Explanation
+        The explanation to inspect (uses ``exp_values`` and
+        ``explanation_domain``).
+
+    Returns
+    -------
+    bool
+        ``True`` when ``exp.exp_values`` carries a leading per-class axis.
+    """
+    return exp.exp_values.ndim == _SINGLE_TARGET_NDIM[exp.explanation_domain] + 1

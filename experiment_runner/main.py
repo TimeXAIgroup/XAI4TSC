@@ -41,7 +41,7 @@ from xai4tsc.evaluation.evaluate import METRICS
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils.utils import merge_dicts
-from xai4tsc.xai import Domain
+from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
 from .config import config_resolve, config_sanity_check
@@ -507,15 +507,13 @@ def main(config_path: str, debug: bool = False) -> None:
 
                                 exp_data = test_data[explanation.indices]
 
-                                # Multi-target ("all") is a time-domain 4-D stack
-                                # (n_classes, n, C, T). A time-frequency explanation
-                                # is ALSO 4-D (n, C, n_freq, n_time) but single
-                                # target, so gate on the domain to avoid mistaking
-                                # it for multi-target.
-                                multi_target = (
-                                    explanation.explanation_domain == Domain.TIME
-                                    and explanation.exp_values.ndim == 4
-                                )
+                                # Multi-target ("all") stacks one attribution per
+                                # class on a leading axis. Detection is domain-aware
+                                # (via is_multi_target), so a single-target
+                                # time-frequency explanation — also 4-D — is not
+                                # mistaken for a multi-target one, and freq/TF
+                                # multi-target stacks are split just like time ones.
+                                multi_target = is_multi_target(explanation)
                                 if multi_target:
                                     # target="all": one attribution per class.
                                     # Evaluate each class separately (Quantus

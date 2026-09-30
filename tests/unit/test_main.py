@@ -2,7 +2,11 @@
 
 import numpy as np
 import pytest
-from experiment_runner.main import _aggregate_metric, expand_datasets
+from experiment_runner.main import (
+    _aggregate_metric,
+    _format_dataset_list,
+    expand_datasets,
+)
 
 
 @pytest.mark.unit
@@ -97,3 +101,38 @@ def test_expand_datasets_overrides_on_non_archive_warns_and_drops(caplog):
         )
     assert out == [{"dataset": "GunPoint"}]
     assert "overrides" in caplog.text.lower()
+
+
+# ── _format_dataset_list ────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_format_dataset_list_empty():
+    assert _format_dataset_list([]) == ""
+
+
+@pytest.mark.unit
+def test_format_dataset_list_short_lists_are_named_in_full():
+    assert _format_dataset_list(["A (#1)", "B (#2)"]) == "A (#1), B (#2)"
+
+
+@pytest.mark.unit
+def test_format_dataset_list_at_limit_is_not_truncated():
+    labels = [f"D{i}" for i in range(10)]
+    out = _format_dataset_list(labels, limit=10)
+    assert out == ", ".join(labels)
+    assert "more" not in out
+
+
+@pytest.mark.unit
+def test_format_dataset_list_truncates_beyond_limit():
+    # An archive wildcard expands to 128 entries; the line must stay readable.
+    out = _format_dataset_list([f"D{i}" for i in range(128)], limit=10)
+    assert out.startswith("D0, D1,")
+    assert out.endswith(", ... and 118 more")
+    assert "D10" not in out.split("...")[0]
+
+
+@pytest.mark.unit
+def test_format_dataset_list_truncation_counts_remainder_exactly():
+    assert _format_dataset_list(["a", "b", "c"], limit=2) == "a, b, ... and 1 more"

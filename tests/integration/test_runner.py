@@ -143,3 +143,89 @@ def test_runner_cache_invalidation(ucr_dataset_path, tmp_path, monkeypatch):
         assert folder in folders_after_run2, (
             f"Original split folder disappeared: {folder}"
         )
+
+
+# ── failure reporting ─────────────────────────────────────────────────────────
+
+
+def _experiment_dir(results_rel: str) -> Path:
+    """
+    Return the run directory under *results_rel*.
+
+    ``initial_setup`` appends a timestamp suffix when the directory already
+    exists, so the name is matched by prefix rather than assumed.
+    """
+    candidates = sorted(Path(results_rel).glob("test_run*"))
+    assert candidates, f"No run directory under {results_rel}"
+    return candidates[-1]
+
+
+@pytest.mark.integration
+def test_runner_returns_zero_when_all_datasets_complete(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A fully successful run returns 0 and reports no failures."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_ok"
+
+    config = _resolve_config(cache_root, results_rel)
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 0
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "1/1 dataset(s) completed, 0 skipped, 0 failed" in log
+    assert "Failed dataset(s)" not in log
+
+
+@pytest.mark.integration
+def test_runner_reports_and_returns_dataset_failures(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A failing dataset is counted, named in the summary, and returned."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_fail"
+
+    config = _resolve_config(cache_root, results_rel)
+    # PatchTST validates d_model % nhead == 0, so this raises at construction
+    # and the dataset iteration's `except` catches it.
+    config["train_config"]["models"] = [
+        {
+            "model": "PatchTST",
+            "init_params": {
+                "in_channels": 1,
+                "num_classes": 2,
+                "d_model": 30,
+                "nhead": 7,
+            },
+        }
+    ]
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 1, "A failed dataset must be reported in the return value"
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "0/1 dataset(s) completed, 0 skipped, 1 failed" in log
+    assert "Failed dataset(s): GunPoint" in log
+
+
+@pytest.mark.integration
+def test_runner_counts_skipped_datasets_separately(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """`skip_dataset` counts as skipped, not completed, and is not a failure."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_skip"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["data_config"]["datasets"][0]["skip_dataset"] = True
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 0
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "0/1 dataset(s) completed, 1 skipped, 0 failed" in log
+    assert "Skipped dataset(s): GunPoint" in log

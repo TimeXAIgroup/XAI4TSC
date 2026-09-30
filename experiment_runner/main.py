@@ -124,7 +124,32 @@ def _aggregate_metric(evaluation: object) -> float | None:
     return float(np.nanmean(arr))
 
 
-def main(config_path: str, debug: bool = False) -> None:
+def _format_dataset_list(labels: list[str], limit: int = 10) -> str:
+    """
+    Join dataset labels for a single log line, truncating long lists.
+
+    An archive wildcard expands to 128 (UCR) or 33 (UEA) entries, so a run that
+    skips most of them would otherwise emit a line thousands of characters wide.
+
+    Parameters
+    ----------
+    labels : list of str
+        Dataset labels, already formatted for display.
+    limit : int
+        Maximum number of labels to name before summarising the remainder.
+
+    Returns
+    -------
+    str
+        Comma-separated labels, suffixed with ``, ... and N more`` when there
+        are more than *limit* of them.
+    """
+    if len(labels) <= limit:
+        return ", ".join(labels)
+    return f"{', '.join(labels[:limit])}, ... and {len(labels) - limit} more"
+
+
+def main(config_path: str, debug: bool = False) -> int:
     """
     Run a complete XAI evaluation experiment from a YAML configuration file.
 
@@ -132,6 +157,14 @@ def main(config_path: str, debug: bool = False) -> None:
     explainers → metrics. Results are saved as ``metrics.csv`` at three
     granularity levels (global, per-dataset, per-model) under
     ``results_rel_path``.
+
+    Returns
+    -------
+    int
+        Number of datasets that failed. ``0`` means every configured dataset
+        either completed or was explicitly skipped, so callers can treat a
+        non-zero value as "this run needs attention" (the CLI turns it into a
+        non-zero exit status).
     """
     config = initial_setup(config_path, debug=debug)
     config = config_resolve(config, master_path=MASTER_CONFIG)
@@ -198,10 +231,16 @@ def main(config_path: str, debug: bool = False) -> None:
             uses_uea_wildcard=_uses_uea,
         )
 
+    # Capture per-dataset outcomes, to report in the summary.
+    completed_datasets: list[str] = []
+    skipped_datasets: list[str] = []
+    failed_datasets: list[str] = []
+
     # Step 1: Prepare the data
     for d_ind, dataset in enumerate(d_con["datasets"]):
         ds = splits = encoder = None
         train_data = train_labels = test_data = test_labels = None
+        dataset_label = f"{dataset['dataset']} (#{d_ind + 1})"
         try:
             # Log dataset preparation
             logger.info(
@@ -219,6 +258,7 @@ def main(config_path: str, debug: bool = False) -> None:
                 logger.info(
                     "Skipping dataset '%s' (skip_dataset: true).", dataset["dataset"]
                 )
+                skipped_datasets.append(dataset_label)
                 continue
 
             dataset_path = Path(config["results_rel_path"]) / dataset["dataset"]
@@ -603,10 +643,11 @@ def main(config_path: str, debug: bool = False) -> None:
                     elif device.type == "mps":
                         torch.mps.empty_cache()
                     gc.collect()
+
+            completed_datasets.append(dataset_label)
         except Exception:
-            logger.exception(
-                "Dataset '%s' failed, skipping.", dataset.get("dataset", "unknown")
-            )
+            failed_datasets.append(dataset_label)
+            logger.exception("Dataset '%s' failed, skipping.", dataset["dataset"])
         finally:
             del ds, splits, encoder, train_data, train_labels, test_data, test_labels
             gc.collect()
@@ -641,7 +682,24 @@ def main(config_path: str, debug: bool = False) -> None:
             group.to_csv(path, index=False)
             logger.info("Model metrics saved to %s", path)
 
-    logger.info("\n--- Experiment Finished ---")
+    # Print dataset summary
+    logger.info(
+        "\n--- Experiment Finished: %d/%d dataset(s) completed, %d skipped, "
+        "%d failed ---",
+        len(completed_datasets),
+        len(d_con["datasets"]),
+        len(skipped_datasets),
+        len(failed_datasets),
+    )
+    if skipped_datasets:
+        logger.info("Skipped dataset(s): %s", _format_dataset_list(skipped_datasets))
+    if failed_datasets:
+        logger.error(
+            "Failed dataset(s): %s - see the tracebacks above.",
+            _format_dataset_list(failed_datasets),
+        )
+
+    return len(failed_datasets)
 
 
 def initial_setup(config_path: str, debug: bool = False) -> dict:
@@ -720,4 +778,6 @@ if __name__ == "__main__":
         help="Enable debug-level logging",
     )
     args = parser.parse_args()
-    main(args.conf, debug=args.debug)
+
+    # Exit non-zero if any dataset failed
+    sys.exit(1 if main(args.conf, debug=args.debug) else 0)

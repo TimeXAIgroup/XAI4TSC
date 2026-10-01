@@ -24,12 +24,6 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from sktime.datasets.tsc_dataset_names import (
-    multivariate as _UEA_NAMES,  # noqa: N812 — uppercase denotes a constant
-)
-from sktime.datasets.tsc_dataset_names import (
-    univariate as _UCR_NAMES,  # noqa: N812 — uppercase denotes a constant
-)
 
 from xai4tsc.data import (
     SYNTHETIC_DATASETS,
@@ -44,109 +38,23 @@ from xai4tsc.utils.utils import merge_dicts
 from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
-from .config import config_resolve, config_sanity_check
+from .config import config_resolve, config_sanity_check, disambiguate
 from .download_datasets import ensure_datasets_cached
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
 from .log_setup import _add_file_logging, _setup_console_logging
+from .utils import (
+    _METRICS_COLUMNS,
+    _aggregate_metric,
+    _format_label_list,
+    _result_row,
+    expand_datasets,
+)
 
 logger = logging.getLogger("xai4tsc.runner")
 
 _HERE = Path(__file__).parent
 MASTER_CONFIG = _HERE / "configs" / "master.yaml"
-
-# Reserved keywords that expand to all datasets in the corresponding archive.
-_ARCHIVE_KEYWORDS = {"UCR": _UCR_NAMES, "UEA": _UEA_NAMES}
-
-
-def expand_datasets(datasets: list[dict]) -> list[dict]:
-    """
-    Expand archive wildcards and resolve per-member ``overrides``.
-
-    Each entry is either a concrete dataset or an archive keyword
-    (``UCR`` / ``UEA``) that expands to all its member datasets. An entry's
-    inline settings apply to every member it produces; an optional
-    ``overrides`` map (``{dataset_name: {setting: value}}``) sets per-member
-    exceptions that take precedence over the entry's inline settings.
-
-    Parameters
-    ----------
-    datasets : list[dict]
-        Raw ``data_config["datasets"]`` entries.
-
-    Returns
-    -------
-    list[dict]
-        Concrete dataset entries with ``overrides`` resolved and stripped.
-    """
-    expanded: list[dict] = []
-    for entry in datasets:
-        overrides = entry.get("overrides") or {}
-        base = {k: v for k, v in entry.items() if k != "overrides"}
-        archive = _ARCHIVE_KEYWORDS.get(base.get("dataset"))
-        if archive is not None:
-            for name in set(overrides) - set(archive):
-                logger.warning(
-                    "Ignoring override for '%s': not a member of archive '%s'.",
-                    name,
-                    base["dataset"],
-                )
-            for name in archive:
-                member = {**base, "dataset": name}
-                if name in overrides:
-                    # overrides[name] wins over the entry's inline settings.
-                    member = merge_dicts(copy.deepcopy(overrides[name]), member)
-                expanded.append(member)
-        else:
-            if overrides:
-                logger.warning(
-                    "Ignoring 'overrides' on non-archive dataset '%s'; "
-                    "set per-dataset values inline instead.",
-                    base.get("dataset"),
-                )
-            expanded.append(base)
-    return expanded
-
-
-def _aggregate_metric(evaluation: object) -> float | None:
-    """
-    Reduce a Quantus metric result to a single float.
-
-    Most Quantus metrics return one score per explained instance; average them
-    so the recorded value reflects the whole sample, not just the first element.
-    Scalars pass through unchanged. Returns ``None`` for empty/all-NaN results.
-    """
-    if evaluation is None:
-        return None
-    arr = np.asarray(evaluation, dtype=float).ravel()
-    if arr.size == 0 or np.all(np.isnan(arr)):
-        return None
-    return float(np.nanmean(arr))
-
-
-def _format_dataset_list(labels: list[str], limit: int = 10) -> str:
-    """
-    Join dataset labels for a single log line, truncating long lists.
-
-    An archive wildcard expands to 128 (UCR) or 33 (UEA) entries, so a run that
-    skips most of them would otherwise emit a line thousands of characters wide.
-
-    Parameters
-    ----------
-    labels : list of str
-        Dataset labels, already formatted for display.
-    limit : int
-        Maximum number of labels to name before summarising the remainder.
-
-    Returns
-    -------
-    str
-        Comma-separated labels, suffixed with ``, ... and N more`` when there
-        are more than *limit* of them.
-    """
-    if len(labels) <= limit:
-        return ", ".join(labels)
-    return f"{', '.join(labels[:limit])}, ... and {len(labels) - limit} more"
 
 
 def main(config_path: str, debug: bool = False) -> int:
@@ -158,10 +66,16 @@ def main(config_path: str, debug: bool = False) -> int:
     granularity levels (global, per-dataset, per-model) under
     ``results_rel_path``.
 
+    Failures are isolated at the level they occur: a raising metric costs only
+    that metric, a raising explainer only that explainer, and a raising model
+    only that model, so the rest of the dataset's results are still collected
+    and written.
+
     Returns
     -------
     int
-        Number of datasets that failed. ``0`` means every configured dataset
+        Total number of failures across all four levels (datasets, models,
+        explainers and metric evaluations). ``0`` means everything configured
         either completed or was explicitly skipped, so callers can treat a
         non-zero value as "this run needs attention" (the CLI turns it into a
         non-zero exit status).
@@ -187,6 +101,15 @@ def main(config_path: str, debug: bool = False) -> int:
 
     # Expand "UCR" / "UEA" keywords and resolve per-member overrides.
     d_con["datasets"] = expand_datasets(d_con["datasets"])
+
+    # Construct identifiers for each dataset/model/explainer/metric, allows
+    # running same instances multiple times
+    dataset_ids = disambiguate([d["dataset"] for d in d_con["datasets"]])
+    model_ids = disambiguate([m["model"] for m in t_con["models"]])
+    explainer_ids = disambiguate(
+        [_explainer_display_name(e) for e in e_con["explainers"]]
+    )
+    metric_ids = disambiguate([m["metric"] for m in eval_con["metrics"]])
     logger.info("Running experiment on %d dataset(s).", len(d_con["datasets"]))
 
     # Make results reproducible
@@ -235,12 +158,19 @@ def main(config_path: str, debug: bool = False) -> int:
     completed_datasets: list[str] = []
     skipped_datasets: list[str] = []
     failed_datasets: list[str] = []
+    # Failures inside a dataset are isolated at their own level so one bad
+    # component does not discard the rest of the dataset's results. Each list
+    # holds "dataset/model/explainer/metric" style labels, trimmed to the level
+    # that failed.
+    failed_models: list[str] = []
+    failed_explainers: list[str] = []
+    failed_metrics: list[str] = []
 
     # Step 1: Prepare the data
     for d_ind, dataset in enumerate(d_con["datasets"]):
         ds = splits = encoder = None
         train_data = train_labels = test_data = test_labels = None
-        dataset_label = f"{dataset['dataset']} (#{d_ind + 1})"
+        dataset_id = dataset_ids[d_ind]
         try:
             # Log dataset preparation
             logger.info(
@@ -258,10 +188,10 @@ def main(config_path: str, debug: bool = False) -> int:
                 logger.info(
                     "Skipping dataset '%s' (skip_dataset: true).", dataset["dataset"]
                 )
-                skipped_datasets.append(dataset_label)
+                skipped_datasets.append(dataset_id)
                 continue
 
-            dataset_path = Path(config["results_rel_path"]) / dataset["dataset"]
+            dataset_path = Path(config["results_rel_path"]) / dataset_id
             dataset_path.mkdir(parents=True, exist_ok=True)
 
             if dataset.get("is_presplit"):
@@ -405,14 +335,15 @@ def main(config_path: str, debug: bool = False) -> int:
                             dataset["dataset"],
                         )
 
-                    model_path = dataset_path / model_config["model"]
+                    model_id = model_ids[m_ind]
+                    model_path = dataset_path / model_id
                     model_path.mkdir(parents=True, exist_ok=True)
 
                     # Attach a per-model log file capturing this model's
                     # training, explanation, and evaluation. Detached in the
                     # finally below so it never leaks into the next model.
                     model_log = add_file_log(
-                        model_path / f"{dataset['dataset']}_{model_config['model']}.log"
+                        model_path / f"{dataset_id}_{model_id}.log"
                     )
 
                     # Load the model
@@ -461,7 +392,12 @@ def main(config_path: str, debug: bool = False) -> int:
                         try:
                             # Log explanation generation. For wrapper methods
                             # show "WRAPPER-BASE" (e.g. SIGN-Integrated_Gradients).
-                            explainer = _explainer_display_name(explainer_config)
+                            explainer = explainer_ids[e_ind]
+                            explanation_dir = (
+                                model_path
+                                / "explanations"
+                                / f"explanations_{explainer}"
+                            )
                             logger.info(
                                 "%s/%s: Generating %s explanations...",
                                 e_ind + 1,
@@ -491,6 +427,7 @@ def main(config_path: str, debug: bool = False) -> int:
                                     "val_set": val_data,
                                 },
                                 metadata=test_metadata,
+                                explanation_dir=explanation_dir,
                             )
 
                             logger.info(
@@ -515,12 +452,15 @@ def main(config_path: str, debug: bool = False) -> int:
                                     len(eval_con["metrics"]),
                                     metric_config["metric"],
                                 )
+                                metric_name = metric_config["metric"]
+                                metric_id = metric_ids[metric_ind]
+                                metric_label = (
+                                    f"{dataset_id}/{model_id}/{explainer}/{metric_id}"
+                                )
 
                                 # Skip domain-restricted metrics on incompatible
                                 # explanations (e.g. a frequency metric on a
-                                # time-domain attribution), so mixed configs don't
-                                # abort. config_sanity_check already guarantees each
-                                # such metric has at least one compatible explainer.
+                                # time-domain attribution)
                                 required_domains = getattr(
                                     METRICS.get(metric_config["metric"]),
                                     "required_domains",
@@ -531,110 +471,166 @@ def main(config_path: str, debug: bool = False) -> int:
                                     and explanation.explanation_domain
                                     not in required_domains
                                 ):
+                                    domains = {d.value for d in required_domains}
                                     logger.info(
                                         "Skipping %s: requires domain %s but "
                                         "explanation is %s.",
                                         metric_config["metric"],
-                                        {d.value for d in required_domains},
+                                        domains,
                                         explanation.explanation_domain.value,
                                     )
+                                    metric_rows.append(
+                                        _result_row(
+                                            dataset_id,
+                                            model_id,
+                                            explainer,
+                                            metric_ids[metric_ind],
+                                            "skipped-domain",
+                                            detail=(
+                                                f"requires {sorted(domains)}, "
+                                                "explanation is "
+                                                f"{explanation.explanation_domain.value}"
+                                            ),
+                                        )
+                                    )
                                     continue
+                                try:
+                                    # Update settings
+                                    metric_config = merge_dicts(
+                                        metric_config, eval_con["default_settings"]
+                                    )
 
-                                # Update settings
-                                metric_config = merge_dicts(
-                                    metric_config, eval_con["default_settings"]
-                                )
+                                    exp_data = test_data[explanation.indices]
 
-                                exp_data = test_data[explanation.indices]
-
-                                # Multi-target ("all") stacks one attribution per
-                                # class on a leading axis. Detection is domain-aware
-                                # (via is_multi_target), so a single-target
-                                # time-frequency explanation — also 4-D — is not
-                                # mistaken for a multi-target one, and freq/TF
-                                # multi-target stacks are split just like time ones.
-                                multi_target = is_multi_target(explanation)
-                                if multi_target:
-                                    # target="all": one attribution per class.
-                                    # Evaluate each class separately (Quantus
-                                    # needs a 3-D a_batch) and average. y_batch is
-                                    # the explained class so the metric measures
-                                    # faithfulness w.r.t. that class's output.
-                                    n_classes = explanation.exp_values.shape[0]
-                                    class_scores = []
-                                    for class_idx in range(n_classes):
-                                        class_exp = dataclasses.replace(
-                                            explanation,
-                                            exp_values=explanation.exp_values[
-                                                class_idx
-                                            ],
+                                    # Multi-target ("all") stacks one attribution per
+                                    # class on a leading axis. Detection is domain-aware
+                                    # (via is_multi_target), so a single-target
+                                    # time-frequency explanation — also 4-D — is not
+                                    # mistaken for a multi-target one, and freq/TF
+                                    # multi-target stacks are split just like time ones.
+                                    multi_target = is_multi_target(explanation)
+                                    if multi_target:
+                                        # target="all": one attribution per class.
+                                        n_classes = explanation.exp_values.shape[0]
+                                        class_scores = []
+                                        for class_idx in range(n_classes):
+                                            class_exp = dataclasses.replace(
+                                                explanation,
+                                                exp_values=explanation.exp_values[
+                                                    class_idx
+                                                ],
+                                            )
+                                            class_labels = np.full(
+                                                len(explanation.indices), class_idx
+                                            )
+                                            result = _evaluate(
+                                                model=model_wrapper,
+                                                metric_conf=metric_config,
+                                                explanation=class_exp,
+                                                data=exp_data,
+                                                labels=class_labels,
+                                                device=device,
+                                            )
+                                            agg = _aggregate_metric(result)
+                                            if agg is not None:
+                                                class_scores.append(agg)
+                                        score = (
+                                            float(np.mean(class_scores))
+                                            if class_scores
+                                            else None
                                         )
-                                        class_labels = np.full(
-                                            len(explanation.indices), class_idx
-                                        )
-                                        result = _evaluate(
+                                    else:
+                                        evaluation = _evaluate(
                                             model=model_wrapper,
                                             metric_conf=metric_config,
-                                            explanation=class_exp,
+                                            explanation=explanation,
                                             data=exp_data,
-                                            labels=class_labels,
+                                            labels=test_labels[explanation.indices],
                                             device=device,
                                         )
-                                        agg = _aggregate_metric(result)
-                                        if agg is not None:
-                                            class_scores.append(agg)
-                                    score = (
-                                        float(np.mean(class_scores))
-                                        if class_scores
-                                        else None
-                                    )
-                                else:
-                                    evaluation = _evaluate(
-                                        model=model_wrapper,
-                                        metric_conf=metric_config,
-                                        explanation=explanation,
-                                        data=exp_data,
-                                        labels=test_labels[explanation.indices],
-                                        device=device,
-                                    )
-                                    score = _aggregate_metric(evaluation)
+                                        score = _aggregate_metric(evaluation)
 
-                                if score is not None:
+                                    if score is None:
+                                        metric_rows.append(
+                                            _result_row(
+                                                dataset_id,
+                                                model_id,
+                                                explainer,
+                                                metric_id,
+                                                "nan",
+                                                detail=(
+                                                    "metric returned an empty or "
+                                                    "all-NaN result"
+                                                ),
+                                            )
+                                        )
+                                    else:
+                                        metric_rows.append(
+                                            _result_row(
+                                                dataset_id,
+                                                model_id,
+                                                explainer,
+                                                metric_id,
+                                                "ok",
+                                                score=score,
+                                            )
+                                        )
+
+                                    # Optional: render a perturbation-process GIF
+                                    if metric_config.get("animate"):
+                                        anim_dir = explanation_dir
+                                        anim_dir.mkdir(parents=True, exist_ok=True)
+                                        metric_slug = metric_id.replace(" ", "_")
+                                        _animate(
+                                            model=model_wrapper,
+                                            metric_conf=metric_config,
+                                            explanation=explanation,
+                                            data=exp_data,
+                                            labels=test_labels[explanation.indices],
+                                            save_path=anim_dir
+                                            / f"animation_{metric_slug}.gif",
+                                        )
+                                except Exception as exc:
+                                    failed_metrics.append(metric_label)
                                     metric_rows.append(
-                                        {
-                                            "dataset": dataset["dataset"],
-                                            "model": model_config["model"],
-                                            "explainer": explainer,
-                                            "metric": metric_config["metric"],
-                                            "score": score,
-                                        }
+                                        _result_row(
+                                            dataset_id,
+                                            model_id,
+                                            explainer,
+                                            metric_id,
+                                            "error",
+                                            detail=f"{type(exc).__name__}: {exc}",
+                                        )
+                                    )
+                                    logger.exception(
+                                        "Metric '%s' failed for %s, skipping to "
+                                        "the next metric.",
+                                        metric_name,
+                                        metric_label,
                                     )
 
-                                # Optional: render a perturbation-process GIF
-                                # (only reached for compatible freq/TF pairs, since
-                                # incompatible ones were skipped above).
-                                if metric_config.get("animate"):
-                                    anim_dir = (
-                                        model_path
-                                        / "explanations"
-                                        / f"explanations_{explainer}"
-                                    )
-                                    anim_dir.mkdir(parents=True, exist_ok=True)
-                                    metric_slug = metric_config["metric"].replace(
-                                        " ", "_"
-                                    )
-                                    _animate(
-                                        model=model_wrapper,
-                                        metric_conf=metric_config,
-                                        explanation=explanation,
-                                        data=exp_data,
-                                        labels=test_labels[explanation.indices],
-                                        save_path=anim_dir
-                                        / f"animation_{metric_slug}.gif",
-                                    )
+                        except Exception:
+                            failed_explainers.append(
+                                f"{dataset_id}/{model_id}/{explainer}"
+                            )
+                            logger.exception(
+                                "Explainer '%s' failed on %s/%s, skipping to the "
+                                "next explainer.",
+                                explainer,
+                                dataset["dataset"],
+                                model_config["model"],
+                            )
                         finally:
                             del explanation
                             gc.collect()
+                except Exception:
+                    failed_models.append(f"{dataset_id}/{model_id}")
+                    logger.exception(
+                        "Model '%s' failed on dataset '%s', skipping to the next "
+                        "model.",
+                        model_config["model"],
+                        dataset["dataset"],
+                    )
                 finally:
                     remove_file_log(model_log)
                     del model_wrapper
@@ -644,23 +640,30 @@ def main(config_path: str, debug: bool = False) -> int:
                         torch.mps.empty_cache()
                     gc.collect()
 
-            completed_datasets.append(dataset_label)
+            completed_datasets.append(dataset_id)
         except Exception:
-            failed_datasets.append(dataset_label)
+            failed_datasets.append(dataset_id)
             logger.exception("Dataset '%s' failed, skipping.", dataset["dataset"])
         finally:
             del ds, splits, encoder, train_data, train_labels, test_data, test_labels
             gc.collect()
 
-    # Save results
+    df = pd.DataFrame(metric_rows, columns=_METRICS_COLUMNS)
+
+    # Global — all results
+    global_path = Path(config["results_rel_path"]) / "metrics.csv"
+    df.to_csv(global_path, index=False)
     if metric_rows:
-        df = pd.DataFrame(metric_rows)
-
-        # Global — all results
-        global_path = Path(config["results_rel_path"]) / "metrics.csv"
-        df.to_csv(global_path, index=False)
         logger.info("Global metrics saved to %s", global_path)
+    else:
+        logger.warning(
+            "No metric results were produced; wrote a header-only %s. Check the "
+            "failures reported below and that the configured metrics are "
+            "compatible with the configured explainers.",
+            global_path,
+        )
 
+    if metric_rows:
         # Per dataset — derive path from "dataset" column
         for dataset_name, group in df.groupby("dataset"):
             path = (
@@ -692,14 +695,33 @@ def main(config_path: str, debug: bool = False) -> int:
         len(failed_datasets),
     )
     if skipped_datasets:
-        logger.info("Skipped dataset(s): %s", _format_dataset_list(skipped_datasets))
+        logger.info("Skipped dataset(s): %s", _format_label_list(skipped_datasets))
     if failed_datasets:
         logger.error(
             "Failed dataset(s): %s - see the tracebacks above.",
-            _format_dataset_list(failed_datasets),
+            _format_label_list(failed_datasets),
         )
 
-    return len(failed_datasets)
+    # Failures inside a dataset are reported separately
+    for label, failures in (
+        ("model(s)", failed_models),
+        ("explainer(s)", failed_explainers),
+        ("metric evaluation(s)", failed_metrics),
+    ):
+        if failures:
+            logger.error(
+                "Failed %s (%d): %s - see the tracebacks above.",
+                label,
+                len(failures),
+                _format_label_list(failures),
+            )
+
+    return (
+        len(failed_datasets)
+        + len(failed_models)
+        + len(failed_explainers)
+        + len(failed_metrics)
+    )
 
 
 def initial_setup(config_path: str, debug: bool = False) -> dict:

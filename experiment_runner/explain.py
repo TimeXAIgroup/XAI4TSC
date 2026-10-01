@@ -102,6 +102,7 @@ def _generate_explanation(
     save_path: Path | None = None,
     splits: dict[str, np.ndarray | None] | None = None,
     metadata: list | None = None,
+    explanation_dir: Path | None = None,
 ) -> Explanation:
     """
     Runner wrapper: unpacks config dicts and delegates to generate_explanation().
@@ -137,6 +138,12 @@ def _generate_explanation(
         Per-sample test-split metadata (ground-truth localization). When present,
         the subset for the explained ``indices`` is attached to
         ``explanation.metadata`` for ground-truth metrics (e.g. TimeFrequencyAUC).
+    explanation_dir : Path, optional
+        Directory to write this explainer's artifacts into. The caller supplies it
+        so that repeated entries for one method can be kept apart (see
+        :func:`~experiment_runner.config.disambiguate`); when ``None`` it falls
+        back to ``<save_path>/explanations/explanations_<display name>``, which
+        keeps direct callers working but cannot disambiguate duplicates.
 
     Returns
     -------
@@ -150,12 +157,13 @@ def _generate_explanation(
             explainer_config["background_data"], splits
         )
 
-    base = save_path if save_path is not None else Path(config["results_rel_path"])
-    explanation_dir = (
-        base
-        / "explanations"
-        / f"explanations_{_explainer_display_name(explainer_config)}"
-    )
+    if explanation_dir is None:
+        base = save_path if save_path is not None else Path(config["results_rel_path"])
+        explanation_dir = (
+            base
+            / "explanations"
+            / f"explanations_{_explainer_display_name(explainer_config)}"
+        )
     visualization_type = explainer_config.get("visualization_type", ["points"])
 
     # Explain only certain samples addressed by index

@@ -44,7 +44,7 @@ def test_runner_end_to_end(ucr_dataset_path, tmp_path, monkeypatch):
 
     main(str(config_path))
 
-    experiment_dir = Path(results_rel) / "test_run"
+    experiment_dir = _experiment_dir(results_rel)
     assert experiment_dir.exists(), f"Results dir not created: {experiment_dir}"
 
     metrics_csv = experiment_dir / "metrics.csv"
@@ -52,9 +52,13 @@ def test_runner_end_to_end(ucr_dataset_path, tmp_path, monkeypatch):
 
     df = pd.read_csv(metrics_csv)
     assert not df.empty
-    for col in ("dataset", "model", "explainer", "metric", "score"):
+    for col in ("dataset", "model", "explainer", "metric", "status", "score", "detail"):
         assert col in df.columns
-    assert not df["score"].isna().any(), "NaN scores in metrics.csv"
+    # Non-"ok" rows carry an empty score by design, so only successes are checked.
+    assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
+    assert not df.loc[df["status"] == "ok", "score"].isna().any(), (
+        "NaN scores on ok rows in metrics.csv"
+    )
 
     dataset_dir = experiment_dir / "GunPoint"
     assert dataset_dir.is_dir(), "Dataset sub-directory missing"
@@ -189,18 +193,11 @@ def test_runner_reports_and_returns_dataset_failures(
     results_rel = "tests/_runner_fail"
 
     config = _resolve_config(cache_root, results_rel)
-    # PatchTST validates d_model % nhead == 0, so this raises at construction
-    # and the dataset iteration's `except` catches it.
-    config["train_config"]["models"] = [
-        {
-            "model": "PatchTST",
-            "init_params": {
-                "in_channels": 1,
-                "num_classes": 2,
-                "d_model": 30,
-                "nhead": 7,
-            },
-        }
+    # A pre-split path that does not exist fails while preparing the data, i.e.
+    # at the dataset level, before any model is built. Component-level failures
+    # (model, explainer, metric) are isolated and covered separately below.
+    config["data_config"]["datasets"] = [
+        {"dataset": "GunPoint", "is_presplit": True, "path": str(tmp_path / "missing")}
     ]
     failures = main(str(_write_config(config, tmp_path)))
 
@@ -229,3 +226,309 @@ def test_runner_counts_skipped_datasets_separately(
     log = (_experiment_dir(results_rel) / "experiment.log").read_text()
     assert "0/1 dataset(s) completed, 1 skipped, 0 failed" in log
     assert "Skipped dataset(s): GunPoint" in log
+
+
+# ── failure isolation ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_failing_metric_does_not_discard_the_rest(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A raising metric costs only itself; later metrics still run and are saved."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_iso_metric"
+
+    config = _resolve_config(cache_root, results_rel)
+    # Max-Sensitivity re-explains internally and needs an `explain_func` the
+    # framework never supplies, so it raises. Complexity is queued behind it.
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Max-Sensitivity"},
+        {"metric": "Complexity"},
+    ]
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 1, "The failing metric should be the only reported failure"
+
+    experiment_dir = _experiment_dir(results_rel)
+    log = (experiment_dir / "experiment.log").read_text()
+    # The dataset itself completed: only the metric failed.
+    assert "1/1 dataset(s) completed, 0 skipped, 0 failed" in log
+    assert "Failed metric evaluation(s) (1):" in log
+    assert "Max-Sensitivity" in log
+
+    metrics_csv = experiment_dir / "metrics.csv"
+    assert metrics_csv.exists(), "metrics.csv must still be written"
+    df = pd.read_csv(metrics_csv)
+    status = dict(zip(df["metric"], df["status"], strict=True))
+    # The metric queued behind the failure still ran, and the failure itself is
+    # now recorded rather than dropped from the results.
+    assert status["Complexity"] == "ok", "The metric after the failure must run"
+    assert status["Max-Sensitivity"] == "error"
+
+
+@pytest.mark.integration
+def test_failing_explainer_does_not_discard_the_rest(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A raising explainer costs only itself; later explainers still run."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_iso_explainer"
+
+    config = _resolve_config(cache_root, results_rel)
+    # TimeFrequency requires an explicit transform and raises without one.
+    config["explanation_config"]["explainers"] = [
+        {
+            "method": "TimeFrequency",
+            "base": {"method": "Guided_Backpropagation"},
+            "transform": None,
+        },
+        {"method": "Integrated_Gradients"},
+    ]
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 1
+
+    experiment_dir = _experiment_dir(results_rel)
+    log = (experiment_dir / "experiment.log").read_text()
+    assert "1/1 dataset(s) completed, 0 skipped, 0 failed" in log
+    assert "Failed explainer(s) (1):" in log
+
+    df = pd.read_csv(experiment_dir / "metrics.csv")
+    assert "Integrated_Gradients" in set(df["explainer"]), (
+        "The explainer after the failure must still run"
+    )
+
+
+@pytest.mark.integration
+def test_failing_model_does_not_discard_the_rest(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A raising model costs only itself; later models still train and are scored."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_iso_model"
+
+    config = _resolve_config(cache_root, results_rel)
+    # PatchTST validates d_model % nhead == 0 and raises at construction.
+    config["train_config"]["models"] = [
+        {
+            "model": "PatchTST",
+            "init_params": {
+                "in_channels": 1,
+                "num_classes": 2,
+                "d_model": 30,
+                "nhead": 7,
+            },
+        },
+        {"model": "FCN", "init_params": {"in_channels": 1, "num_classes": 2}},
+    ]
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 1
+
+    experiment_dir = _experiment_dir(results_rel)
+    log = (experiment_dir / "experiment.log").read_text()
+    assert "1/1 dataset(s) completed, 0 skipped, 0 failed" in log
+    assert "Failed model(s) (1):" in log
+    assert "PatchTST" in log
+
+    df = pd.read_csv(experiment_dir / "metrics.csv")
+    assert "FCN" in set(df["model"]), "The model after the failure must still run"
+    assert "PatchTST" not in set(df["model"])
+
+
+# ── result identity: duplicate entries ────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_duplicate_dataset_entries_keep_separate_artifacts(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Two entries for one dataset get their own directory, checkpoint and rows."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_dup_dataset"
+
+    config = _resolve_config(cache_root, results_rel)
+    base = config["data_config"]["datasets"][0]
+    config["data_config"]["datasets"] = [
+        {**base, "max_samples": 40},
+        {**base, "max_samples": 30},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    experiment_dir = _experiment_dir(results_rel)
+    # Without identities both entries shared "GunPoint/" and the second
+    # overwrote the first's checkpoint and evaluation plots.
+    for ident in ("GunPoint_1", "GunPoint_2"):
+        model_dir = experiment_dir / ident / "FCN"
+        assert model_dir.is_dir(), f"missing output directory for {ident}"
+        assert list(model_dir.glob("*.pt")), f"no checkpoint under {ident}"
+    assert not (experiment_dir / "GunPoint").exists()
+
+    df = pd.read_csv(experiment_dir / "metrics.csv")
+    assert set(df["dataset"]) == {"GunPoint_1", "GunPoint_2"}
+
+
+@pytest.mark.integration
+def test_duplicate_explainer_entries_keep_separate_plots(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Two entries for one explainer get their own output directory and PNGs."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_dup_explainer"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients", "n_steps": 4},
+        {"method": "Integrated_Gradients", "n_steps": 16},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    exp_root = _experiment_dir(results_rel) / "GunPoint" / "FCN" / "explanations"
+    # This is the artifact-loss regression: previously both entries wrote into
+    # explanations_Integrated_Gradients/ and the second clobbered the first.
+    for ident in ("Integrated_Gradients_1", "Integrated_Gradients_2"):
+        d = exp_root / f"explanations_{ident}"
+        assert d.is_dir(), f"missing explanation directory for {ident}"
+        assert list(d.glob("*.png")), f"no plots under {ident}"
+    assert not (exp_root / "explanations_Integrated_Gradients").exists()
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert set(df["explainer"]) == {
+        "Integrated_Gradients_1",
+        "Integrated_Gradients_2",
+    }
+
+
+@pytest.mark.integration
+def test_duplicate_metric_entries_are_distinguishable_in_results(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Two entries for one metric produce rows that can be told apart."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_dup_metric"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Complexity"},
+        {"metric": "Complexity"},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert set(df["metric"]) == {"Complexity_1", "Complexity_2"}
+
+
+@pytest.mark.integration
+def test_unique_entries_keep_their_plain_names(ucr_dataset_path, tmp_path, monkeypatch):
+    """No duplicates means no suffixes anywhere - paths stay as before."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_nodup"
+
+    config = _resolve_config(cache_root, results_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    experiment_dir = _experiment_dir(results_rel)
+    assert (experiment_dir / "GunPoint" / "FCN").is_dir()
+    assert not list(experiment_dir.glob("GunPoint_*"))
+
+    df = pd.read_csv(experiment_dir / "metrics.csv")
+    assert set(df["dataset"]) == {"GunPoint"}
+    assert set(df["model"]) == {"FCN"}
+    assert set(df["explainer"]) == {"Integrated_Gradients"}
+    assert set(df["metric"]) == {"Complexity"}
+
+
+# ── result status ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_status_error_row_records_the_exception(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A raising metric is recorded as an `error` row naming the exception."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_status_error"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Max-Sensitivity"},
+        {"metric": "Complexity"},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 1
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    by_metric = dict(zip(df["metric"], df["status"], strict=True))
+    assert by_metric == {"Max-Sensitivity": "error", "Complexity": "ok"}
+
+    failed = df.loc[df["status"] == "error"].iloc[0]
+    assert pd.isna(failed["score"]), "an error row must carry no score"
+    assert "explain_func" in failed["detail"]
+
+
+@pytest.mark.integration
+def test_status_skipped_domain_row_is_recorded(ucr_dataset_path, tmp_path, monkeypatch):
+    """A domain-incompatible metric is recorded rather than silently dropped."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_status_skipped"
+
+    config = _resolve_config(cache_root, results_rel)
+    # A FREQUENCY-only metric alongside a FREQUENCY explainer (so the config
+    # validates) and a TIME explainer that cannot satisfy it.
+    config["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients"},
+        {
+            "method": "Frequency",
+            "base": {"method": "Integrated_Gradients"},
+            "transform": {"name": "rfft", "params": {}},
+        },
+    ]
+    config["evaluation_config"]["metrics"] = [{"metric": "Frequency Perturbation"}]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    statuses = dict(zip(df["explainer"], df["status"], strict=True))
+    assert statuses["Integrated_Gradients"] == "skipped-domain"
+    assert statuses["FREQUENCY-Integrated_Gradients"] == "ok"
+
+    skipped = df.loc[df["status"] == "skipped-domain"].iloc[0]
+    assert "Frequency" in skipped["detail"]
+
+
+@pytest.mark.integration
+def test_header_only_metrics_csv_when_nothing_succeeds(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A finished run always leaves a results file with the known schema."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_header_only"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["data_config"]["datasets"] = [
+        {"dataset": "GunPoint", "is_presplit": True, "path": str(tmp_path / "missing")}
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 1
+
+    metrics_csv = _experiment_dir(results_rel) / "metrics.csv"
+    assert metrics_csv.exists(), "a header-only metrics.csv must still be written"
+    df = pd.read_csv(metrics_csv)
+    assert df.empty
+    assert list(df.columns) == [
+        "dataset",
+        "model",
+        "explainer",
+        "metric",
+        "status",
+        "score",
+        "detail",
+    ]

@@ -78,6 +78,7 @@ xai4tsc/
 │   ├── explain.py              # Runner adapter for xai4tsc.xai
 │   ├── evaluate.py             # Runner adapter for xai4tsc.evaluation
 │   ├── log_setup.py            # Logging setup for the standalone runner
+│   ├── utils.py                # Pure runner helpers (wildcard expansion, result rows)
 │   └── configs/
 │       ├── master.yaml         # Annotated reference — all available options and defaults
 │       ├── example.yaml        # Go-to demo: synthetic data, time-domain explainers + metrics

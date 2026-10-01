@@ -7,6 +7,7 @@ from experiment_runner.config import (
     _merge_warn_drop,
     config_resolve,
     config_sanity_check,
+    disambiguate,
 )
 
 _RUNNER = Path(__file__).parent.parent.parent / "experiment_runner"
@@ -308,3 +309,68 @@ def test_sanity_check_external_wrong_base_raises(ext_source, clean_registries):
     cfg = config_resolve(cfg, MASTER_CONFIG)
     with pytest.raises(TypeError, match="ModelBase subclass"):
         config_sanity_check(cfg)
+
+
+# ── disambiguate ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_disambiguate_empty():
+    assert disambiguate([]) == []
+
+
+@pytest.mark.unit
+def test_disambiguate_all_unique_names_pass_through_unchanged():
+    # The common case must be byte-identical to pre-identity behaviour, so that
+    # existing configs keep writing to exactly the same paths.
+    names = ["Complexity", "Pixel-Flipping", "Sparseness"]
+    assert disambiguate(names) == names
+
+
+@pytest.mark.unit
+def test_disambiguate_suffixes_only_the_duplicates():
+    assert disambiguate(["TSHAP", "TSHAP", "SIGN"]) == ["TSHAP_1", "TSHAP_2", "SIGN"]
+
+
+@pytest.mark.unit
+def test_disambiguate_three_way_duplicate():
+    assert disambiguate(["X", "X", "X"]) == ["X_1", "X_2", "X_3"]
+
+
+@pytest.mark.unit
+def test_disambiguate_interleaved_groups_count_independently():
+    # Each name's counter is its own, and positions are preserved.
+    assert disambiguate(["A", "B", "A", "C", "B"]) == [
+        "A_1",
+        "B_1",
+        "A_2",
+        "C",
+        "B_2",
+    ]
+
+
+@pytest.mark.unit
+def test_disambiguate_preserves_input_length_and_order():
+    names = ["m", "n", "m", "m", "o"]
+    out = disambiguate(names)
+    assert len(out) == len(names)
+    # Every identity still starts with the name it came from.
+    assert all(ident.startswith(name) for ident, name in zip(out, names, strict=True))
+
+
+@pytest.mark.unit
+def test_disambiguate_warns_when_a_generated_suffix_hits_a_literal_name(caplog):
+    # Two "X" entries generate X_1/X_2; a literal "X_1" then collides with the
+    # generated one. The run stays usable, but the user is told.
+    with caplog.at_level("WARNING", logger="xai4tsc.runner.config"):
+        out = disambiguate(["X", "X", "X_1"])
+    assert out == ["X_1", "X_2", "X_1"]
+    assert "not unique after disambiguation" in caplog.text
+    assert "X_1" in caplog.text
+
+
+@pytest.mark.unit
+def test_disambiguate_does_not_warn_for_a_clean_result(caplog):
+    with caplog.at_level("WARNING", logger="xai4tsc.runner.config"):
+        disambiguate(["A", "A", "B"])
+    assert "not unique" not in caplog.text

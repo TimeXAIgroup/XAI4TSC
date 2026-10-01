@@ -202,17 +202,12 @@ explanation_config:
       roi: false                      # true = TSHAP-ROI region attribution (Algorithm 2; sharper, higher precision)
       background_data: train_set      # runner selector resolved to an ndarray: train_set, test_set or val_set
       seed: null                      # seed for the "random" baseline, for reproducible draws
-      # NOTE: two TSHAP entries (e.g. roi true/false) collide on the result folder
-      # `explanations_TSHAP`; run them in separate experiments.
     - method: SIGN                    # wrapper: extends a gradient method with the SIGN rule (Gumpfer et al. 2023)
       mu: 0.0                         # sign threshold s_mu: input < mu -> -1, else +1
       base:                           # the gradient method SIGN wraps (its own params nested here)
         method: Integrated_Gradients
         multiply_by_inputs: false     # REQUIRED: SIGN replaces "x input" with "x sign(input)", so the base must emit the raw gradient
         n_steps: 50
-        # NOTE: params omitted from this nested `base` block fall back to the base
-        # explainer's own __init__ defaults, not to the master Integrated_Gradients
-        # entry above (config_resolve backfills top-level explainers only).
     - method: FreqRISE                # frequency-masking perturbation attribution (Brüsch et al., NLDL 2025)
       domain: stft                    # "fft" (frequency, real FFT) or "stft" (time-frequency); stft needs a transform
       transform:                      # required for domain=stft; built via get_transform (omit for domain=fft)

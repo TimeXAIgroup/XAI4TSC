@@ -45,6 +45,42 @@ Getting Started
                   ├── <model>_epoch_<n>.pt   # best checkpoint
                   └── explanations/  # per-sample relevance plots
 
+   Every ``metrics.csv`` has the same columns:
+
+   .. list-table::
+      :header-rows: 1
+      :widths: 14 86
+
+      * - Column
+        - Meaning
+      * - ``dataset``
+        - Dataset result identity
+      * - ``model``
+        - Model result identity
+      * - ``explainer``
+        - Explainer result identity (``WRAPPER-BASE`` for wrapper methods)
+      * - ``metric``
+        - Metric result identity
+      * - ``status``
+        - ``ok`` (a score was produced), ``nan`` (the metric ran but could not
+          produce a number), ``error`` (the metric raised) or
+          ``skipped-domain`` (the metric needs an explanation domain this
+          explainer does not produce)
+      * - ``score``
+        - The aggregated score; empty unless ``status`` is ``ok``
+      * - ``detail``
+        - Why, for a non-``ok`` status
+
+   Every combination the run attempts gets a row, so the file accounts for the
+   whole configuration rather than only its successes. A finished run always
+   writes the global ``metrics.csv``, header-only if nothing succeeded.
+
+   **Result identities.** A row and its output directory are named after the
+   config entry that produced them. Repeating an entry is supported: when two or
+   more entries at the same level share a name, each gets a ``_1``, ``_2``, ...
+   suffix in config order, so their results and artifacts stay separate. Names
+   that occur once are used unchanged.
+
 See ``experiment_runner/configs/master.yaml`` for a fully annotated reference
 of every available config key and its default value.
 

@@ -13,6 +13,60 @@ import yaml
 logger = logging.getLogger("xai4tsc.runner.config")
 
 
+def disambiguate(names: list[str]) -> list[str]:
+    """
+    Make a list of display names unique by suffixing only the duplicates.
+
+    Output paths and ``metrics.csv`` rows are keyed on an entry's display name,
+    so two config entries sharing a name overwrite each other's artifacts and
+    produce indistinguishable result rows. Suffixing ``_1.._N`` onto just the
+    repeated names keeps every unique name - the overwhelmingly common case -
+    byte-identical to what earlier versions wrote.
+
+    Parameters
+    ----------
+    names : list of str
+        Display names in config order, one per entry at a single level
+        (datasets, models, explainers or metrics).
+
+    Returns
+    -------
+    list of str
+        One identity per input name, positionally aligned. Names occurring once
+        are returned unchanged; names occurring more than once gain a ``_1``,
+        ``_2``, ... suffix in config order.
+
+    Examples
+    --------
+    >>> disambiguate(["TSHAP", "TSHAP", "SIGN"])
+    ['TSHAP_1', 'TSHAP_2', 'SIGN']
+    """
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+
+    seen: dict[str, int] = {}
+    identities: list[str] = []
+    for name in names:
+        if counts[name] == 1:
+            identities.append(name)
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        identities.append(f"{name}_{seen[name]}")
+
+    # A generated suffix can collide with a name that was already spelled that
+    # way (e.g. entries "X", "X" and a literal "X_1"). Warn rather than raise:
+    # the run is still usable, the user just cannot tell those two apart.
+    duplicates = {i for i in identities if identities.count(i) > 1}
+    if duplicates:
+        logger.warning(
+            "Result identities are not unique after disambiguation: %s. Rename "
+            "or remove the conflicting entries to keep their outputs separate.",
+            ", ".join(sorted(duplicates)),
+        )
+    return identities
+
+
 def register_external_components(config: dict) -> None:
     """
     Load and register external model/explainer/metric classes from the config.

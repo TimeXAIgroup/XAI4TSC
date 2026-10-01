@@ -19,20 +19,50 @@ logger = logging.getLogger(__name__)
 # ── Module-level helpers ───────────────────────────────────────────────────────
 
 
-def _ensure_bct(data: np.ndarray) -> np.ndarray:
+def _ensure_bct(data: np.ndarray, layout: str = "auto") -> np.ndarray:
     """
-    Transpose ``(B, T, C)`` → ``(B, C, T)`` when ``T > C``, with a warning.
+    Return *data* in the framework's canonical ``(B, C, T)`` order.
 
-    The framework always expects ``(batch, channels, timesteps)`` ordering.
-    This heuristic is only safe for local user data where channels are typically
-    few and timesteps are long.  **Do not call this on UCR/UEA data loaded via
-    sktime** — sktime already returns ``(B, C, T)`` and datasets with more
-    channels than timesteps (e.g. spectrograms) would be silently corrupted.
+    The framework always expects ``(batch, channels, timesteps)``. Local user data
+    is often saved as ``(B, T, C)``, so ``layout="auto"`` guesses from the shape -
+    but a shape alone cannot distinguish ``(B, T, C)`` from a ``(B, C, T)`` dataset
+    that genuinely has more channels than timesteps (a spectrogram, say), and the
+    guess corrupts the latter. ``"bct"`` and ``"btc"`` state the order instead of
+    guessing. **Never call this on UCR/UEA data from sktime**, which is already
+    ``(B, C, T)``.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Loaded data array.
+    layout : str
+        ``"auto"`` (default) transposes when axis 1 exceeds axis 2, with a warning;
+        ``"bct"`` trusts the data as-is; ``"btc"`` always transposes a 3-D array.
+
+    Returns
+    -------
+    np.ndarray
+        Data in ``(B, C, T)`` order.
+
+    Raises
+    ------
+    ValueError
+        If *layout* is not one of ``"auto"``, ``"bct"`` or ``"btc"``.
     """
-    if data.ndim == 3 and data.shape[1] > data.shape[2]:
+    if layout not in ("auto", "bct", "btc"):
+        msg = f"Unknown layout '{layout}'. Choose from: 'auto', 'bct', 'btc'."
+        raise ValueError(msg)
+    if data.ndim != 3 or layout == "bct":
+        return data
+    if layout == "btc":
+        return data.transpose(0, 2, 1)
+    if data.shape[1] > data.shape[2]:
         logger.warning(
-            "Data shape %s looks like (B, T, C); transposing to (B, C, T). "
-            "Pass data already in (B, C, T) order to suppress this.",
+            "Data shape %s has more values on axis 1 than axis 2, so it is being "
+            "read as (B, T, C) and transposed to (B, C, T). If it is already "
+            "(B, C, T) with more channels than timesteps, this corrupts it: set "
+            "layout='bct' to keep it as-is, or layout='btc' to confirm the "
+            "transpose and silence this warning.",
             data.shape,
         )
         return data.transpose(0, 2, 1)
@@ -109,20 +139,142 @@ class MultiHotLabelEncoder:
 
 def _make_encoder(
     encode: str,
+    class_order: list | None = None,
 ) -> LabelEncoder | OneHotEncoder | OrdinalEncoder | MultiHotLabelEncoder:
-    """Return a fresh encoder for the given *encode* key."""
+    """
+    Return a fresh encoder for the given *encode* key.
+
+    The encoders are stock scikit-learn classes, configured so their output can be
+    reduced to the pipeline's target contract (1-D ``int64`` class indices) by
+    :func:`_class_index_view`, and so their class names stay recoverable by
+    :func:`class_names`.
+
+    Parameters
+    ----------
+    encode : str
+        One of ``"label"``, ``"ordinal"``, ``"onehot"`` or ``"multihot"``.
+        Any other value falls back to ``"label"``.
+    class_order : list, optional
+        Explicit class order for ``encode="ordinal"``. Without it both
+        ``LabelEncoder`` and ``OrdinalEncoder`` order classes lexicographically,
+        which is wrong for ordered string labels (``low`` / ``medium`` / ``high``
+        becomes ``high < low < medium``). Numeric labels need no order: their
+        sorted order is already the meaningful one, and scikit-learn rejects any
+        other.
+
+    Returns
+    -------
+    LabelEncoder or OneHotEncoder or OrdinalEncoder or MultiHotLabelEncoder
+        An unfitted encoder.
+    """
     if encode == "onehot":
-        return OneHotEncoder()
+        # Dense, so the target never becomes a scipy sparse matrix.
+        return OneHotEncoder(sparse_output=False)
     if encode == "ordinal":
-        return OrdinalEncoder()
+        categories = [list(class_order)] if class_order else "auto"
+        return OrdinalEncoder(categories=categories)
     if encode == "multihot":
         return MultiHotLabelEncoder()
     return LabelEncoder()
 
 
-def _class_name_map(encoder: object) -> dict[int, str]:
-    """Return an ``{index: name}`` map from a fitted encoder's ``classes_``."""
+def _fitted_classes(encoder: object) -> np.ndarray | None:
+    """
+    Return a fitted encoder's classes, whichever attribute holds them.
+
+    The scikit-learn target encoders (``LabelEncoder``) expose ``classes_``, a
+    single array, while the feature encoders (``OneHotEncoder``,
+    ``OrdinalEncoder``) expose ``categories_``, a list with one array per input
+    column. Labels are always a single column, so the first entry is the one.
+    """
     classes = getattr(encoder, "classes_", None)
+    if classes is not None:
+        return np.asarray(classes)
+    categories = getattr(encoder, "categories_", None)
+    if categories is not None and len(categories):
+        return np.asarray(categories[0])
+    return None
+
+
+def class_names(encoder: object) -> list[str]:
+    """
+    Return the display name of each class, ordered by class index.
+
+    Parameters
+    ----------
+    encoder : object
+        A fitted label encoder.
+
+    Returns
+    -------
+    list of str
+        One name per class index; empty when the encoder exposes no classes.
+    """
+    return list(_class_name_map(encoder).values())
+
+
+def decode_labels(encoder: object, indices: np.ndarray) -> np.ndarray:
+    """
+    Map 1-D class indices back to their original label values.
+
+    The pipeline carries ``int64`` class indices, so this is the inverse every
+    consumer needs. It is not simply ``encoder.inverse_transform``: that expects
+    the encoder's own output, which for ``OneHotEncoder`` is an ``(n, K)`` matrix
+    rather than indices.
+
+    Parameters
+    ----------
+    encoder : object
+        The fitted encoder the indices came from.
+    indices : np.ndarray
+        1-D array of class indices.
+
+    Returns
+    -------
+    np.ndarray
+        Original label values, one per index. Multi-hot encoders return 2-D rows.
+    """
+    idx = np.asarray(indices, dtype=np.int64)
+    if isinstance(encoder, MultiHotLabelEncoder):
+        return encoder.inverse_transform(idx)
+    classes = _fitted_classes(encoder)
+    if classes is not None:
+        # Index straight into the classes rather than calling inverse_transform,
+        # which for OneHotEncoder expects its own (n, K) matrix, not indices.
+        return classes[idx]
+    if hasattr(encoder, "inverse_transform"):
+        # A custom encoder that exposes no classes but can still decode.
+        return np.asarray(encoder.inverse_transform(idx))
+    return idx
+
+
+def _warn_unordered_ordinal(
+    encode: str, class_order: list | None, encoder: object
+) -> None:
+    """
+    Warn when ``encode="ordinal"`` was used on string labels with no order given.
+
+    Ordinal encoding exists to preserve a meaningful class order, but without an
+    explicit order scikit-learn falls back to lexicographic sorting, which for
+    labels like ``low`` / ``medium`` / ``high`` is not the intended order. Numeric
+    labels are exempt: their sorted order is the meaningful one.
+    """
+    if encode != "ordinal" or class_order:
+        return
+    classes = _fitted_classes(encoder)
+    if classes is None or np.issubdtype(classes.dtype, np.number):
+        return
+    logger.warning(
+        "encode='ordinal' on non-numeric labels without 'class_order': classes are "
+        "ordered lexicographically (%s), which is probably not the intended order. "
+        "Set 'class_order' to declare it.",
+        _class_name_map(encoder),
+    )
+
+
+def _class_name_map(encoder: object) -> dict[int, str]:
+    """Return an ``{index: name}`` map from a fitted encoder."""
+    classes = _fitted_classes(encoder)
     if classes is None:
         return {}
     names = []
@@ -160,15 +312,17 @@ def _split_dataset(
     random_state: int = 42,
     encode: str = "label",
     stratify: bool = True,
+    class_order: list | None = None,
 ) -> tuple:
     """Split data into train / test / (optional) val with label encoding."""
-    encoder = _make_encoder(encode)
+    encoder = _make_encoder(encode, class_order=class_order)
     # OneHot/Ordinal need a 2-D column; LabelEncoder (1-D) and MultiHotLabelEncoder
     # (already 2-D multi-hot rows) consume their input shape directly.
     if isinstance(encoder, (OneHotEncoder, OrdinalEncoder)):
         labels = np.array(labels).reshape(-1, 1)
     encoder.fit(labels)
-    labels = encoder.transform(labels)
+    labels = _class_index_view(encoder.transform(labels)).astype(np.int64)
+    _warn_unordered_ordinal(encode, class_order, encoder)
     logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
 
     val_set = not math.isclose(val_split, 0.0)
@@ -430,6 +584,7 @@ class DatasetBase(ABC):
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
         stratify: bool = True,
+        class_order: list | None = None,
     ) -> tuple:
         """
         Load and split the dataset into train / test / (optional) val.
@@ -459,6 +614,10 @@ class DatasetBase(ABC):
             every class is proportionally represented in each split.  Falls back
             to random splitting with a warning when a class has too few samples
             to stratify.
+        class_order : list, optional
+            Explicit class order for ``encode="ordinal"``, forwarded to
+            :func:`_make_encoder`. Needed only for ordered *string* labels, whose
+            order is otherwise lexicographic.
 
         Returns
         -------
@@ -500,6 +659,7 @@ class DatasetBase(ABC):
             sklearn_seed,
             encode,
             stratify=stratify,
+            class_order=class_order,
         )
         return self._splits, self._encoder
 
@@ -552,15 +712,11 @@ class DatasetBase(ABC):
         for split, name in zip(splits, split_names, strict=True):
             labels_arr = split[1]
             metadata = split[2] if len(split) > 2 else None
-            # Multi-hot: persist the decoded multi-hot rows (not the collapsed
-            # indices) so a reload re-derives the same index<->combo mapping; a
-            # fresh encoder re-fit on bare indices could not.
-            if isinstance(self._encoder, MultiHotLabelEncoder):
-                label_col = [
-                    row.tolist() for row in self._encoder.inverse_transform(labels_arr)
-                ]
+            decoded = decode_labels(self._encoder, labels_arr)
+            if np.ndim(decoded) > 1:  # multi-hot rows
+                label_col = [row.tolist() for row in decoded]
             else:
-                label_col = labels_arr
+                label_col = decoded
             pd.DataFrame({"label": label_col}).to_json(
                 splits_dir / (name + "_labels.json"), orient="records"
             )
@@ -656,10 +812,11 @@ class DatasetBase(ABC):
         encoder.fit(all_labels)
         logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
 
-        y_train = encoder.transform(y_train)
-        y_test = encoder.transform(y_test)
+        # Same target contract as _split_dataset: always 1-D int64 indices.
+        y_train = _class_index_view(encoder.transform(y_train)).astype(np.int64)
+        y_test = _class_index_view(encoder.transform(y_test)).astype(np.int64)
         if y_val is not None:
-            y_val = encoder.transform(y_val)
+            y_val = _class_index_view(encoder.transform(y_val)).astype(np.int64)
 
         if x_val is not None and y_val is not None:
             splits = [

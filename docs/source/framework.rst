@@ -81,6 +81,14 @@ Getting Started
    suffix in config order, so their results and artifacts stay separate. Names
    that occur once are used unchanged.
 
+   **Labels.** Whatever ``encode`` is set to, a split carries 1-D ``int64`` class
+   indices, and the fitted encoder is kept only to map those indices back to class
+   names. ``encode`` therefore describes how to *read* the label column:
+   ``"label"`` for unordered categories, ``"ordinal"`` for ordered ones (declare
+   the order with ``classes``), ``"onehot"`` for a column of one-hot rows, and
+   ``"multihot"`` for multi-hot rows, which collapse to one index per distinct
+   combination.
+
 See ``experiment_runner/configs/master.yaml`` for a fully annotated reference
 of every available config key and its default value.
 

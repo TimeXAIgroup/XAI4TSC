@@ -1,8 +1,10 @@
 """Integration tests for experiment_runner/main.py — full end-to-end pipeline."""
 
+import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 import yaml
@@ -532,3 +534,134 @@ def test_header_only_metrics_csv_when_nothing_succeeds(
         "score",
         "detail",
     ]
+
+
+# ── local datasets through the runner ─────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_runner_drives_a_local_dataset(tmp_path, monkeypatch):
+    """
+    A `path:` dataset runs end to end.
+
+    The suite previously covered only UCR and synthetic datasets, which is how
+    `load_dataset` came to forward runner-only kwargs that `LocalDataset` cannot
+    accept, making `path:` unusable from any config.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_local"
+
+    # A small, self-contained (B, C, T) dataset.
+    data_dir = tmp_path / "local_data"
+    data_dir.mkdir()
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 2, 40)
+    arr = rng.normal(size=(40, 1, 48)) + labels[:, None, None]
+    np.save(data_dir / "data.npy", arr.astype(np.float32))
+    (data_dir / "label.json").write_text(
+        json.dumps([{"label": str(int(y))} for y in labels])
+    )
+
+    config = _resolve_config(tmp_path / "cache", results_rel)
+    config["data_config"]["datasets"] = [{"dataset": "local_ds", "path": str(data_dir)}]
+    config["train_config"]["models"] = [
+        {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert set(df["dataset"]) == {"local_ds"}
+    assert (df["status"] == "ok").all()
+
+
+@pytest.mark.integration
+def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
+    tmp_path, monkeypatch
+):
+    """
+    `layout: bct` stops the shape heuristic corrupting genuine C>T data.
+
+    With `layout: auto` the array is read as (B, T, C) and transposed, so the
+    model is built on the wrong axis. Metrics are skipped on purpose: Quantus runs
+    the same shape guess in `infer_channel_first` and transposes `x_batch` for a
+    C>T input while leaving `a_batch` alone, so no Quantus metric can score this
+    data however it was loaded.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_layout"
+
+    data_dir = tmp_path / "wide"
+    data_dir.mkdir()
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 2, 40)
+    # 40 channels, 24 timesteps: axis 1 > axis 2, so "auto" would transpose it,
+    # while 24 timesteps is still long enough for LeNet's pooling stack.
+    arr = rng.normal(size=(40, 40, 24)) + labels[:, None, None]
+    np.save(data_dir / "data.npy", arr.astype(np.float32))
+    (data_dir / "label.json").write_text(
+        json.dumps([{"label": str(int(y))} for y in labels])
+    )
+
+    config = _resolve_config(tmp_path / "cache", results_rel)
+    config["data_config"]["datasets"] = [
+        {
+            "dataset": "wide",
+            "path": str(data_dir),
+            "layout": "bct",
+            "skip_metrics": True,
+        }
+    ]
+    config["train_config"]["models"] = [
+        {"model": "LeNet", "init_params": {"in_channels": 40, "num_classes": 2}}
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    # Training and explaining both ran with in_channels=40, which only works if
+    # the 40-channel axis survived the load instead of becoming 24.
+    model_dir = _experiment_dir(results_rel) / "wide" / "LeNet"
+    assert list(model_dir.glob("*.pt")), "model did not train on the C>T data"
+    assert list(model_dir.glob("explanations/explanations_*/*.png")), (
+        "no explanations produced for the C>T data"
+    )
+
+
+@pytest.mark.integration
+def test_changing_format_does_not_reuse_a_cache_built_by_another_loader(
+    tmp_path, monkeypatch
+):
+    """
+    `format` is part of the split-cache key.
+
+    Without it, a numpy-built cache entry is served for a `csv` request and the
+    requested loader is never called, so an unimplemented format looks like a
+    success.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = tmp_path / "cache"
+
+    data_dir = tmp_path / "local"
+    data_dir.mkdir()
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 2, 40)
+    np.save(data_dir / "data.npy", (rng.normal(size=(40, 1, 48))).astype(np.float32))
+    (data_dir / "label.json").write_text(
+        json.dumps([{"label": str(int(y))} for y in labels])
+    )
+
+    entry = {"dataset": "local_ds", "path": str(data_dir)}
+    base = _resolve_config(cache_root, "tests/_runner_fmt_numpy")
+    base["data_config"]["datasets"] = [{**entry, "format": "numpy"}]
+    base["train_config"]["models"] = [
+        {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
+    ]
+    assert main(str(_write_config(base, tmp_path))) == 0
+    numpy_caches = list((cache_root / "splits").iterdir())
+    assert numpy_caches, "no split cache written for the numpy run"
+
+    # Same dataset name and path, different loader: must not reuse the entry above.
+    csv_cfg = _resolve_config(cache_root, "tests/_runner_fmt_csv")
+    csv_cfg["data_config"]["datasets"] = [{**entry, "format": "csv"}]
+    csv_cfg["train_config"]["models"] = base["train_config"]["models"]
+    # The CSV loader is not implemented, so the dataset must fail rather than
+    # silently succeed from the numpy cache.
+    assert main(str(_write_config(csv_cfg, tmp_path))) == 1

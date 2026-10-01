@@ -228,6 +228,7 @@ def main(config_path: str, debug: bool = False) -> int:
                         max_series_length=dataset.get("max_series_length"),
                         series_position=dataset.get("series_position", "first"),
                         use_predefined_splits=use_predefined_splits,
+                        layout=dataset.get("layout", "auto"),
                     )
 
                 # Synthetic auto-detect: a pre-split layout already in the
@@ -262,6 +263,8 @@ def main(config_path: str, debug: bool = False) -> int:
                         series_position=dataset.get("series_position", "first"),
                         stratify=dataset.get("stratify", True),
                         use_predefined_splits=use_predefined_splits,
+                        data_format=dataset.get("format", "numpy"),
+                        path=dataset.get("path") or None,
                     )
                     split_dir = split_cache / "splits" if split_cache else None
                     if split_dir and split_dir.exists():
@@ -277,6 +280,7 @@ def main(config_path: str, debug: bool = False) -> int:
                             impute_missing=dataset.get("allow_imputation", False),
                             rng=prng,
                             stratify=dataset.get("stratify", True),
+                            class_order=dataset.get("classes") or None,
                         )
                         if split_cache:
                             logger.info("Saving splits to cache: %s", split_cache)

@@ -16,7 +16,7 @@ The factory function :func:`load_dataset` dispatches to
 based on the arguments supplied.
 """
 
-from .base import DatasetBase
+from .base import DatasetBase, class_names, decode_labels
 from .data_loaders import FORMAT_LOADERS, load_json, load_metadata
 from .datasets import (
     SYNTHETIC_DATASETS,
@@ -36,6 +36,8 @@ __all__ = [
     "LocalDataset",
     "SyntheticDataset",
     "UcrUeaDataset",
+    "class_names",
+    "decode_labels",
     "load_dataset",
     "load_json",
     "load_metadata",

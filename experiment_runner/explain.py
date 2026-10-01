@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from xai4tsc.data.base import decode_labels
 from xai4tsc.xai.explain import generate_explanation
 
 if TYPE_CHECKING:
@@ -227,7 +228,7 @@ def _generate_explanation(
         np.save(explanation_dir / "exp_values.npy", explanation.exp_values)
         np.save(explanation_dir / "indices.npy", explanation.indices)
         try:
-            decoded_labels = explanation.encoder.inverse_transform(explanation.labels)
+            decoded_labels = decode_labels(explanation.encoder, explanation.labels)
         except Exception:
             decoded_labels = explanation.labels
         with open(explanation_dir / "labels.json", "w") as f:

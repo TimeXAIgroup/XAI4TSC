@@ -32,6 +32,30 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
 - The runner now **exits non-zero** when anything failed, and logs a closing
   summary naming the datasets completed, skipped and failed. A fully failed run
   previously exited 0 and was indistinguishable from a successful one.
+- **Label encoding**: `split()` now always returns 1-D `int64` class
+  indices for every `encode` value, and the fitted encoder is kept solely to map
+  those indices back to class names. `encode` describes *how to read the label
+  column*, not what the target array looks like. `encode: "onehot"` and
+  `"ordinal"` previously produced a scipy sparse matrix and an `(n, 1)` float
+  column respectively, because they used scikit-learn's **feature** encoders in a
+  **target** slot; both crashed when the split cache was written, auto-detected
+  `num_classes` wrongly, and left the index-to-name map empty. The encoders are
+  still stock scikit-learn, adapted by two new helpers,
+  `xai4tsc.data.decode_labels` and `xai4tsc.data.class_names`.
+- **`classes` is now an ordered class list**, used with `encode: "ordinal"` to
+  declare a meaningful order, e.g. `classes: ["low", "medium", "high"]`. Without
+  it, classes order lexicographically, which for ordered string labels is wrong
+  and is now warned about. Numeric labels need no order. The key was previously
+  declared in `master.yaml` and never read.
+- **`layout` on a local dataset** (`"auto"` | `"bct"` | `"btc"`) states the axis
+  order instead of guessing it. `"auto"` keeps the previous heuristic and its
+  warning; `"bct"` is the way to load data that genuinely has more channels than
+  timesteps, which the heuristic would otherwise transpose into nonsense.
+- **`format` and `path` are part of the split-cache key.** Previously a cached
+  split was reused for a different loader or a different local directory, so a
+  `format: csv` request could be served numpy data from another dataset that
+  happened to share its name. Existing cache folder names are unchanged: the new
+  tokens are emitted only for non-default values.
 
 ### Changed
 

@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
+from ..data.base import class_names, decode_labels
 from ..models.base import ModelBase
 from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
 from ..utils.utils import dict_to_args
@@ -300,7 +301,7 @@ def plot_exp(
         signal = exp.data
 
     multi_target = is_multi_target(exp)
-    class_labels = None if multi_target else exp.encoder.inverse_transform(exp.labels)
+    class_labels = None if multi_target else decode_labels(exp.encoder, exp.labels)
 
     for sample_ind in range(exp.data.shape[0]):
         signal_i = signal[sample_ind : sample_ind + 1]
@@ -311,7 +312,7 @@ def plot_exp(
         if multi_target:
             items = [
                 (label, exp.exp_values[class_ind, sample_ind : sample_ind + 1])
-                for class_ind, label in enumerate(exp.encoder.classes_)
+                for class_ind, label in enumerate(class_names(exp.encoder))
             ]
         else:
             items = [

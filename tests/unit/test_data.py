@@ -11,6 +11,7 @@ from xai4tsc.data import load_dataset
 from xai4tsc.data.base import (
     DatasetBase,
     MultiHotLabelEncoder,
+    _class_name_map,
     _ensure_bct,
     _impute_data,
     _make_encoder,
@@ -116,27 +117,83 @@ def test_split_different_seeds_differ():
     assert not np.array_equal(splits1[0][0], splits2[0][0])
 
 
+# The target contract: whatever `encode` reads, the split carries 1-D int64 class
+# indices, and the encoder is kept only to map those indices back to class names.
+# Before this, the two sklearn FEATURE encoders leaked their own shapes - a sparse
+# (n, K) matrix for onehot, an (n, 1) float column for ordinal - which no
+# CrossEntropy target, np.unique() or fancy-indexing consumer could use.
 @pytest.mark.unit
-def test_split_encode_label():
-    data, labels = _make_data(100, n_classes=3)
-    splits, _ = _split_dataset(data, labels, encode="label")
-    assert splits[0][1].ndim == 1
+@pytest.mark.parametrize("encode", ["label", "onehot", "ordinal", "multihot"])
+def test_split_always_yields_1d_int64_class_indices(encode):
+    n_classes = 3
+    data, labels = _make_data(100, n_classes=n_classes)
+    if encode == "multihot":
+        # multihot reads multi-hot rows, so give it rows rather than scalars.
+        labels = np.eye(n_classes, dtype=int)[np.asarray(labels, dtype=int)]
+    splits, encoder = _split_dataset(data, labels, encode=encode)
+    y = splits[0][1]
+    assert y.ndim == 1, f"{encode} leaked a {y.ndim}-D target"
+    assert y.dtype == np.int64
+    assert set(np.unique(y)) <= set(range(n_classes))
+    # The encoder must still be able to name the classes it collapsed.
+    assert _class_name_map(encoder), f"{encode} exposes no index-to-name map"
 
 
 @pytest.mark.unit
-def test_split_encode_onehot():
-    data, labels = _make_data(100, n_classes=3)
-    splits, _ = _split_dataset(data, labels, encode="onehot")
-    # OneHotEncoder produces a sparse/dense 2-D array (n_samples, n_classes)
-    assert splits[0][1].ndim == 2
-    assert splits[0][1].shape[1] == 3
+def test_split_encode_onehot_reads_the_hot_index():
+    # A one-hot label column resolves to the index of its hot position.
+    data, _ = _make_data(6, n_classes=3)
+    splits, _ = _split_dataset(
+        data,
+        np.array([0, 1, 2, 0, 1, 2]),
+        encode="onehot",
+        train_split=0.5,
+        stratify=False,
+    )
+    assert set(np.unique(splits[0][1])) <= {0, 1, 2}
 
 
 @pytest.mark.unit
-def test_split_encode_ordinal():
-    data, labels = _make_data(100, n_classes=3)
-    splits, _ = _split_dataset(data, labels, encode="ordinal")
-    assert splits[0][1].ndim == 2  # OrdinalEncoder produces (n, 1)
+def test_split_encode_ordinal_without_order_warns_for_string_labels(caplog):
+    # Ordinal exists to preserve a class order; lexicographic is the silent trap.
+    data, _ = _make_data(6, n_classes=3)
+    y = np.array(["low", "medium", "high", "low", "medium", "high"])
+    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
+        _, encoder = _split_dataset(
+            data, y, encode="ordinal", train_split=0.5, stratify=False
+        )
+    assert "class_order" in caplog.text
+    assert _class_name_map(encoder) == {0: "high", 1: "low", 2: "medium"}
+
+
+@pytest.mark.unit
+def test_split_encode_ordinal_honours_class_order():
+    data, _ = _make_data(6, n_classes=3)
+    y = np.array(["low", "medium", "high", "low", "medium", "high"])
+    _, encoder = _split_dataset(
+        data,
+        y,
+        encode="ordinal",
+        train_split=0.5,
+        stratify=False,
+        class_order=["low", "medium", "high"],
+    )
+    assert _class_name_map(encoder) == {0: "low", 1: "medium", 2: "high"}
+
+
+@pytest.mark.unit
+def test_split_encode_ordinal_numeric_labels_need_no_order():
+    # sklearn refuses non-sorted numeric categories, and sorted is already the
+    # meaningful order for numbers, so no class_order is required.
+    data, _ = _make_data(6, n_classes=3)
+    _, encoder = _split_dataset(
+        data,
+        np.array([10, 20, 30, 10, 20, 30]),
+        encode="ordinal",
+        train_split=0.5,
+        stratify=False,
+    )
+    assert _class_name_map(encoder) == {0: "10", 1: "20", 2: "30"}
 
 
 # ── save_splits / load_saved_splits ───────────────────────────────────────────
@@ -288,6 +345,35 @@ def test_load_dataset_without_path_returns_ucr():
 
 
 @pytest.mark.unit
+def test_load_dataset_with_path_tolerates_runner_only_kwargs(tmp_path):
+    # The runner passes `download` and `use_predefined_splits` on every
+    # non-synthetic dataset, but LocalDataset accepts neither. They must be
+    # stripped here, as the synthetic and UCR branches already do for their own
+    # inapplicable keys, or `path:` is unusable from a config.
+    _write_numpy_dataset(tmp_path)
+    ds = load_dataset(
+        name="my_ecg",
+        path=str(tmp_path),
+        download=True,
+        use_predefined_splits=False,
+        data_format="numpy",
+    )
+    assert isinstance(ds, LocalDataset)
+
+
+@pytest.mark.unit
+def test_load_dataset_with_path_warns_on_use_predefined_splits(tmp_path, caplog):
+    # `use_predefined_splits` is a UCR/UEA concept. Asking for it on a local
+    # dataset cannot work, so say so instead of dropping it silently.
+    _write_numpy_dataset(tmp_path)
+    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
+        ds = load_dataset(name="my_ecg", path=str(tmp_path), use_predefined_splits=True)
+    assert isinstance(ds, LocalDataset)
+    assert "use_predefined_splits" in caplog.text
+    assert "is_presplit" in caplog.text
+
+
+@pytest.mark.unit
 def test_load_dataset_forwards_restriction_kwargs(tmp_path):
     _write_numpy_dataset(tmp_path)
     ds = load_dataset(name="my_ecg", path=str(tmp_path), max_samples=5)
@@ -329,7 +415,10 @@ def test_ensure_bct_transposes_when_t_gt_c(caplog):
     with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
         out = _ensure_bct(btc)
     assert out.shape == (2, 3, 10)
-    assert "transposing" in caplog.text.lower()
+    # The message must flag the ambiguity and name the way to resolve it, rather
+    # than matching one particular wording.
+    assert "transpos" in caplog.text.lower()
+    assert "layout" in caplog.text.lower()
 
 
 @pytest.mark.unit
@@ -661,3 +750,71 @@ def test_register_synthetic_dataset_roundtrip():
         assert isinstance(load_dataset("_tiny_test"), _Tiny)
     finally:
         SYNTHETIC_DATASETS.pop("_tiny_test", None)
+
+
+# ── _ensure_bct layout ────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_ensure_bct_layout_bct_keeps_c_gt_t_data_intact():
+    # The case "auto" corrupts: genuinely (B, C, T) with more channels than
+    # timesteps, e.g. a spectrogram.
+    arr = np.zeros((4, 40, 20))
+    out = _ensure_bct(arr, "bct")
+    assert out.shape == (4, 40, 20)
+    assert out is arr
+
+
+@pytest.mark.unit
+def test_ensure_bct_layout_bct_emits_no_warning(caplog):
+    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
+        _ensure_bct(np.zeros((4, 40, 20)), "bct")
+    assert caplog.text == ""
+
+
+@pytest.mark.unit
+def test_ensure_bct_layout_btc_always_transposes():
+    # Even when axis 1 < axis 2, so the heuristic would have left it alone.
+    assert _ensure_bct(np.zeros((4, 20, 40)), "btc").shape == (4, 40, 20)
+
+
+@pytest.mark.unit
+def test_ensure_bct_layout_auto_is_the_default_and_unchanged():
+    arr = np.zeros((4, 40, 20))
+    assert _ensure_bct(arr).shape == _ensure_bct(arr, "auto").shape == (4, 20, 40)
+
+
+@pytest.mark.unit
+def test_ensure_bct_rejects_unknown_layout():
+    with pytest.raises(ValueError, match="Unknown layout"):
+        _ensure_bct(np.zeros((4, 2, 8)), "bogus")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("layout", ["auto", "bct", "btc"])
+def test_local_dataset_honours_layout(tmp_path, layout):
+    # Stored as (6, 30, 2): axis 1 > axis 2, so "auto" reads it as (B, T, C).
+    _write_numpy_dataset(tmp_path, n=6, channels=30, length=2)
+    out = LocalDataset(tmp_path, name="d", layout=layout).load()[0]
+    expected = (6, 30, 2) if layout == "bct" else (6, 2, 30)
+    assert out.shape == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("encode", ["label", "onehot", "ordinal"])
+def test_save_load_round_trip_per_encode(tmp_path, encode):
+    # save_splits persists DECODED labels and load_saved_splits re-encodes, so the
+    # codes and the index-to-name map must survive a cache round-trip. Before this,
+    # onehot and ordinal raised in save_splits.
+    data, labels = _make_data(60, n_classes=3)
+    ds = _Dummy(data, labels)
+    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode=encode)
+
+    save_dir = tmp_path / "out"
+    ds.save_splits(save_dir)
+    reloaded, encoder2 = _Dummy(data, labels).load_saved_splits(
+        save_dir / "splits", encode=encode
+    )
+    for original, restored in zip(splits, reloaded, strict=True):
+        np.testing.assert_array_equal(original[1], restored[1])
+    assert _class_name_map(encoder2) == _class_name_map(encoder)

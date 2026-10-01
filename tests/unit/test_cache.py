@@ -91,3 +91,39 @@ def test_get_split_cache_path_is_stable_across_calls():
     first = get_split_cache_path(**_base_kwargs())
     second = get_split_cache_path(**_base_kwargs())
     assert first == second
+
+
+# ── format / path in the key ──────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_default_format_and_no_path_leave_the_name_unchanged():
+    # Tokens are emitted only when non-default, so caches written by earlier
+    # versions stay valid.
+    assert _folder_name() == _folder_name(data_format="numpy", path=None)
+
+
+@pytest.mark.unit
+def test_non_default_format_changes_the_key():
+    csv = _folder_name(data_format="csv")
+    assert csv != _folder_name()
+    assert "_fcsv" in csv
+    assert csv.endswith("_strat")  # the terminal token stays last
+
+
+@pytest.mark.unit
+def test_different_paths_get_different_keys(tmp_path):
+    # Two local datasets can share a name while pointing at different folders;
+    # without the path in the key one would silently serve the other's data.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    name_a = _folder_name(path=tmp_path / "a")
+    name_b = _folder_name(path=tmp_path / "b")
+    assert name_a != name_b
+    assert name_a != _folder_name()
+    assert name_a.endswith("_strat") and name_b.endswith("_strat")
+
+
+@pytest.mark.unit
+def test_path_key_is_stable_across_calls(tmp_path):
+    assert _folder_name(path=tmp_path) == _folder_name(path=tmp_path)

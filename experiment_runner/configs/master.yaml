@@ -29,13 +29,26 @@ data_config:
     train_split: 0.8
     val_split: 0.1
     channels: 1
-    classes: 2
     length: 150
-    encode: "label"         # "label", "onehot", "ordinal", "multihot"
-                            #   "multihot": collapse multi-hot label rows (e.g. [0,1,1]) to one
-                            #   class index per distinct combo, keeping the combo as the class
-                            #   name; the index->name map is logged so results decode back.
+    encode: "label"         # how to read the label column; the pipeline always carries 1-D
+                            # int64 class indices, and the encoder is kept only to map those
+                            # indices back to class names:
+                            #   "label":    unordered categories (default)
+                            #   "ordinal":  ordered categories; see `classes` below
+                            #   "onehot":   the column holds one-hot rows -> hot position
+                            #   "multihot": the column holds multi-hot rows (e.g. [0,1,1]) ->
+                            #               one index per distinct combo, combo kept as the name
+    classes: null           # explicit class order, only for encode: "ordinal", e.g.
+                            # ["low", "medium", "high"]. Without it classes are ordered
+                            # lexicographically, which for ordered string labels is wrong
+                            # (low/medium/high becomes high < low < medium) and is warned about.
+                            # Numeric labels need no order.
     format: "numpy"         # "numpy", "arff", "csv", "wfdb"
+    layout: "auto"          # axis order of a local array (ignored for UCR/UEA and synthetic):
+                            #   "auto": transpose when axis 1 > axis 2, with a warning
+                            #   "bct":  trust as (B, C, T) -- use this when the data genuinely
+                            #           has more channels than timesteps, which "auto" corrupts
+                            #   "btc":  always transpose
     download: true          # Download UCR dataset if not found locally
     path: null              # Local path; if set, LocalDataset is used instead of UcrUeaDataset
     is_presplit: false      # true = load directly via load_saved_splits(), bypass cache

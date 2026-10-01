@@ -9,7 +9,13 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_UCR_UEA_dataset
 
-from .base import DatasetBase, _ensure_bct, _impute_data, _make_encoder
+from .base import (
+    DatasetBase,
+    _class_index_view,
+    _ensure_bct,
+    _impute_data,
+    _make_encoder,
+)
 from .data_loaders import FORMAT_LOADERS
 
 logger = logging.getLogger(__name__)
@@ -255,6 +261,7 @@ class UcrUeaDataset(DatasetBase):
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
         stratify: bool = True,
+        class_order: list | None = None,
     ) -> tuple:
         """
         Load and split the dataset.
@@ -276,6 +283,7 @@ class UcrUeaDataset(DatasetBase):
                 impute_missing=impute_missing,
                 rng=rng,
                 stratify=stratify,
+                class_order=class_order,
             )
 
         rng = rng or np.random.default_rng(random_state)
@@ -295,7 +303,7 @@ class UcrUeaDataset(DatasetBase):
             data_test = _impute_data(data_test)
 
         # Fit encoder on union of both splits so all classes are represented
-        encoder = _make_encoder(encode)
+        encoder = _make_encoder(encode, class_order=class_order)
         all_labels = np.concatenate([labels_train, labels_test])
         if not isinstance(encoder, LabelEncoder):
             all_labels = all_labels.reshape(-1, 1)
@@ -303,7 +311,8 @@ class UcrUeaDataset(DatasetBase):
 
         def _transform(enc: object, arr: np.ndarray) -> np.ndarray:
             needs_2d = not isinstance(enc, LabelEncoder)
-            return enc.transform(arr.reshape(-1, 1) if needs_2d else arr)
+            encoded = enc.transform(arr.reshape(-1, 1) if needs_2d else arr)
+            return _class_index_view(encoded).astype(np.int64)
 
         y_train = _transform(encoder, labels_train)
         y_test = _transform(encoder, labels_test)
@@ -331,6 +340,7 @@ class LocalDataset(DatasetBase):
         path: str | Path,
         name: str,
         data_format: str = "numpy",
+        layout: str = "auto",
         pad_series: bool = False,
         max_samples: int | None = None,
         sample_strategy: str = "random",
@@ -349,6 +359,12 @@ class LocalDataset(DatasetBase):
             Required because paths may differ across machines.
         data_format : str
             File format: ``"numpy"`` (default), ``"arff"``, ``"csv"``, ``"wfdb"``.
+        layout : str
+            Axis order of the stored array: ``"auto"`` (default) guesses from the
+            shape and transposes when axis 1 exceeds axis 2, ``"bct"`` trusts it as
+            ``(B, C, T)``, ``"btc"`` always transposes. Set ``"bct"`` for data that
+            genuinely has more channels than timesteps, which ``"auto"`` would
+            otherwise corrupt.
         pad_series : bool
             If ``True``, variable-length data (list of arrays) is zero-padded to
             the length of the longest series before returning.  If ``False``
@@ -372,6 +388,7 @@ class LocalDataset(DatasetBase):
         self.path = Path(path)
         self.name = name
         self.data_format = data_format
+        self.layout = layout
         self.pad_series = pad_series
 
     def load(self) -> tuple:
@@ -391,10 +408,7 @@ class LocalDataset(DatasetBase):
             )
         data, labels, metadata = loader(self.path)
         # Apply (B, T, C) → (B, C, T) heuristic for local data only.
-        # UCR/UEA data from sktime is already (B, C, T) so this call lives here,
-        # not in DatasetBase.split(), to avoid silently corrupting spectrogram
-        # datasets where channels > timesteps.
-        data = _ensure_bct(data)
+        data = _ensure_bct(data, self.layout)
         logger.info("Loaded local dataset '%s' — %d samples", self.name, len(data))
         return data, labels, metadata
 
@@ -697,6 +711,7 @@ def load_dataset(
     sample_strategy: str = "random",
     max_series_length: int | None = None,
     series_position: str = "first",
+    layout: str = "auto",
     **kwargs: object,
 ) -> DatasetBase:
     """
@@ -731,6 +746,10 @@ def load_dataset(
     series_position : str
         Which end of a long series to retain: ``"first"`` (default) or
         ``"last"``.
+    layout : str
+        Axis order of a local array: ``"auto"`` (default), ``"bct"`` or ``"btc"``.
+        Only meaningful with *path*; UCR/UEA and synthetic data are already
+        ``(B, C, T)``, so it is not forwarded to them.
     **kwargs
         Forwarded to the selected subclass constructor (e.g. ``download``,
         ``data_format``).
@@ -754,9 +773,18 @@ def load_dataset(
     if path is not None:
         if name is None:
             raise ValueError("'name' is required when 'path' is provided.")
+        kwargs.pop("download", None)
+        if kwargs.pop("use_predefined_splits", False):
+            logger.warning(
+                "'use_predefined_splits' does not apply to the local dataset "
+                "'%s' and is ignored; use 'is_presplit' to load an "
+                "already-split directory.",
+                name,
+            )
         return LocalDataset(
             path,
             name=name,
+            layout=layout,
             pad_series=pad_series,
             **restriction_kwargs,
             **kwargs,

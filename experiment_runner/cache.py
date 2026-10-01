@@ -55,6 +55,7 @@ two independent sub-trees:
         InsectWingbeat_tr0.8_v0.1_s42_label_p_s5000s_t1000f
 """
 
+import hashlib
 from pathlib import Path
 
 
@@ -80,6 +81,8 @@ def get_split_cache_path(
     series_position: str = "first",
     stratify: bool = True,
     use_predefined_splits: bool = False,
+    data_format: str = "numpy",
+    path: str | Path | None = None,
 ) -> Path | None:
     """
     Return the path for a specific cached split, or ``None`` if disabled.
@@ -140,6 +143,13 @@ def get_split_cache_path(
         *use_predefined_splits* is ``True``.
     use_predefined_splits : bool
         Whether the official archive ``_TRAIN``/``_TEST`` files were used.
+    data_format : str
+        Loader used to read the data.  Different loaders can yield different
+        arrays from one directory, so a non-default format gets its own entry.
+    path : str or Path, optional
+        Local dataset directory.  Two datasets can share a *dataset_name* while
+        pointing at different directories, so the path is folded into the key as a
+        short digest to keep them apart.
 
     Returns
     -------
@@ -153,6 +163,14 @@ def get_split_cache_path(
         suffix += f"_s{max_samples}{sample_strategy[0]}"
     if max_series_length is not None:
         suffix += f"_t{max_series_length}{series_position[0]}"
+    # Both tokens are emitted only when non-default, so every folder name written
+    # by an earlier version stays byte-identical and no existing cache is
+    # invalidated.  ("_p" is already taken by padding, hence "_f"/"_d".)
+    if data_format and data_format != "numpy":
+        suffix += f"_f{data_format}"
+    if path is not None:
+        digest = hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:8]
+        suffix += f"_d{digest}"
     if use_predefined_splits:
         suffix += "_official"
     elif stratify:

@@ -69,7 +69,11 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
 ### Fixed
 
 - `general.reproducible: false` raised `UnboundLocalError` and silently skipped
-  every dataset; the seeded and unseeded paths now both work.
+  every dataset; the seeded and unseeded paths now both work. An unseeded run
+  additionally **bypasses the split cache** in both directions, since a random
+  draw cannot be described by a cache key - previously it would either have
+  reused another run's splits or written a new cache directory per run. Seeded
+  runs are unaffected: cache folder names and split outcomes are unchanged.
 
 ## [1.1.0] - 2026-07-03
 

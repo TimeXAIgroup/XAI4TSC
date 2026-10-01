@@ -113,15 +113,21 @@ def main(config_path: str, debug: bool = False) -> int:
     logger.info("Running experiment on %d dataset(s).", len(d_con["datasets"]))
 
     # Make results reproducible
-    if config["general"]["reproducible"]:
-        seed = config["general"]["seed"]
+    seed = config["general"]["seed"]
+    reproducible = config["general"]["reproducible"]
+    if reproducible:
         np.random.seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         torch.manual_seed(seed)
         logger.info("Setting seed to: %s", seed)
-        prng = np.random.default_rng(seed)
-        legacy_prng = int(prng.integers(2**31))  # used only for split cache key
+    else:
+        logger.info(
+            "reproducible: false - splits are drawn unseeded and are neither "
+            "read from nor written to the split cache."
+        )
+    prng = np.random.default_rng(seed if reproducible else None)
+    legacy_prng = int(prng.integers(2**31))
 
     # check for computational devices
     if g_con["device"] == "use_available":
@@ -249,7 +255,7 @@ def main(config_path: str, debug: bool = False) -> int:
                     )
                 else:
                     split_cache = get_split_cache_path(
-                        cache_path,
+                        cache_path if reproducible else None,
                         dataset["dataset"],
                         dataset["train_split"],
                         dataset["val_split"],

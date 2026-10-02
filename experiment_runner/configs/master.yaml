@@ -1,8 +1,21 @@
-# Master configuration — annotated reference for all available options.
-# This file is also used at runtime by config_resolve() to supply defaults
-# and to warn about unknown keys in user configs.
+# Master configuration - the annotated reference for every available option.
+#
+# REFERENCE ONLY: this file is not runnable. It is read at runtime by
+# config_resolve() to supply the defaults of the `general` and `default_settings`
+# blocks and to warn about unknown keys. Copy the entries you need into your own
+# config; configs/example.yaml is a working starting point.
+#
+# PARAMETER DEFAULTS LIVE IN THE CODE. The four component lists below
+# (datasets, models, explainers, metrics) are a catalogue of what is available:
+# their comments name each parameter's default, but this file does not supply
+# them, so a value you omit comes from the class that consumes it and the
+# importable package and the runner always agree. All four lists are required in
+# your own config - they describe what the experiment runs and cannot be
+# defaulted.
 
-experiment_name: "experiment"
+experiment_name: null       # REQUIRED in your own config
+
+results_rel_path: null      # REQUIRED in your own config, e.g. "./experiments/results/"
 
 # Path to the cache directory.  If set, UCR downloads and dataset splits are
 # cached here and reused across runs.  Set to null or omit to disable caching.
@@ -14,6 +27,7 @@ experiment_name: "experiment"
 #       {dataset}_{params}/  ← folder name encodes all split parameters
 #
 cache_path: null
+
 
 general:
   reproducible: true        # Enforce seed-based reproducibility. When false, splits are
@@ -68,66 +82,56 @@ data_config:
     sample_strategy: "random"  # subset selection: "random" | "first" | "last" | "stratified"
     max_series_length: null # truncate each series to at most T timesteps; reduces memory for long-series datasets
     series_position: "first"   # which end to retain when truncating: "first" (start) | "last" (end)
-  datasets: []              # List of {dataset: <name>, path: <optional>, ...} entries
-                            # 'dataset' is ALWAYS the human-readable name
-                            # 'path' triggers LocalDataset; omit for UcrUeaDataset
-                            # Any other key is a per-entry setting that overrides default_settings.
-                            #
-                            # Reserved keywords (expand to all archive datasets at runtime):
-                            #   "UCR" → all 128 UCR univariate datasets
-                            #   "UEA" → all 33 UEA multivariate datasets
-                            #
-                            # An entry's inline settings apply to EVERY dataset it produces (for a
-                            # wildcard, all members). To special-case individual members of a
-                            # wildcard, add an 'overrides' map {dataset_name: {setting: value, ...}};
-                            # listed members take precedence over the entry's inline settings.
-                            # Priority: overrides[name] > entry inline settings > default_settings
-                            # Example:
-                            #   datasets:
-                            #     - dataset: "UEA"          # all 33 UEA datasets
-                            #       allow_padding: true     # applies to all members
-                            #       overrides:              # per-member exceptions
-                            #         InsectWingbeat:
-                            #           max_samples: 5000
-                            #           sample_strategy: "stratified"
-                            #           max_series_length: 1000
-                            #     - dataset: "GunPoint"     # a normal explicit entry
-                            #       max_samples: 500
-                            #
-                            # Synthetic datasets (registered in SYNTHETIC_DATASETS) are dispatched by
-                            # 'dataset' (the registry key); generation params go under 'init_params'.
-                            # They take no path/download/format. A dataset is cached under
-                            # <cache>/synthetic/ (first-look: skip regeneration if present) and a
-                            # pre-split layout there is auto-detected and loaded. Per-sample
-                            # ground-truth localization lives in a separate metadata.json (one row per
-                            # sample: ground_truth = {class_index: [regions]} OR a flat [regions] list,
-                            # plus non_discriminative); used by time-frequency localization metrics.
-                            #
-                            # NOTE — 'freq_shapes' currently ships a FIXED, paper-faithful pre-split
-                            # dataset committed under cache/datasets/synthetic/freq_shapes/ (its
-                            # ground_truth is the flat-list form). With 'cache_path' set, the runner
-                            # loads that pre-split layout directly and preserves the original split;
-                            # the programmatic generator is disabled for now, so the 'init_params'
-                            # below are INERT for freq_shapes (kept for backward compatibility and as a
-                            # template for other synthetic datasets). This is a temporary arrangement.
-                            # Example:
-                            #   datasets:
-                            #     - dataset: "freq_shapes"  # localized wave-packet synthetic dataset
-                            #       encode: "multihot"      # labels are multi-hot
-                            #       init_params:            # inert for freq_shapes (generator disabled)
-                            #         n_samples: 600
-                            #         length: 500           # series length T
-                            #         class_freqs: [7, 19, 37]  # one characteristic freq per attribute
-                            #         packet_len: 150       # discriminative packet length
-                            #         n_global_distractors: 3
-                            #         n_local_distractors: 3
-                            #         seed: 0
+  datasets:                 # REQUIRED. List of {dataset: <name>, ...} entries.
+                            # 'dataset' is ALWAYS the human-readable name. Every other key
+                            # is a per-entry override of a default_settings value above.
+                            # Synthetic datasets are dispatched by the SYNTHETIC_DATASETS
+                            # registry key and take no path/download/format.
+    - dataset: "GunPoint"   # a UCR/UEA archive dataset, fetched by name
+      max_samples: 500      # overrides default_settings for this entry only
+
+    - dataset: "my_recording"   # 'path' switches to LocalDataset instead of UcrUeaDataset
+      path: ./data/my_recording
+      format: "numpy"       # "numpy" | "arff" | "csv" | "wfdb"
+      layout: "bct"         # state the axis order: Batch x Channel x Timesteps
+      is_presplit: false    # true = the folder already holds train/test splits
+
+    - dataset: "UEA"        # reserved keyword: all 33 UEA multivariate datasets
+                            #   ("UCR" expands to all 128 univariate ones)
+      allow_padding: true   # an entry's inline settings apply to every member it expands to
+      overrides:            # per-member exceptions; listed members win over the inline
+        InsectWingbeat:     #   settings. Priority: overrides[name] > inline > default_settings
+          max_samples: 5000
+          sample_strategy: "stratified"
+          max_series_length: 1000
+
+    - dataset: "freq_shapes"    # synthetic: localized wave-packet dataset, ships with
+                                #   per-sample ground truth for the localization metrics
+      encode: "multihot"        # its labels are multi-hot rows
+      init_params:              # generation params (defaults from FreqShapesDataset):
+                                #   n_samples: 600
+                                #   length: 500              series length T
+                                #   class_freqs: [7, 19, 37] one freq per attribute
+                                #   packet_len: 150          discriminative packet length
+                                #   n_global_distractors: 3
+                                #   n_local_distractors: 3
+                                #   seed: 0
+                                # NOTE - inert for freq_shapes today. It ships a fixed,
+                                # publication-faithful pre-split dataset committed under
+                                # cache/datasets/synthetic/freq_shapes/ (ground_truth in the
+                                # flat-list form). With 'cache_path' set the runner loads that
+                                # layout directly and preserves the original split; the
+                                # programmatic generator is disabled. Kept as the template for
+                                # other synthetic datasets. This is a temporary arrangement.
+                                # Ground truth lives in a separate metadata.json, one row per
+                                # sample: ground_truth = {class_index: [regions]} or a flat
+                                # [regions] list, plus non_discriminative.
 
 train_config:
   default_settings:
     hyperparams:
-      epochs: 10            # epochs to run in this call (a resumed run continues the count)
-      batchsize: 16
+      epochs: 20            # epochs to run in this call (a resumed run continues the count)
+      batchsize: 8          # batchsize for model training
       loss_func: "CrossEntropy"   # only "CrossEntropy" is supported
       optimizer: "adam"           # only "adam" is supported
       learn_rate: 0.001
@@ -135,86 +139,76 @@ train_config:
       save_best: true       # true = keep the best epoch by validation loss (training loss
                             #   when there is no val split); false = keep the final epoch
     train: true             # switch: true trains, false (or omitting the key) does not.
-  models: []                # List of {model: <name>, init_params: {...}, ...} entries.
+  models:                   # REQUIRED. List of {model: <name>, init_params: {...}} entries.
                             # init_params left out or set to null are auto-detected:
                             #   num_classes -> number of unique classes in training labels
                             #   in_channels -> data.shape[1] (channel dim, after BCT normalisation)
-                            #
-                            # Every built-in model, with its init_params and their defaults:
-                            #
-                            # - model: FCN          # Fully Convolutional Network (Wang et al. 2017)
-                            #   init_params:
-                            #     filters: [128, 256, 128]   # conv filters per block
-                            #     kernel_sizes: [8, 5, 3]    # kernel size per block
-                            #
-                            # - model: LeNet        # shallow LeNet-style 1D CNN (Wagner et al. 2024)
-                            #   init_params:
-                            #     head_hidden: 128           # width of the hidden fully-connected layer
-                            #
-                            # - model: ResNet       # residual TSC baseline (Wang et al. 2017)
-                            #   init_params:
-                            #     n_feature_maps: 64         # base conv width F; blocks use F, 2F, 2F
-                            #     kernel_sizes: [8, 5, 3]    # kernels of the 3 convs per residual block
-                            #
-                            # - model: LSTM         # (bi)LSTM recurrent baseline; mean-pool over time
-                            #   init_params:
-                            #     hidden_size: 128           # features per LSTM hidden state
-                            #     num_layers: 2              # stacked LSTM layers
-                            #     bidirectional: true        # head width doubles when true
-                            #     dropout: 0.0               # between layers (ignored if num_layers == 1)
-                            #
-                            # - model: XLSTM        # mLSTM (parallel, clean-room; Beck et al. 2024)
-                            #   init_params:
-                            #     embed_dim: 128             # model width (must be divisible by num_heads)
-                            #     num_blocks: 2              # stacked mLSTM blocks
-                            #     num_heads: 4               # mLSTM heads (must divide embed_dim)
-                            #     dropout: 0.0               # block residual-branch dropout
-                            #
-                            # - model: PatchTST     # channel-independent patch transformer (Nie et al. 2023)
-                            #   init_params:
-                            #     d_model: 128               # embedding dim (must be divisible by nhead)
-                            #     patch_len: 16              # length of each patch
-                            #     stride: 8                  # step between patches (< patch_len overlaps)
-                            #     num_layers: 3              # transformer-encoder layers
-                            #     nhead: 8                   # attention heads (must divide d_model)
-                            #     dim_feedforward: 256       # encoder feed-forward width
-                            #     dropout: 0.1               # dropout inside the encoder
-                            #
-                            # EXAMPLE - an external (non-built-in) model: give a unique 'model'
-                            #   name plus the class and the file it lives in; it is imported and
-                            #   registered automatically. Requires general.allow_external_code:
-                            #   true. Explainer and metric entries take the same two keys.
-                            #
-                            # - model: MyModel
-                            #   class_name: MyModel          # class defined in the source file
-                            #   class_path: ./my_model.py    # path to the .py source file
-                            #   init_params:
-                            #     hidden_size: 64
-                            #
-                            # EXAMPLE - evaluate a pre-trained checkpoint without retraining it:
-                            #   omit 'train' (or set it false) and point 'model_ckpt_path' at a
-                            #   .pt file - either a <Model>_epoch_<N>.pt from an earlier run, or a
-                            #   model_dict.pt from xai4tsc.models.save_model(). The
-                            #   <checkpoint>_config.json beside it (e.g. FCN_epoch_10_config.json)
-                            #   records the model name, the resolved init_params and the epoch
-                            #   reached, so init_params need not be restated; values from that
-                            #   file win over this config, because the weights only fit the
-                            #   architecture they were trained with.
-                            #
-                            # - model: FCN
-                            #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
-                            #   train: false
-                            #
-                            # EXAMPLE - fine-tune from a checkpoint instead of scoring it as-is:
-                            #   set 'train' on the entry itself; only the value inherited from
-                            #   default_settings is dropped for checkpoint entries. Epoch counting
-                            #   continues, so resuming FCN_epoch_10.pt with epochs.
-                            #
-                            # - model: FCN
-                            #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
-                            #   train: true
-                            #   hyperparams:
-                            #     epochs: 5
+                            # The init_params of each built-in are listed below with the
+                            # default the class itself uses; give only what you want to change.
+    - model: FCN            # Fully Convolutional Network (Wang et al. 2017)
+                            # init_params (defaults from xai4tsc.models.FCN):
+                            #   filters: [128, 256, 128]   conv filters per block
+                            #   kernel_sizes: [8, 5, 3]    kernel size per block
+    - model: LeNet          # shallow LeNet-style 1D CNN (Wagner et al. 2024)
+                            # init_params (defaults from xai4tsc.models.LeNet):
+                            #   head_hidden: 128           width of the hidden FC layer
+    - model: ResNet         # residual TSC baseline (Wang et al. 2017)
+                            # init_params (defaults from xai4tsc.models.ResNet):
+                            #   n_feature_maps: 64         base conv width F; blocks use F, 2F, 2F
+                            #   kernel_sizes: [8, 5, 3]    kernels of the 3 convs per block
+    - model: LSTM           # (bi)LSTM recurrent baseline; mean-pool over time
+                            # init_params (defaults from xai4tsc.models.LSTM):
+                            #   hidden_size: 128           features per LSTM hidden state
+                            #   num_layers: 2              stacked LSTM layers
+                            #   bidirectional: true        head width doubles when true
+                            #   dropout: 0.0               between layers (ignored if num_layers == 1)
+    - model: XLSTM          # mLSTM (parallel, clean-room; Beck et al. 2024)
+                            # init_params (defaults from xai4tsc.models.XLSTM):
+                            #   embed_dim: 128             model width (divisible by num_heads)
+                            #   num_blocks: 2              stacked mLSTM blocks
+                            #   num_heads: 4               mLSTM heads (must divide embed_dim)
+                            #   dropout: 0.0               block residual-branch dropout
+    - model: PatchTST       # channel-independent patch transformer (Nie et al. 2023)
+                            # init_params (defaults from xai4tsc.models.PatchTST):
+                            #   d_model: 128               embedding dim (divisible by nhead)
+                            #   patch_len: 16              length of each patch
+                            #   stride: 8                  step between patches (< patch_len overlaps)
+                            #   num_layers: 3              transformer-encoder layers
+                            #   nhead: 8                   attention heads (must divide d_model)
+                            #   dim_feedforward: 256       encoder feed-forward width
+                            #   dropout: 0.1               dropout inside the encoder
+
+    # EXAMPLE - an external (non-built-in) model. Give a unique 'model' name plus the
+    #   class and the source file it lives in; it is imported and registered
+    #   automatically. Requires general.allow_external_code: true. Explainer and metric
+    #   entries take the same two keys.
+    # - model: MyModel
+    #   class_name: MyModel           # class defined in the source file
+    #   class_path: ./my_model.py     # path to the .py source file
+    #   init_params:
+    #     hidden_size: 64
+
+    # EXAMPLE - evaluate a pre-trained checkpoint without retraining it. Omit 'train'
+    #   (or set it false) and point 'model_ckpt_path' at a .pt file: either a
+    #   <Model>_epoch_<N>.pt from an earlier run, or a model_dict.pt written by
+    #   xai4tsc.models.save_model(). The <checkpoint>_config.json beside it (e.g.
+    #   FCN_epoch_10_config.json) records the model name, the resolved init_params and
+    #   the epoch reached, so init_params need not be restated; values from that file
+    #   win over this config, because the weights only fit the architecture they were
+    #   trained with.
+    # - model: FCN
+    #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
+    #   train: false
+
+    # EXAMPLE - fine-tune from a checkpoint instead of scoring it as-is: set 'train' on
+    #   the entry itself; only the value inherited from default_settings is dropped for
+    #   checkpoint entries. Epoch counting CONTINUES, so resuming FCN_epoch_10.pt with
+    #   epochs: 5 writes FCN_epoch_11.pt ... FCN_epoch_15.pt rather than restarting at 1.
+    # - model: FCN
+    #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
+    #   train: true
+    #   hyperparams:
+    #     epochs: 5
 
 explanation_config:
   default_settings:
@@ -226,78 +220,104 @@ explanation_config:
       indices: [0]          # Used when type = "index"
       count: 5              # Used when type = "random"
     save_exp_values: false  # true = save exp_values, indices, labels as .npy
-  explainers:               # List of {method: <name>, ...} entries.
+  explainers:               # REQUIRED. List of {method: <name>, ...} entries.
+                            # Each method's parameters are listed below with the default the
+                            # class itself uses; give only what you want to change. Wrapper
+                            # methods nest their base method under 'base'.
     - method: Guided_Backpropagation
-    - method: Integrated_Gradients
-      multiply_by_inputs: true        # multiply attributions by (input - baseline); standard IG behaviour
-      n_steps: 50                     # number of steps along the integration path (higher = more accurate)
-      integration_method: "gausslegendre"  # quadrature rule: gausslegendre, riemann_trapezoid, riemann_middle, riemann_right, riemann_left
-      baselines: 0                    # reference input value for the integration baseline
-    - method: DeepLift
-      multiply_by_inputs: true        # multiply contribution scores by (input - reference); matches original DeepLIFT paper
-      eps: 1.0e-10                    # small constant for numerical stability in gradient computation
     - method: Deconvolution
+    - method: Integrated_Gradients
+                            # params (defaults from IntegratedGradientsExplainer):
+                            #   multiply_by_inputs: true   multiply by (input - baseline)
+                            #   n_steps: 50                steps along the integration path
+                            #   integration_method: "gausslegendre"   quadrature rule; also
+                            #     riemann_trapezoid / riemann_middle / riemann_right / riemann_left
+                            #   baselines: 0               reference input for the baseline
+                            #   internal_batch_size: null   batch size Captum uses internally
+    - method: DeepLift
+                            # params (defaults from DeepLiftExplainer):
+                            #   multiply_by_inputs: true   matches the original DeepLIFT paper
+                            #   eps: 1.0e-10               numerical stability constant
     - method: Occlusion
-      strides: 1                      # step size of the sliding window (must be <= each dim of window_shape)
-      baseline: 0                     # value used to fill the occluded region
-      window_shape: [1, 5]            # [channels, timesteps] size of the occlusion patch
-    - method: TSHAP                   # exact 2-player Shapley over time windows (Le Nguyen & Ifrim, ECML PKDD 2025)
-      window_length: 0.1              # window size: float in (0,1] = fraction of series length T, or int timesteps
-      stride: 5                       # compute Shapley every `stride` window starts; linearly interpolate between
-      perturb_baseline: "centroid"    # background: centroid (needs background_data), black, white, mean, random
-      perturb_func: null              # optional override: name/dotted-path to (arr, indices, **kwargs) -> arr
-      n_perturb_samples: 1            # background draws to average (Eq. 8); only meaningful for "random"
-      channel_mode: "shared"          # "shared" (one value per window, broadcast to channels) or "per_channel" (C× cost)
-      roi: false                      # true = TSHAP-ROI region attribution (Algorithm 2; sharper, higher precision)
-      background_data: train_set      # runner selector resolved to an ndarray: train_set, test_set or val_set
-      seed: null                      # seed for the "random" baseline, for reproducible draws
-    - method: SIGN                    # wrapper: extends a gradient method with the SIGN rule (Gumpfer et al. 2023)
-      mu: 0.0                         # sign threshold s_mu: input < mu -> -1, else +1
-      base:                           # the gradient method SIGN wraps (its own params nested here)
+                            # params (defaults from OcclusionExplainer):
+                            #   window_shape: null         [channels, timesteps] patch size;
+                            #     null is normalised to [1, 5]
+                            #   strides: 1                 sliding-window step; must not exceed
+                            #     any dimension of window_shape
+                            #   baseline: 0                value filling the occluded region
+    - method: TSHAP         # exact 2-player Shapley over time windows (Le Nguyen & Ifrim 2025)
+      background_data: train_set    # runner selector resolved to an ndarray before the
+                                    #   explainer sees it: train_set | test_set | val_set
+                            # params (defaults from TSHAPExplainer):
+                            #   window_length: 0.1         float in (0,1] = fraction of T, or int
+                            #   stride: 5                  Shapley every `stride` window start,
+                            #     interpolated in between
+                            #   perturb_baseline: "centroid"   background: centroid (needs
+                            #     background_data) | black | white | mean | random
+                            #   perturb_func: null         name/dotted path to
+                            #     (arr, indices, **kwargs) -> arr
+                            #   n_perturb_samples: 1       background draws to average (Eq. 8);
+                            #     only meaningful for "random"
+                            #   channel_mode: "shared"     one value per window, broadcast; or
+                            #     "per_channel" (C x cost)
+                            #   roi: false                 true = TSHAP-ROI region attribution
+                            #     (Algorithm 2; sharper, higher precision)
+                            #   seed: null                 seed for the "random" baseline
+    - method: SIGN          # wrapper: extends a gradient method with the SIGN rule
+                            #   (Gumpfer et al. 2023)
+      base:                 # REQUIRED: the gradient method SIGN wraps, with its own params
         method: Integrated_Gradients
-        multiply_by_inputs: false     # REQUIRED: SIGN replaces "x input" with "x sign(input)", so the base must emit the raw gradient
-        n_steps: 50
-    - method: FreqRISE                # frequency-masking perturbation attribution (Brüsch et al., NLDL 2025)
-      domain: stft                    # "fft" (frequency, real FFT) or "stft" (time-frequency); stft needs a transform
-      transform:                      # required for domain=stft; built via get_transform (omit for domain=fft)
-        name: stft                    # "stft" or "fft"
+        multiply_by_inputs: false   # REQUIRED: SIGN replaces "x input" with "x sign(input)",
+                                    #   so the base must emit the raw gradient
+                            # params (defaults from SIGNExplainer):
+                            #   mu: 0.0                    sign threshold: input < mu -> -1, else +1
+    - method: FreqRISE      # frequency-masking perturbation attribution (Brüsch et al. 2025)
+      domain: stft          # "fft" (real FFT -> FREQUENCY) or "stft" (-> TIME_FREQUENCY)
+      transform:            # REQUIRED for domain=stft; must be omitted for domain=fft, which
+        name: stft          #   attaches its own rFFT transform
         params:
           n_fft: 64
           win_length: 64
           hop_length: 32
-      batch_size: 10                  # masks evaluated per forward batch
-      num_batches: 300                # mask batches to average over (higher = less noisy, slower)
-      num_cells: 8                    # coarse mask-grid resolution; num_cells//2 MUST be < the smallest transform dim (n_freq, and n_time for stft)
-      probability_of_drop: 0.5        # Bernoulli probability a cell is kept (= E[M] in the relevance normalisation)
-      seed: null                      # seed for reproducible mask sampling
-    - method: Frequency               # explanation-space wrapper: maps a base method's relevance to frequency domain (Rezaei & Liu 2024)
-      base:                           # the time-domain attributor to lift (its own params nested here)
+                            # params (defaults from FreqRISEExplainer):
+                            #   batch_size: 10             masks per forward batch
+                            #   num_batches: 300           mask batches to average over
+                            #   num_cells: 8               coarse mask-grid resolution;
+                            #     num_cells//2 MUST be < the smallest transform dim
+                            #     (n_freq, and n_time for stft)
+                            #   probability_of_drop: 0.5   Bernoulli keep probability, = E[M]
+                            #     in the relevance normalisation
+                            #   seed: null                 seed for reproducible masks
+    - method: Frequency     # explanation-space wrapper: lifts a base method's relevance into
+                            #   the frequency domain (Rezaei & Liu 2024)
+      base:                 # REQUIRED: the time-domain attributor to lift, with its own params
         method: Integrated_Gradients
-      transform:                      # transform to frequency domain (defaults to full FFT if omitted)
+      transform:            # defaults to the full FFT when omitted
         name: fft
         params: {}
-    - method: TimeFrequency           # explanation-space wrapper: maps a base method's relevance to time-frequency domain
+    - method: TimeFrequency # explanation-space wrapper: lifts into the time-frequency domain
       base:
         method: Guided_Backpropagation
-      transform:                      # REQUIRED: time-frequency transform (no sensible default window)
+      transform:            # REQUIRED: there is no sensible default window
         name: stft
         params:
           n_fft: 64
           win_length: 64
           hop_length: 32
-    - method: Random_Frequency        # uniform-random baseline in the frequency domain (sanity check for metrics)
+    - method: Random_Frequency      # uniform-random baseline in the frequency domain, as a
+                                    #   sanity check for metrics
       transform:
         name: fft
         params: {}
-      seed: null
-    - method: Random_TimeFrequency    # uniform-random baseline in the time-frequency domain
-      transform:                      # REQUIRED time-frequency transform
+                            # params: seed: null
+    - method: Random_TimeFrequency  # uniform-random baseline in the time-frequency domain
+      transform:            # REQUIRED time-frequency transform
         name: stft
         params:
           n_fft: 64
           win_length: 64
           hop_length: 32
-      seed: null
+                            # params: seed: null
 
 evaluation_config:
   default_settings:
@@ -309,126 +329,168 @@ evaluation_config:
       return_aggregate: true
     metric_call_params:
       softmax: false
-  metrics:                  # List of {metric: <name>, ...} entries.
+  metrics:                  # REQUIRED. List of {metric: <name>, ...} entries.
+                            # Each metric's parameters are listed below with the value the
+                            # metric's own class defaults to. To SET one, nest it under
+                            # 'metric_class_params' (constructor) or 'metric_call_params'
+                            # (call time) on the entry or in default_settings above -
+                            # a parameter written at an entry's top level is not read.
+                            # Per-entry runner keys, available on every metric:
+                            #   animate: false        write a GIF of the perturbation curve;
+                            #     only the perturbation metrics implement it, others warn
+                            #   animate_sample: 0     index within the explained samples
+                            #   animate_fps: 2        frames per second
     - metric: AUC
     - metric: Attribution Localisation
-      weighted: false           # weight attributions by their magnitude
-      max_size: 1.0             # max fraction of input area considered as "region"
-      positive_attributions: false  # only consider positive attribution values
+                            # params (set via metric_class_params):
+                            #   weighted: false                weight attributions by their magnitude
+                            #   max_size: 1.0                  max fraction of input area considered as "region"
+                            #   positive_attributions: false   only consider positive attribution values
     - metric: Avg-Sensitivity
-      nr_samples: 200           # number of perturbation samples
-      lower_bound: 0.2          # radius of the perturbation ball
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200    number of perturbation samples
+                            #   lower_bound: 0.2   radius of the perturbation ball
     - metric: Completeness
-      perturb_baseline: "black" # baseline for perturbed features: black, white, mean, random
+                            # params (set via metric_class_params):
+                            #   perturb_baseline: "black"   baseline for perturbed features: black, white, mean, random
     - metric: Complexity
     - metric: Consistency
     - metric: Continuity Test
-      nr_steps: 28              # number of perturbation steps along the translation path
-      perturb_baseline: "black" # baseline for perturbed region
+                            # params (set via metric_class_params):
+                            #   nr_steps: 28                number of perturbation steps along the translation path
+                            #   perturb_baseline: "black"   baseline for perturbed region
     - metric: Effective Complexity
-      eps: 1.0e-5               # threshold below which an attribution is considered zero
+                            # params (set via metric_class_params):
+                            #   eps: 1.0e-5   threshold below which an attribution is considered zero
     - metric: Efficient MPRT
-      layer_order: "bottom_up"  # layer traversal order: bottom_up or top_down
-      seed: 42                  # random seed for weight randomisation
-      skip_layers: true         # skip layers without learnable parameters
+                            # params (set via metric_class_params):
+                            #   layer_order: "bottom_up"   layer traversal order: bottom_up or top_down
+                            #   seed: 42                   random seed for weight randomisation
+                            #   skip_layers: true          skip layers without learnable parameters
     - metric: Faithfulness Correlation
-      nr_runs: 100              # number of random subset samples
-      subset_size: 0.05         # fraction of series length T (converted to int at runtime)
-      perturb_baseline: "black" # value used to replace perturbed features
+                            # params (set via metric_class_params):
+                            #   nr_runs: 100                number of random subset samples
+                            #   subset_size: 0.05           fraction of series length T (converted to int at runtime)
+                            #   perturb_baseline: "black"   value used to replace perturbed features
     - metric: Faithfulness Estimate
-      features_in_step: 1       # number of features perturbed per step
-      perturb_baseline: "black" # value used to replace perturbed features
+                            # params (set via metric_class_params):
+                            #   features_in_step: 1         number of features perturbed per step
+                            #   perturb_baseline: "black"   value used to replace perturbed features
     - metric: Focus
     - metric: IROF
-      segmentation_method: "slic"   # segmentation algorithm: slic or patches
-      perturb_baseline: "mean"      # baseline for occluded segments
+                            # params (set via metric_class_params):
+                            #   segmentation_method: "slic"   segmentation algorithm: slic or patches
+                            #   perturb_baseline: "mean"      baseline for occluded segments
     - metric: Infidelity
-      loss_func: "mse"          # loss between perturbed and original predictions: mse or cross_entropy
-      n_perturb_samples: 10     # number of random perturbation vectors
-      perturb_baseline: "black" # baseline for perturbed region
+                            # params (set via metric_class_params):
+                            #   loss_func: "mse"            loss between perturbed and original predictions: mse or cross_entropy
+                            #   n_perturb_samples: 10       number of random perturbation vectors
+                            #   perturb_baseline: "black"   baseline for perturbed region
     - metric: InputInvariance
-      input_shift: -1           # constant added to the input (tests shift-invariance of attributions)
+                            # params (set via metric_class_params):
+                            #   input_shift: -1   constant added to the input (tests shift-invariance of attributions)
     - metric: Local Lipschitz Estimate
-      nr_samples: 200           # number of perturbation samples
-      perturb_mean: 0.0         # mean of Gaussian perturbation
-      perturb_std: 0.1          # standard deviation of Gaussian perturbation
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200     number of perturbation samples
+                            #   perturb_mean: 0.0   mean of Gaussian perturbation
+                            #   perturb_std: 0.1    standard deviation of Gaussian perturbation
     - metric: MPRT
-      layer_order: "top_down"   # layer traversal order: top_down or bottom_up
-      seed: 42                  # random seed for weight randomisation
-      skip_layers: false        # skip layers without learnable parameters
+                            # params (set via metric_class_params):
+                            #   layer_order: "top_down"   layer traversal order: top_down or bottom_up
+                            #   seed: 42                  random seed for weight randomisation
+                            #   skip_layers: false        skip layers without learnable parameters
     - metric: Max-Sensitivity
-      nr_samples: 200           # number of perturbation samples
-      lower_bound: 0.2          # radius of the perturbation ball
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200    number of perturbation samples
+                            #   lower_bound: 0.2   radius of the perturbation ball
     - metric: Monotonicity-Arya
-      features_in_step: 1       # number of features added per step
-      perturb_baseline: "black" # baseline for masked features
+                            # params (set via metric_class_params):
+                            #   features_in_step: 1         number of features added per step
+                            #   perturb_baseline: "black"   baseline for masked features
     - metric: Monotonicity-Nguyen
-      features_in_step: 1       # number of features added per step
-      perturb_baseline: "black" # baseline for masked features
+                            # params (set via metric_class_params):
+                            #   features_in_step: 1         number of features added per step
+                            #   perturb_baseline: "black"   baseline for masked features
     - metric: NonSensitivity
-      eps: 1.0e-5               # threshold: features with attribution below eps are "non-sensitive"
-      features_in_step: 1       # number of features perturbed per step
-      perturb_baseline: "black" # baseline for perturbed features
+                            # params (set via metric_class_params):
+                            #   eps: 1.0e-5                 threshold: features with attribution below eps are "non-sensitive"
+                            #   features_in_step: 1         number of features perturbed per step
+                            #   perturb_baseline: "black"   baseline for perturbed features
     - metric: Pixel-Flipping
-      features_in_step: 1       # number of features flipped per step (higher = coarser curve)
-      perturb_baseline: "black" # value substituted for flipped features
+                            # params (set via metric_class_params):
+                            #   features_in_step: 1         number of features flipped per step (higher = coarser curve)
+                            #   perturb_baseline: "black"   value substituted for flipped features
     - metric: Pointing Game
-      weighted: false           # weight hits by attribution magnitude
+                            # params (set via metric_class_params):
+                            #   weighted: false   weight hits by attribution magnitude
     - metric: ROAD
-      noise: 0.01               # noise level added when replacing removed features
+                            # params (set via metric_class_params):
+                            #   noise: 0.01   noise level added when replacing removed features
     - metric: Random Logit
-      num_classes: 1000         # total number of output classes — set to your dataset's class count
-      seed: 42                  # random seed for logit selection
+                            # params (set via metric_class_params):
+                            #   num_classes: 1000   total number of output classes; set it to your dataset's
+                            #   seed: 42            random seed for logit selection
     - metric: Region Segmentation
-      patch_size: 8             # side length of each patch region (in timesteps for 1-D input)
-      order: "morf"             # evaluation order: morf (most-relevant-first) or lerf
-      regions_evaluation: 100   # number of regions to evaluate
-      perturb_baseline: "black" # baseline for occluded regions
+                            # params (set via metric_class_params):
+                            #   patch_size: 8               side length of each patch region (in timesteps for 1-D input)
+                            #   order: "morf"               evaluation order: morf (most-relevant-first) or lerf
+                            #   regions_evaluation: 100     number of regions to evaluate
+                            #   perturb_baseline: "black"   baseline for occluded regions
     - metric: Relative Input Stability
-      nr_samples: 200           # number of perturbed input samples
-      eps_min: 1.0e-6           # minimum denominator value to avoid division by zero
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200   number of perturbed input samples
+                            #   eps_min: 1.0e-6   minimum denominator value to avoid division by zero
     - metric: Relative Output Stability
-      nr_samples: 200           # number of perturbed input samples
-      eps_min: 1.0e-6           # minimum denominator value to avoid division by zero
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200   number of perturbed input samples
+                            #   eps_min: 1.0e-6   minimum denominator value to avoid division by zero
     - metric: Relative Representation Stability
-      nr_samples: 200           # number of perturbed input samples
-      eps_min: 1.0e-6           # minimum denominator value to avoid division by zero
+                            # params (set via metric_class_params):
+                            #   nr_samples: 200   number of perturbed input samples
+                            #   eps_min: 1.0e-6   minimum denominator value to avoid division by zero
     - metric: Relevance Mass Accuracy
     - metric: Relevance Rank Accuracy
     - metric: Selectivity
-      patch_size: 8             # side length of each patch occluded per step (in timesteps)
-      perturb_baseline: "black" # value substituted for occluded features
+                            # params (set via metric_class_params):
+                            #   patch_size: 8               side length of each patch occluded per step (in timesteps)
+                            #   perturb_baseline: "black"   value substituted for occluded features
     - metric: SensitivityN
-      n_max_percentage: 0.8     # maximum fraction of features to include in subset
-      features_in_step: 1       # number of features added per step
-      perturb_baseline: "black" # baseline for non-selected features
+                            # params (set via metric_class_params):
+                            #   n_max_percentage: 0.8       maximum fraction of features to include in subset
+                            #   features_in_step: 1         number of features added per step
+                            #   perturb_baseline: "black"   baseline for non-selected features
     - metric: Smooth MPRT
-      layer_order: "bottom_up"  # layer traversal order
-      seed: 42                  # random seed for weight randomisation
-      nr_samples: 50            # number of noise samples for smoothing
-      noise_magnitude: 0.1      # magnitude of Gaussian noise added to weights
+                            # params (set via metric_class_params):
+                            #   layer_order: "bottom_up"   layer traversal order
+                            #   seed: 42                   random seed for weight randomisation
+                            #   nr_samples: 50             number of noise samples for smoothing
+                            #   noise_magnitude: 0.1       magnitude of Gaussian noise added to weights
     - metric: Sparseness
     - metric: Sufficiency
-      threshold: 0.6            # fraction of features considered "sufficient" for classification
-      distance_func: "seuclidean"  # distance function for comparing predictions: seuclidean, cosine, etc.
+                            # params (set via metric_class_params):
+                            #   threshold: 0.6                fraction of features considered "sufficient" for classification
+                            #   distance_func: "seuclidean"   distance function for comparing predictions: seuclidean, cosine, etc.
     - metric: Top-K Intersection
-      k: 0.1                    # fraction of series length T (converted to int at runtime)
-      concept_influence: false  # weight intersection by concept influence scores
+                            # params (set via metric_class_params):
+                            #   k: 0.1                     fraction of series length T (converted to int at runtime)
+                            #   concept_influence: false   weight intersection by concept influence scores
     - metric: Frequency Perturbation       # frequency pixel-flipping; needs a FREQUENCY explainer
-      features_in_step: 1       # frequency coefficients perturbed per step
-      perturb_baseline: 0.0     # value perturbed coefficients are set to
-      return_aoc_per_sample: false  # true = per-sample AOC (1 - AUC/steps); false = raw curves
+                            # params (set via metric_class_params):
+                            #   features_in_step: 1            frequency coefficients perturbed per step
+                            #   perturb_baseline: 0.0          value perturbed coefficients are set to
+                            #   return_aoc_per_sample: false   true = per-sample AOC (1 - AUC/steps); false = raw curves
     - metric: Time-Frequency Perturbation  # STFT pixel-flipping; needs a TIME_FREQUENCY explainer
-      features_in_step: 5
-      perturb_baseline: 0.0
-      return_aoc_per_sample: false
+                            # params (set via metric_class_params):
+                            #   features_in_step: 5
+                            #   perturb_baseline: 0.0
+                            #   return_aoc_per_sample: false
     - metric: Time-Frequency Perturbation Gaussian  # softer, Gaussian-smeared TF perturbation
-      features_in_step: 5
-      perturb_baseline: 0.0
-      return_aoc_per_sample: false
+                            # params (set via metric_class_params):
+                            #   features_in_step: 5
+                            #   perturb_baseline: 0.0
+                            #   return_aoc_per_sample: false
     - metric: Time-Frequency AUC
-      return_aggregate: true    # true = mean AUC over valid samples; false = per-sample list
-      abs_attribution: true     # rank by attribution magnitude (false = signed value)
-      sigma: [5.0, 1.0]         # Gaussian kernel std (frequency, time)
-
-results_rel_path: "./experiments/results/"
+                            # params (set via metric_class_params):
+                            #   return_aggregate: true   true = mean AUC over valid samples; false = per-sample list
+                            #   abs_attribution: true    rank by attribution magnitude (false = signed value)
+                            #   sigma: [5.0, 1.0]        Gaussian kernel std (frequency, time)

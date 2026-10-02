@@ -110,8 +110,25 @@ Getting Started
    ``"multihot"`` for multi-hot rows, which collapse to one index per distinct
    combination.
 
-See ``experiment_runner/configs/master.yaml`` for a fully annotated reference
-of every available config key and its default value.
+   **Required settings.** ``experiment_name``, ``results_rel_path`` and the four
+   component lists -- ``data_config.datasets``, ``train_config.models``,
+   ``explanation_config.explainers`` and ``evaluation_config.metrics`` -- must be
+   supplied. The settings blocks describe *how* an experiment runs; the lists
+	 describe *what* it runs sensible default. Omitting one fails with a message
+	 naming it, before anything is written to disk. Set a list to ``[]`` to skip
+	 that level deliberately: the run then warns and completes.
+
+   **Where defaults live.** Parameter defaults belong to the class that consumes
+   them -- a model's or explainer's constructor, or
+   :data:`xai4tsc.utils.defaults.t_con_defaults` for training hyperparameters -- so
+   a value you omit behaves identically whether you drive the pipeline from a YAML
+   config or import the package. ``master.yaml`` documents those defaults in
+   comments but does not supply them, so the two entry points cannot diverge.
+
+``experiment_runner/configs/master.yaml`` is the annotated reference for every
+available config key. It is **not runnable**: it lists each component as a
+catalogue of what is available, so running it directly is refused with a pointer
+to ``configs/example.yaml``. Copy the entries you need into your own config.
 
 Example
 -------

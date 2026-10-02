@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -843,3 +844,91 @@ def test_train_false_with_a_checkpoint_does_not_train(
     assert not list((off_dir / "GunPoint" / "FCN").glob("*.pt"))
     assert "Not training FCN" in (off_dir / "experiment.log").read_text()
     assert not pd.read_csv(off_dir / "metrics.csv").empty
+
+
+# ── required settings and the reference-only master (R26) ─────────────────────
+
+_MASTER = (
+    Path(__file__).parent.parent.parent
+    / "experiment_runner"
+    / "configs"
+    / "master.yaml"
+)
+
+
+@pytest.mark.integration
+def test_master_config_is_refused(tmp_path, monkeypatch):
+    """master.yaml is the reference, so running it must say so rather than run."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+
+    with pytest.raises(ValueError) as excinfo:
+        main(str(_MASTER))
+
+    message = str(excinfo.value)
+    assert "master.yaml" in message
+    assert "not a runnable config" in message
+
+
+@pytest.mark.integration
+def test_missing_component_list_fails_before_creating_anything(tmp_path, monkeypatch):
+    """The check runs before the results directory, so nothing lands on disk."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    # Unique per run, so the assertion cannot be confused by an earlier run's
+    # leftovers (a pre-fix run does create this directory).
+    results_rel = f"tests/_runner_missing_metrics_{tmp_path.name}"
+    shutil.rmtree(results_rel, ignore_errors=True)
+
+    config = _resolve_config(cache_root, results_rel)
+    del config["evaluation_config"]["metrics"]
+
+    with pytest.raises(ValueError, match=r"evaluation_config\.metrics"):
+        main(str(_write_config(config, tmp_path)))
+
+    assert not Path(results_rel).exists(), "nothing may be created before validation"
+
+
+@pytest.mark.integration
+def test_missing_results_path_names_the_key(tmp_path, monkeypatch):
+    """R26: this used to mkdir the user's own config file."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+
+    config = _resolve_config(cache_root, "tests/_runner_no_results_path")
+    del config["results_rel_path"]
+    config_path = _write_config(config, tmp_path)
+
+    with pytest.raises(ValueError, match="results_rel_path"):
+        main(str(config_path))
+
+    assert config_path.is_file(), "the config file must not be turned into a directory"
+
+
+# ── R2: a frequency explainer no longer inherits master's STFT transform ──────
+
+
+@pytest.mark.integration
+def test_freqrise_fft_needs_no_transform(ucr_dataset_path, tmp_path, monkeypatch):
+    """`domain: fft` with no transform was unusable while master backfilled one."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_freqrise_fft"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["explanation_config"]["explainers"] = [
+        {
+            "method": "FreqRISE",
+            "domain": "fft",  # deliberately no `transform`
+            "num_batches": 2,
+            "batch_size": 4,
+            "num_cells": 8,
+            "seed": 0,
+        }
+    ]
+    config["evaluation_config"]["metrics"] = [{"metric": "Frequency Perturbation"}]
+
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert not df.empty
+    assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"

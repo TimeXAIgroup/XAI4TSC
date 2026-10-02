@@ -127,12 +127,15 @@ class OcclusionExplainer(PerturbationExplainer):
 
     Parameters
     ----------
-    window_shape : list
-        Shape of the sliding occlusion window, e.g. ``[1, 5]``.
+    window_shape : list, optional
+        Shape of the sliding occlusion window as ``[channels, timesteps]``.
+        Defaults to ``[1, 5]``.
     baseline : int or float
-        Value used to fill the occluded region.
+        Value used to fill the occluded region, by default ``0``.
     strides : int
-        Step size of the sliding window.
+        Step size of the sliding window, by default ``1`` (fully overlapping
+        windows, i.e. one evaluation per timestep).  Must not exceed any
+        dimension of *window_shape*.
     """
 
     data_applicability: ClassVar[set[DataType]] = {DataType.AGNOSTIC}
@@ -141,7 +144,7 @@ class OcclusionExplainer(PerturbationExplainer):
         self,
         window_shape: list | None = None,
         baseline: int = 0,
-        strides: int = 4,
+        strides: int = 1,
     ) -> None:
         self.window_shape = window_shape if window_shape is not None else [1, 5]
         self.baseline = baseline

@@ -76,8 +76,9 @@ class FreqRISEExplainer(PerturbationExplainer):
         ``"stft"``; ignored for ``"fft"`` (which uses ``torch.fft.rfft``).
     num_cells : int
         Resolution of the coarse mask grid before it is interpolated up to the
-        coefficient grid. ``num_cells // 2`` must be smaller than the smallest
-        transform dimension.
+        coefficient grid, by default ``8``. ``num_cells // 2`` must be smaller
+        than the smallest transform dimension, so the default is deliberately
+        coarse: a finer grid fails on any small STFT.
     probability_of_drop : float
         Bernoulli probability that a coarse cell is kept; equals ``E[M]`` in the
         relevance normalisation (default 0.5, as in the paper).
@@ -97,7 +98,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         num_batches: int = 300,
         domain: str = "stft",
         transform: DomainTransform | dict | None = None,
-        num_cells: int = 50,
+        num_cells: int = 8,
         probability_of_drop: float = 0.5,
         seed: int | None = None,
     ) -> None:

@@ -1,14 +1,18 @@
 """Unit tests for experiment_runner/config.py."""
 
+import inspect
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 from experiment_runner.config import (
     _merge_warn_drop,
     _normalize_train_switch,
     config_resolve,
     config_sanity_check,
     disambiguate,
+    validate_user_config,
 )
 
 _RUNNER = Path(__file__).parent.parent.parent / "experiment_runner"
@@ -117,13 +121,26 @@ def test_config_resolve_drops_unknown_top_level_key(caplog):
 
 
 @pytest.mark.unit
-def test_config_resolve_occlusion_defaults_applied():
+def test_config_resolve_injects_no_constructor_params():
+    """Parameter defaults belong to the class, so resolve must not supply them."""
     user = _minimal_user_config()
     user["explanation_config"]["explainers"] = [{"method": "Occlusion"}]
     config = config_resolve(user, MASTER_CONFIG)
     explainer = config["explanation_config"]["explainers"][0]
-    assert "strides" in explainer
-    assert "window_shape" in explainer
+    assert explainer == {"method": "Occlusion"}, (
+        "master.yaml must not override the explainer's own defaults"
+    )
+
+
+@pytest.mark.unit
+def test_config_resolve_does_not_inherit_master_component_lists():
+    """An empty list stays empty instead of inheriting master's catalogue."""
+    user = _minimal_user_config()
+    config = config_resolve(user, MASTER_CONFIG)
+    assert config["evaluation_config"]["metrics"] == []
+    assert config["explanation_config"]["explainers"] == []
+    assert config["data_config"]["datasets"] == []
+    assert config["train_config"]["models"] == []
 
 
 @pytest.mark.unit
@@ -448,3 +465,224 @@ def test_missing_train_key_is_left_absent():
     _normalize_train_switch(train_config)
 
     assert "train" not in train_config["models"][0]
+
+
+# ── validate_user_config ──────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("section", "key"),
+    [
+        ("data_config", "datasets"),
+        ("train_config", "models"),
+        ("explanation_config", "explainers"),
+        ("evaluation_config", "metrics"),
+    ],
+)
+def test_missing_component_list_raises_naming_it(section, key):
+    cfg = _minimal_user_config()
+    del cfg[section][key]
+
+    with pytest.raises(ValueError, match=rf"{section}\.{key}"):
+        validate_user_config(cfg)
+
+
+@pytest.mark.unit
+def test_missing_section_counts_as_a_missing_list():
+    cfg = _minimal_user_config()
+    del cfg["evaluation_config"]
+
+    with pytest.raises(ValueError, match=r"evaluation_config\.metrics"):
+        validate_user_config(cfg)
+
+
+@pytest.mark.unit
+def test_several_missing_settings_are_reported_together():
+    """Forgetting three keys should take one run to learn, not three."""
+    cfg = _minimal_user_config()
+    del cfg["train_config"]["models"]
+    del cfg["evaluation_config"]["metrics"]
+    cfg["experiment_name"] = None
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_user_config(cfg)
+
+    message = str(excinfo.value)
+    for expected in (
+        "experiment_name",
+        "train_config.models",
+        "evaluation_config.metrics",
+    ):
+        assert expected in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["experiment_name", "results_rel_path"])
+@pytest.mark.parametrize("value", [None, "__delete__"])
+def test_missing_required_setting_raises(key, value):
+    cfg = _minimal_user_config()
+    if value == "__delete__":
+        del cfg[key]
+    else:
+        cfg[key] = value
+
+    with pytest.raises(ValueError, match=key):
+        validate_user_config(cfg)
+
+
+@pytest.mark.unit
+def test_explicitly_empty_lists_are_allowed_but_warn(caplog):
+    """A deliberate partial run stays possible; silence would hide a typo."""
+    cfg = _minimal_user_config()
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        validate_user_config(cfg)
+
+    assert caplog.text.count("will do nothing") == 4
+
+
+@pytest.mark.unit
+def test_complete_config_is_silent(caplog):
+    cfg = _minimal_user_config()
+    cfg["data_config"]["datasets"] = [{"dataset": "GunPoint"}]
+    cfg["train_config"]["models"] = [{"model": "FCN"}]
+    cfg["explanation_config"]["explainers"] = [{"method": "Occlusion"}]
+    cfg["evaluation_config"]["metrics"] = [{"metric": "Complexity"}]
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        validate_user_config(cfg)
+
+    assert caplog.text == ""
+
+
+# ── master.yaml never overrides a code default ────────────────────────────────
+
+# Keys master may carry on a list entry that are NOT parameter defaults: either
+# the entry's identity, a structural block with no sensible default, or a value
+# the runner resolves before the class sees it.
+_STRUCTURAL_KEYS = frozenset(
+    {"method", "model", "metric", "base", "transform", "background_data"}
+)
+
+
+@pytest.mark.unit
+def test_master_list_entries_never_restate_a_code_default():
+    """master.yaml documents parameter defaults; it must not supply them."""
+    from xai4tsc.models.models import MODELS
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    master = yaml.safe_load(MASTER_CONFIG.read_text())
+    sections = [
+        (master["explanation_config"]["explainers"], "method", EXPLAINERS),
+        (master["train_config"]["models"], "model", MODELS),
+    ]
+    offenders = []
+    for entries, id_key, registry in sections:
+        for entry in entries:
+            name = entry[id_key]
+            cls = registry.get(name.lower())
+            if cls is None:
+                continue
+            params = inspect.signature(cls.__init__).parameters
+            for key, value in entry.items():
+                if key in _STRUCTURAL_KEYS or key not in params:
+                    continue
+                default = params[key].default
+                if default is not inspect.Parameter.empty and default != value:
+                    offenders.append(f"{name}.{key}: master={value!r} code={default!r}")
+    assert not offenders, "master.yaml overrides code defaults: " + "; ".join(offenders)
+
+
+@pytest.mark.unit
+def test_master_metric_entries_carry_only_their_identity():
+    master = yaml.safe_load(MASTER_CONFIG.read_text())
+    for entry in master["evaluation_config"]["metrics"]:
+        assert set(entry) == {"metric"}, (
+            f"metric entry {entry['metric']!r} carries parameters master cannot apply; "
+            "document them in comments instead"
+        )
+
+
+@pytest.mark.unit
+def test_master_hyperparams_match_the_package_defaults():
+    from xai4tsc.utils.defaults import t_con_defaults
+
+    master = yaml.safe_load(MASTER_CONFIG.read_text())
+    hyperparams = master["train_config"]["default_settings"]["hyperparams"]
+    for key, expected in t_con_defaults.items():
+        got = hyperparams[key]
+        assert str(got).lower() == str(expected).lower(), (
+            f"hyperparams.{key}: master={got!r} but t_con_defaults={expected!r}"
+        )
+
+
+@pytest.mark.unit
+def test_master_is_not_runnable():
+    master = yaml.safe_load(MASTER_CONFIG.read_text())
+    assert master["experiment_name"] is None
+    assert master["results_rel_path"] is None
+
+
+_ENTRY_LINE = re.compile(r"^\s*- (method|model): (\S.*?)\s*(?:#.*)?$")
+_LIST_ITEM = re.compile(r"^\s*- \w+:")
+# "#   key: value   description" - three or more spaces separate value from prose,
+# which a YAML scalar like "[1, 5]" never contains.
+_DOC_LINE = re.compile(r"^\s*#\s{2,}(\w+):\s+(.+?)(?:\s{3,}.*)?$")
+
+
+@pytest.mark.unit
+def test_master_documented_defaults_match_the_code():
+    """
+    The comments are the only record of a default, so they must be true.
+
+    master.yaml no longer *supplies* parameter defaults, which removes the risk of
+    it overriding the code - but a stale comment would still misinform. This walks
+    every ``#   key: value`` line under a model or explainer entry and compares it
+    to that class's constructor default.
+    """
+    from xai4tsc.models.models import MODELS
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    registries = {"method": EXPLAINERS, "model": MODELS}
+    current: tuple[str, dict] | None = None
+    problems = []
+
+    for line in MASTER_CONFIG.read_text().splitlines():
+        entry = _ENTRY_LINE.match(line)
+        if _LIST_ITEM.match(line) and not entry:
+            current = None  # a metric entry, or anything else we do not introspect
+            continue
+        if entry:
+            kind, name = entry.group(1), entry.group(2).strip().strip('"')
+            cls = registries[kind].get(name.lower())
+            current = (
+                (name, inspect.signature(cls.__init__).parameters) if cls else None
+            )
+            continue
+        if current is None or not line.lstrip().startswith("#"):
+            continue
+        documented_line = _DOC_LINE.match(line.rstrip())
+        if not documented_line:
+            continue
+
+        key, raw = documented_line.group(1), documented_line.group(2).strip()
+        name, params = current
+        if key not in params:
+            continue
+        default = params[key].default
+        if default is inspect.Parameter.empty:
+            continue
+        if isinstance(default, tuple):
+            default = list(default)
+        try:
+            documented = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            problems.append(f"{name}.{key}: unparseable documented value {raw!r}")
+            continue
+        if documented != default:
+            problems.append(
+                f"{name}.{key}: comment says {documented!r}, code {default!r}"
+            )
+
+    assert not problems, "master.yaml documents stale defaults: " + "; ".join(problems)

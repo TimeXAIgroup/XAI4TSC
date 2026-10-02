@@ -38,7 +38,12 @@ from xai4tsc.utils.utils import merge_dicts
 from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
-from .config import config_resolve, config_sanity_check, disambiguate
+from .config import (
+    config_resolve,
+    config_sanity_check,
+    disambiguate,
+    validate_user_config,
+)
 from .download_datasets import ensure_datasets_cached
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
@@ -795,6 +800,16 @@ def initial_setup(
 
     # Read the experiment configuration
     path = Path(config_path).absolute()
+    if path.resolve() == MASTER_CONFIG.resolve():
+        err_msg = (
+            "master.yaml is the annotated reference for every available option and "
+            "the source of default values, not a runnable config. Copy the entries "
+            "you need into your own file and run that instead - "
+            "experiment_runner/configs/example.yaml is a working starting point."
+        )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
+
     with open(path) as f:
         try:
             config = yaml.safe_load(f)
@@ -803,9 +818,12 @@ def initial_setup(
             e.add_note(msg)
             raise
 
+    # Reject an incomplete config before anything is created on disk.
+    validate_user_config(config)
+
     logger.info("--- Starting setup ---")
     # Generate a folder for the experiment:
-    if "results_rel_path" in config and config["results_rel_path"] is not None:
+    if config.get("results_rel_path") is not None:
         path = Path(config["results_rel_path"]) / config["experiment_name"]
         if Path(path).resolve().exists():
             timestamp = datetime.now(datetime.now().astimezone().tzinfo)

@@ -81,6 +81,29 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
 
 ### Changed
 
+- **Parameter defaults now live in the code, not in `master.yaml`.** The master
+  config documents each model's, explainer's and metric's parameters in comments
+  but no longer supplies them, and `config_resolve` no longer backfills per-entry
+  values. A value you omit therefore comes from the class that consumes it, so the
+  importable package and the runner can no longer disagree about what a method is.
+  Two defaults had already diverged and are reconciled in the code:
+  `Occlusion.strides` is now `1` (was `4` in code, `1` in master) and
+  `FreqRISE.num_cells` is now `8` (was `50`, which raised for any STFT grid
+  smaller than 100 bins). `master.yaml`'s `hyperparams` block now mirrors
+  `t_con_defaults` exactly, and a test enforces all of this, including that the
+  documenting comments stay true.
+- **`master.yaml` is no longer runnable.** It is the annotated reference and the
+  source of settings defaults; its four component lists are a catalogue of what is
+  available. `experiment_name` and `results_rel_path` are `null`, and running it
+  directly is refused with a pointer to `configs/example.yaml`.
+- **The four component lists are required.** `data_config.datasets`,
+  `train_config.models`, `explanation_config.explainers` and
+  `evaluation_config.metrics` must be supplied, along with `experiment_name` and
+  `results_rel_path`; a missing one raises before anything is written to disk,
+  naming every setting that is absent. Setting a list to `[]` still skips that
+  level deliberately and warns. Previously an omitted list was inherited from
+  master, so leaving out `metrics:` silently ran all 41 of them and leaving out
+  `models:` silently ran none.
 - The global `metrics.csv` is always written, header-only when nothing
   succeeded, so a finished run always leaves a file with a known schema.
 - `experiment_runner.main.main()` returns the total number of failures instead of
@@ -110,6 +133,8 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
   draw cannot be described by a cache key - previously it would either have
   reused another run's splits or written a new cache directory per run. Seeded
   runs are unaffected: cache folder names and split outcomes are unchanged.
+- **The metric GIF keys are documented.** `animate`, `animate_sample` and
+  `animate_fps` are read by the runner but appeared nowhere in `master.yaml`.
 - **Evaluating a pre-trained checkpoint without retraining now works.** The
   workflow was unreachable in both of its halves. `load_model` only built a model
   when the checkpoint carried a `model_class` key, which only the module-level

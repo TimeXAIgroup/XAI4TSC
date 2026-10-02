@@ -170,16 +170,86 @@ def _merge_warn_drop(user: dict, master: dict, context: str) -> dict:
     return result
 
 
+_REQUIRED_SETTINGS = ("experiment_name", "results_rel_path")
+"""Top-level settings every user config must supply."""
+
+_REQUIRED_LISTS = (
+    ("data_config", "datasets"),
+    ("train_config", "models"),
+    ("explanation_config", "explainers"),
+    ("evaluation_config", "metrics"),
+)
+"""The four component lists: what the experiment runs, which cannot be defaulted."""
+
+
+def validate_user_config(user_config: dict) -> None:
+    """
+    Check that a user config supplies everything that cannot be defaulted.
+
+    Operates on the **raw** config, before :func:`config_resolve` merges master in.
+    That ordering is essential: master declares the four component lists as a
+    catalogue, so after resolution an omitted list is indistinguishable from an
+    inherited one.  Settings describe *how* an experiment runs and are defaulted
+    from master; the four lists describe *what* it runs and must be stated.
+
+    Parameters
+    ----------
+    user_config : dict
+        Raw config dict as loaded from the user YAML.
+
+    Raises
+    ------
+    ValueError
+        If any required setting or component list is missing, naming all of them.
+    """
+    missing = [key for key in _REQUIRED_SETTINGS if not user_config.get(key)]
+    empty = []
+    for section, key in _REQUIRED_LISTS:
+        block = user_config.get(section)
+        if not isinstance(block, dict) or key not in block:
+            missing.append(f"{section}.{key}")
+        elif not block[key]:
+            empty.append(f"{section}.{key}")
+
+    if missing:
+        why = ""
+        if any("." in name for name in missing):
+            why = (
+                " The component lists describe what the experiment runs and so have "
+                "no sensible default; set one to [] to skip that level deliberately."
+            )
+        err_msg = (
+            f"Config is missing required setting(s): {', '.join(missing)}.{why} See "
+            "experiment_runner/configs/master.yaml for every available option and "
+            "configs/example.yaml for a working starting point."
+        )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
+
+    for name in empty:
+        logger.warning(
+            "'%s' is empty - that level of the pipeline will do nothing.", name
+        )
+
+
 def config_resolve(user_config: dict, master_path: Path) -> dict:
     """
     Resolve a user config against the master config.
 
     Steps performed:
 
-    1. Load master.yaml (annotated reference with all known keys and defaults).
+    1. Load master.yaml (annotated reference with all known keys and the default
+       values of the ``general`` and ``default_settings`` blocks).
     2. Warn + drop any unknown top-level or nested keys found in user_config.
-    3. Fill per-item defaults for each explainer and metric from the
-       master's ``explainers`` / ``metrics`` lists (user keys win, gaps filled).
+
+    Master's four component lists (``datasets``, ``models``, ``explainers``,
+    ``metrics``) are a **catalogue**, not a source of values: parameter defaults
+    belong to the classes that consume them, so an omitted parameter falls
+    through to its constructor default via
+    :func:`~xai4tsc.utils.utils.dict_to_args` rather than being filled in here.
+    That keeps the package and the runner in agreement about what a given
+    method is.  Because :func:`validate_user_config` requires all four lists,
+    master's own entries are always overlaid and never leak into a run.
 
     Parameters
     ----------
@@ -196,31 +266,8 @@ def config_resolve(user_config: dict, master_path: Path) -> dict:
     with open(master_path) as f:
         master = yaml.safe_load(f)
 
-    # Build per-item default lookups from the master lists before they are
-    # replaced wholesale by _merge_warn_drop (lists are not key-merged).
-    master_explainers = {
-        item["method"]: item
-        for item in master.get("explanation_config", {}).get("explainers", [])
-    }
-    master_metrics = {
-        item["metric"]: item
-        for item in master.get("evaluation_config", {}).get("metrics", [])
-    }
-
     # Warn + drop at the top level and recursively inside known sections
-    resolved = _merge_warn_drop(user_config, master, "root")
-
-    # Backfill per-explainer defaults (user keys win)
-    for item in resolved.get("explanation_config", {}).get("explainers", []):
-        defaults = master_explainers.get(item.get("method", ""), {})
-        item.update({k: v for k, v in defaults.items() if k not in item})
-
-    # Backfill per-metric defaults (user keys win)
-    for item in resolved.get("evaluation_config", {}).get("metrics", []):
-        defaults = master_metrics.get(item.get("metric", ""), {})
-        item.update({k: v for k, v in defaults.items() if k not in item})
-
-    return resolved
+    return _merge_warn_drop(user_config, master, "root")
 
 
 _LEGACY_TRAIN_VALUES = frozenset({"till_epoch", "for_epochs"})

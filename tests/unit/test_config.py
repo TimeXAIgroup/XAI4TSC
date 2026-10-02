@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from experiment_runner.config import (
     _merge_warn_drop,
+    _normalize_train_switch,
     config_resolve,
     config_sanity_check,
     disambiguate,
@@ -374,3 +375,76 @@ def test_disambiguate_does_not_warn_for_a_clean_result(caplog):
     with caplog.at_level("WARNING", logger="xai4tsc.runner.config"):
         disambiguate(["A", "A", "B"])
     assert "not unique" not in caplog.text
+
+
+# ── _normalize_train_switch ───────────────────────────────────────────────────
+
+_CFG_LOGGER = "xai4tsc.runner.config"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("legacy", ["till_epoch", "for_epochs", "Till_Epoch"])
+def test_legacy_train_values_normalize_to_true(legacy, caplog):
+    train_config = {"default_settings": {"train": legacy}, "models": [{"model": "FCN"}]}
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        _normalize_train_switch(train_config)
+
+    assert train_config["default_settings"]["train"] is True
+    assert "deprecated" in caplog.text
+
+
+@pytest.mark.unit
+def test_legacy_train_value_warns_once_for_several_entries(caplog):
+    train_config = {
+        "default_settings": {"train": "till_epoch"},
+        "models": [
+            {"model": "FCN", "train": "for_epochs"},
+            {"model": "LeNet", "train": "till_epoch"},
+        ],
+    }
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        _normalize_train_switch(train_config)
+
+    assert all(e["train"] is True for e in train_config["models"])
+    assert caplog.text.count("deprecated") == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [True, False, None])
+def test_switch_values_pass_through_untouched(value):
+    train_config = {
+        "default_settings": {},
+        "models": [{"model": "FCN", "train": value}],
+    }
+
+    _normalize_train_switch(train_config)
+
+    assert train_config["models"][0]["train"] is value
+
+
+@pytest.mark.unit
+def test_unknown_train_value_raises_naming_the_entry():
+    train_config = {
+        "default_settings": {},
+        "models": [{"model": "FCN", "train": "untill_epoch"}],
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        _normalize_train_switch(train_config)
+
+    message = str(excinfo.value)
+    assert "untill_epoch" in message
+    assert "FCN" in message
+    assert "switch" in message
+
+
+@pytest.mark.unit
+def test_missing_train_key_is_left_absent():
+    """Absence must stay absence: the runner keys off it to skip training."""
+    train_config = {"default_settings": {}, "models": [{"model": "FCN"}]}
+
+    _normalize_train_switch(train_config)
+
+    assert "train" not in train_config["models"][0]

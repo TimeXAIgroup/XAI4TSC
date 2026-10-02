@@ -16,7 +16,11 @@ experiment_name: "experiment"
 cache_path: null
 
 general:
-  reproducible: true        # Enforce seed-based reproducibility
+  reproducible: true        # Enforce seed-based reproducibility. When false, splits are
+                            #   drawn unseeded and the split cache is bypassed entirely
+                            #   (neither read nor written), since a random draw cannot be
+                            #   described by a cache key. The dataset download cache is
+                            #   unaffected.
   seed: 2025
   device: "use_available"   # "use_available", "cpu", "cuda", "mps"
   allow_external_code: false  # allow loading model/explainer/metric classes from
@@ -122,63 +126,95 @@ data_config:
 train_config:
   default_settings:
     hyperparams:
-      epochs: 10
+      epochs: 10            # epochs to run in this call (a resumed run continues the count)
       batchsize: 16
-      loss_func: "CrossEntropy"
-      optimizer: "adam"
+      loss_func: "CrossEntropy"   # only "CrossEntropy" is supported
+      optimizer: "adam"           # only "adam" is supported
       learn_rate: 0.001
-      patience: 3
-      save_best: true
-    train: "till_epoch"     # "till_epoch" or "for_epochs"
-  models: []                # List of {model: <name>, init_params: {...}, ...} entries
-                            # External (non-built-in) models: give a unique 'model' name plus
-                            #   class_name: MyModel       # class in the source file
-                            #   class_path: ./my_model.py # path to the .py source file
-                            #   It is imported and registered automatically (requires
-                            #   general.allow_external_code: true). Same for explainers/metrics below.
-                            # init_params values set to null are auto-detected from data:
-                            #   num_classes → number of unique classes in training labels
-                            #   in_channels → data.shape[1] (channel dimension, after BCT normalisation)
+      patience: 3           # epochs without a >0.005 improvement before early stopping
+      save_best: true       # true = keep the best epoch by validation loss (training loss
+                            #   when there is no val split); false = keep the final epoch
+    train: true             # switch: true trains, false (or omitting the key) does not.
+  models: []                # List of {model: <name>, init_params: {...}, ...} entries.
+                            # init_params left out or set to null are auto-detected:
+                            #   num_classes -> number of unique classes in training labels
+                            #   in_channels -> data.shape[1] (channel dim, after BCT normalisation)
                             #
-                            # Built-in model init_params (in_channels/num_classes auto-detected as above):
+                            # Every built-in model, with its init_params and their defaults:
                             #
-                            # - model: FCN              # Fully Convolutional Network (Wang et al. 2017)
+                            # - model: FCN          # Fully Convolutional Network (Wang et al. 2017)
                             #   init_params:
-                            #     filters: [128, 256, 128]  # conv filters per block
-                            #     kernel_sizes: [8, 5, 3]   # kernel size per block
+                            #     filters: [128, 256, 128]   # conv filters per block
+                            #     kernel_sizes: [8, 5, 3]    # kernel size per block
                             #
-                            # - model: LeNet            # shallow LeNet-style 1D CNN (Wagner et al. 2024)
+                            # - model: LeNet        # shallow LeNet-style 1D CNN (Wagner et al. 2024)
                             #   init_params:
-                            #     head_hidden: 128       # width of the hidden fully-connected layer
+                            #     head_hidden: 128           # width of the hidden fully-connected layer
                             #
-                            # - model: ResNet           # residual TSC baseline (Wang et al. 2017)
+                            # - model: ResNet       # residual TSC baseline (Wang et al. 2017)
                             #   init_params:
-                            #     n_feature_maps: 64     # base conv width F; blocks use F, 2F, 2F
-                            #     kernel_sizes: [8, 5, 3]  # kernels of the 3 convs in each residual block
+                            #     n_feature_maps: 64         # base conv width F; blocks use F, 2F, 2F
+                            #     kernel_sizes: [8, 5, 3]    # kernels of the 3 convs per residual block
                             #
-                            # - model: LSTM             # (bi)LSTM recurrent baseline; mean-pool over time
+                            # - model: LSTM         # (bi)LSTM recurrent baseline; mean-pool over time
                             #   init_params:
-                            #     hidden_size: 128       # features per LSTM hidden state
-                            #     num_layers: 2          # stacked LSTM layers
-                            #     bidirectional: true    # head width doubles when true
-                            #     dropout: 0.0           # between stacked layers (ignored if num_layers == 1)
+                            #     hidden_size: 128           # features per LSTM hidden state
+                            #     num_layers: 2              # stacked LSTM layers
+                            #     bidirectional: true        # head width doubles when true
+                            #     dropout: 0.0               # between layers (ignored if num_layers == 1)
                             #
-                            # - model: XLSTM            # mLSTM (parallel, clean-room; Beck et al. 2024), SOTA recurrent
+                            # - model: XLSTM        # mLSTM (parallel, clean-room; Beck et al. 2024)
                             #   init_params:
-                            #     embed_dim: 128         # model width (must be divisible by num_heads)
-                            #     num_blocks: 2          # stacked mLSTM blocks
-                            #     num_heads: 4           # mLSTM heads (must divide embed_dim)
-                            #     dropout: 0.0           # block residual-branch dropout
+                            #     embed_dim: 128             # model width (must be divisible by num_heads)
+                            #     num_blocks: 2              # stacked mLSTM blocks
+                            #     num_heads: 4               # mLSTM heads (must divide embed_dim)
+                            #     dropout: 0.0               # block residual-branch dropout
                             #
-                            # - model: PatchTST         # channel-independent patch transformer (Nie et al. 2023)
+                            # - model: PatchTST     # channel-independent patch transformer (Nie et al. 2023)
                             #   init_params:
-                            #     d_model: 128           # transformer embedding dim (must be divisible by nhead)
-                            #     patch_len: 16          # length of each patch
-                            #     stride: 8              # step between patches (< patch_len overlaps)
-                            #     num_layers: 3          # transformer-encoder layers
-                            #     nhead: 8               # attention heads (must divide d_model)
-                            #     dim_feedforward: 256   # encoder feed-forward width
-                            #     dropout: 0.1           # dropout inside the encoder
+                            #     d_model: 128               # embedding dim (must be divisible by nhead)
+                            #     patch_len: 16              # length of each patch
+                            #     stride: 8                  # step between patches (< patch_len overlaps)
+                            #     num_layers: 3              # transformer-encoder layers
+                            #     nhead: 8                   # attention heads (must divide d_model)
+                            #     dim_feedforward: 256       # encoder feed-forward width
+                            #     dropout: 0.1               # dropout inside the encoder
+                            #
+                            # EXAMPLE - an external (non-built-in) model: give a unique 'model'
+                            #   name plus the class and the file it lives in; it is imported and
+                            #   registered automatically. Requires general.allow_external_code:
+                            #   true. Explainer and metric entries take the same two keys.
+                            #
+                            # - model: MyModel
+                            #   class_name: MyModel          # class defined in the source file
+                            #   class_path: ./my_model.py    # path to the .py source file
+                            #   init_params:
+                            #     hidden_size: 64
+                            #
+                            # EXAMPLE - evaluate a pre-trained checkpoint without retraining it:
+                            #   omit 'train' (or set it false) and point 'model_ckpt_path' at a
+                            #   .pt file - either a <Model>_epoch_<N>.pt from an earlier run, or a
+                            #   model_dict.pt from xai4tsc.models.save_model(). The
+                            #   <checkpoint>_config.json beside it (e.g. FCN_epoch_10_config.json)
+                            #   records the model name, the resolved init_params and the epoch
+                            #   reached, so init_params need not be restated; values from that
+                            #   file win over this config, because the weights only fit the
+                            #   architecture they were trained with.
+                            #
+                            # - model: FCN
+                            #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
+                            #   train: false
+                            #
+                            # EXAMPLE - fine-tune from a checkpoint instead of scoring it as-is:
+                            #   set 'train' on the entry itself; only the value inherited from
+                            #   default_settings is dropped for checkpoint entries. Epoch counting
+                            #   continues, so resuming FCN_epoch_10.pt with epochs.
+                            #
+                            # - model: FCN
+                            #   model_ckpt_path: ./results/my_experiment/ECG200/FCN/FCN_epoch_10.pt
+                            #   train: true
+                            #   hyperparams:
+                            #     epochs: 5
 
 explanation_config:
   default_settings:
@@ -378,9 +414,6 @@ evaluation_config:
     - metric: Top-K Intersection
       k: 0.1                    # fraction of series length T (converted to int at runtime)
       concept_influence: false  # weight intersection by concept influence scores
-    # Frequency / time-frequency perturbation metrics (xai4tsc). The domain transform
-    # is taken from the explanation automatically; these only apply to matching
-    # frequency / time-frequency explainers (incompatible pairs are skipped).
     - metric: Frequency Perturbation       # frequency pixel-flipping; needs a FREQUENCY explainer
       features_in_step: 1       # frequency coefficients perturbed per step
       perturb_baseline: 0.0     # value perturbed coefficients are set to
@@ -393,10 +426,6 @@ evaluation_config:
       features_in_step: 5
       perturb_baseline: 0.0
       return_aoc_per_sample: false
-    # Ground-truth localization metric: ROC-AUC of the attribution against the
-    # discriminative time-frequency regions. Needs a FREQUENCY/TIME_FREQUENCY
-    # explainer AND a dataset that provides per-sample ground-truth metadata
-    # (e.g. the freq_shapes synthetic dataset); otherwise it yields NaN.
     - metric: Time-Frequency AUC
       return_aggregate: true    # true = mean AUC over valid samples; false = per-sample list
       abs_attribution: true     # rank by attribution magnitude (false = signed value)

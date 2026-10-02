@@ -47,7 +47,7 @@ train_config:
       learn_rate: 0.001
       patience: 3
       save_best: true
-    train: "till_epoch"
+    train: true
   models:
     - model: "LeNet"                # smallest built-in CNN
     - model: "FCN"                  # fully-convolutional baseline

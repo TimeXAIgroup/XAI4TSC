@@ -1,5 +1,6 @@
 """``ModelBase`` ABC: training, prediction, evaluation, checkpoint persistence."""
 
+import json
 import logging
 import math
 from abc import ABC, abstractmethod
@@ -61,9 +62,11 @@ class ModelBase(nn.Module, ABC):
     model_path: Path = None
     """Path to the best saved checkpoint (set after training)."""
     best_epoch: int = None
-    """Epoch number of the best checkpoint (set after training)."""
+    """Total epochs of training the best checkpoint represents (``None`` if unknown)."""
     _init_params: dict = None
     """Constructor kwargs stored for checkpoint reloading."""
+    _loaded_from: Path = None
+    """Checkpoint this model's weights were loaded from, if any."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +133,7 @@ class ModelBase(nn.Module, ABC):
         data_val: np.ndarray | None = None,
         labels_val: np.ndarray | None = None,
         save_path: Path | str | None = None,
+        start_epoch: int | None = None,
     ) -> "ModelBase":
         """
         Run the full training loop with early stopping.
@@ -158,6 +162,12 @@ class ModelBase(nn.Module, ABC):
             Directory for the best checkpoint and training plots.  Takes priority
             over the destination set at construction time; falls back to that
             value and finally to the current working directory.
+        start_epoch : int, optional
+            Epochs of training the weights have already had, used to continue
+            epoch numbering when resuming from a checkpoint.  Defaults to
+            :attr:`best_epoch` (set by
+            :func:`~xai4tsc.models.models.load_model`) and otherwise to ``0``.
+            ``epochs`` is always the number of epochs to run **in this call**.
 
         Returns
         -------
@@ -168,7 +178,6 @@ class ModelBase(nn.Module, ABC):
             save_path if save_path is not None else (self.save_path or Path.cwd())
         )
         self.save_path.mkdir(parents=True, exist_ok=True)
-        logger.info("Training %s...", self.name)
 
         data_tensor = torch.from_numpy(
             np.ascontiguousarray(data_train, dtype=np.float32)
@@ -178,6 +187,8 @@ class ModelBase(nn.Module, ABC):
         )
 
         epochs = hyperparams.get("epochs", t_con_defaults["epochs"])
+        start_epoch = start_epoch if start_epoch is not None else (self.best_epoch or 0)
+        final_epoch = start_epoch + epochs
         batchsize = hyperparams.get("batchsize", t_con_defaults["batchsize"])
         learn_rate = hyperparams.get("learn_rate", t_con_defaults["learn_rate"])
         patience = hyperparams.get("patience", t_con_defaults["patience"])
@@ -223,8 +234,10 @@ class ModelBase(nn.Module, ABC):
         p_tol = 5e-3
         epoch_losses = []
         epoch_accs = []
+        epoch = start_epoch - 1
 
-        for epoch in range(epochs):
+        for offset in range(epochs):
+            epoch = start_epoch + offset  # 0-based global epoch index
             self.train()
             running_loss = 0.0
             correct = 0
@@ -256,7 +269,7 @@ class ModelBase(nn.Module, ABC):
                 logger.info(
                     "Epoch %2d/%d  loss: %.4f  acc: %.2f  val_loss: %.4f",
                     epoch + 1,
-                    epochs,
+                    final_epoch,
                     epoch_loss,
                     epoch_acc,
                     val_loss,
@@ -265,7 +278,7 @@ class ModelBase(nn.Module, ABC):
                 logger.info(
                     "Epoch %2d/%d  loss: %.4f  acc: %.2f",
                     epoch + 1,
-                    epochs,
+                    final_epoch,
                     epoch_loss,
                     epoch_acc,
                 )
@@ -275,6 +288,9 @@ class ModelBase(nn.Module, ABC):
                 if hyperparams.get("save_best", t_con_defaults["save_best"]):
                     if best_path is not None:
                         best_path.unlink()
+                        # The superseded checkpoint's config goes with it,
+                        # otherwise stale configs accumulate in the directory.
+                        self.config_path_for(best_path).unlink(missing_ok=True)
                     best_path = self.save_path / f"{self.name}_epoch_{epoch + 1}.pt"
                     best_loss = monitor_loss
                     self.best_epoch = epoch + 1
@@ -291,10 +307,13 @@ class ModelBase(nn.Module, ABC):
                     break
 
         if self.save_path is not None:
-            self._plot_training_curve(epoch_losses, epoch_accs)
+            self._plot_training_curve(epoch_losses, epoch_accs, start_epoch)
 
         if best_path is None:
-            best_path = self.save_path / f"{self.name}_epoch_{epochs}.pt"
+            # No epoch improved on the initial loss, so nothing was checkpointed
+            # along the way; persist the final weights under the last epoch run.
+            self.best_epoch = epoch + 1
+            best_path = self.save_path / f"{self.name}_epoch_{self.best_epoch}.pt"
             self.save_model(best_path)
         else:
             # Restore best checkpoint in-place
@@ -327,11 +346,83 @@ class ModelBase(nn.Module, ABC):
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
-    def save_model(self, save_path: Path | str) -> None:
-        """Save the model state dict to *save_path*."""
+    @staticmethod
+    def config_path_for(checkpoint_path: Path | str) -> Path:
+        """
+        Return the config file path belonging to *checkpoint_path*.
+
+        The config file is named after its checkpoint with ``_config.json`` in
+        place of the suffix, e.g. ``FCN_epoch_10.pt`` ->
+        ``FCN_epoch_10_config.json``, so the two are unambiguously paired.
+
+        Parameters
+        ----------
+        checkpoint_path : Path or str
+            Path to a ``.pt`` checkpoint.
+
+        Returns
+        -------
+        Path
+            Path to the matching config file, in the same directory.
+        """
+        checkpoint_path = Path(checkpoint_path)
+        return checkpoint_path.with_name(f"{checkpoint_path.stem}_config.json")
+
+    def _save_checkpoint_config(self, checkpoint_path: Path, epoch: int | None) -> None:
+        """
+        Write the config file describing how to rebuild *checkpoint_path*.
+
+        The checkpoints this class writes are bare state dicts, which carry no
+        record of the class or the constructor arguments they belong to.  This
+        file supplies both, so :func:`~xai4tsc.models.models.load_model` can
+        reload a checkpoint given only its path.  Skipped when :attr:`name` is
+        unset, since a model built directly rather than through ``load_model``
+        has nothing useful to record.
+
+        Parameters
+        ----------
+        checkpoint_path : Path
+            The checkpoint this config describes.
+        epoch : int or None
+            Total epochs of training the checkpoint represents; ``None`` when
+            that is unknown, which is recorded rather than guessed as ``0``.
+        """
+        if self.name is None:
+            return
+        cfg = {
+            "model": self.name,
+            "init_params": self._init_params or {},
+            "epoch": epoch,
+        }
+        # Only recorded when there actually was a resume, so the file never
+        # carries a key that says nothing.
+        if self._loaded_from is not None:
+            cfg["resumed_from"] = str(self._loaded_from)
+        cfg_path = self.config_path_for(checkpoint_path)
+        try:
+            with open(cfg_path, "w") as f:
+                json.dump(cfg, f, indent=2)
+        except (OSError, TypeError) as exc:  # pragma: no cover - diagnostics only
+            logger.warning("Could not write %s: %s", cfg_path, exc)
+
+    def save_model(self, save_path: Path | str, epoch: int | None = None) -> None:
+        """
+        Save the model state dict to *save_path*, with its config file beside it.
+
+        Parameters
+        ----------
+        save_path : Path or str
+            Destination ``.pt`` file for the state dict.
+        epoch : int, optional
+            Total epochs of training these weights represent, recorded in the
+            config file.  Defaults to :attr:`best_epoch`.
+        """
         save_path = Path(save_path) if isinstance(save_path, str) else save_path
         logger.info("Saving model to %s", str(save_path.absolute()))
         torch.save(self.state_dict(), save_path)
+        self._save_checkpoint_config(
+            save_path, epoch if epoch is not None else self.best_epoch
+        )
 
     @classmethod
     def load_from_checkpoint(
@@ -644,8 +735,9 @@ class ModelBase(nn.Module, ABC):
         self,
         epoch_losses: list[float],
         epoch_accs: list[float],
+        start_epoch: int = 0,
     ) -> None:
-        epochs_ran = list(range(1, len(epoch_losses) + 1))
+        epochs_ran = list(range(start_epoch + 1, start_epoch + len(epoch_losses) + 1))
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
         ax1.plot(epochs_ran, epoch_losses)
         ax1.set_xlabel("Epoch")

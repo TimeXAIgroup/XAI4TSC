@@ -223,6 +223,62 @@ def config_resolve(user_config: dict, master_path: Path) -> dict:
     return resolved
 
 
+_LEGACY_TRAIN_VALUES = frozenset({"till_epoch", "for_epochs"})
+
+
+def _normalize_train_switch(train_config: dict) -> None:
+    """
+    Normalise every ``train`` value in *train_config* to a bool or ``None``.
+
+    ``train`` is a switch: truthy trains, ``false`` or absent does not.  The
+    legacy values ``"till_epoch"`` and ``"for_epochs"`` never differed in
+    behaviour - neither was ever read - so both normalise to ``True`` with one
+    deprecation warning per run.  Rewriting here means the runner only ever sees
+    a bool or ``None``.
+
+    Parameters
+    ----------
+    train_config : dict
+        The ``train_config`` section, modified in place.
+
+    Raises
+    ------
+    ValueError
+        If a ``train`` value is a string that is not a recognised legacy value.
+    """
+    targets = [("train_config.default_settings", train_config.get("default_settings"))]
+    targets += [
+        (f"train_config.models[{i}] ('{entry.get('model')}')", entry)
+        for i, entry in enumerate(train_config.get("models", []))
+    ]
+
+    deprecated_used = False
+    for where, block in targets:
+        if not isinstance(block, dict) or "train" not in block:
+            continue
+        value = block["train"]
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, str) and value.lower() in _LEGACY_TRAIN_VALUES:
+            block["train"] = True
+            deprecated_used = True
+            continue
+        err_msg = (
+            f"Invalid 'train' value {value!r} in {where}. "
+            "'train' is a switch: true trains, false (or omitting it) does not."
+        )
+        logger.error(err_msg)
+        raise ValueError(err_msg)
+
+    if deprecated_used:
+        logger.warning(
+            "'train' values 'till_epoch' / 'for_epochs' are deprecated and were "
+            "treated as true. Neither was ever read, so they behaved identically; "
+            "use 'train: true'. 'epochs' is the number of epochs to run in this "
+            "call, and a run resuming from a checkpoint continues its epoch count."
+        )
+
+
 def config_sanity_check(config: dict) -> bool:
     """
     Check whether the supplied config contains errors.
@@ -246,6 +302,8 @@ def config_sanity_check(config: dict) -> bool:
     # Last-resort silent extension: load external classes into the registries
     # before validating, so configured-but-unregistered names can still resolve.
     register_external_components(config)
+
+    _normalize_train_switch(config["train_config"])
 
     # Lazy imports to avoid circular dependencies at module level
     from xai4tsc.models.models import MODELS

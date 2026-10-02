@@ -25,7 +25,7 @@ def _setup_console_logging(debug: bool) -> None:
     enable_logging(level=logging.DEBUG if debug else logging.INFO)
 
 
-def _add_file_logging(debug: bool, log_path: Path) -> None:
+def _add_file_logging(debug: bool, log_path: Path) -> logging.Handler:
     """
     Add a file handler to the xai4tsc logger once the results directory is available.
 
@@ -35,5 +35,12 @@ def _add_file_logging(debug: bool, log_path: Path) -> None:
         If ``True``, set log level to DEBUG.
     log_path : Path
         Path to the log file to write.
+
+    Returns
+    -------
+    logging.Handler
+        The handler that was attached, so the caller can detach it when the run
+        ends.  Without that, a second run in the same process would also write
+        into this run's log.
     """
-    add_file_log(log_path, level=logging.DEBUG if debug else logging.INFO)
+    return add_file_log(log_path, level=logging.DEBUG if debug else logging.INFO)

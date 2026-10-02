@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,8 @@ import pandas as pd
 import pytest
 import yaml
 from experiment_runner.main import main
+
+from xai4tsc.models.base import ModelBase
 
 _TEST_CONFIG = Path(__file__).parent.parent / "fixtures" / "test_config.yaml"
 
@@ -665,3 +668,178 @@ def test_changing_format_does_not_reuse_a_cache_built_by_another_loader(
     # The CSV loader is not implemented, so the dataset must fail rather than
     # silently succeed from the numpy cache.
     assert main(str(_write_config(csv_cfg, tmp_path))) == 1
+
+
+# ── reproducible: false (R1) ──────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_reproducible_false_completes_the_run(ucr_dataset_path, tmp_path, monkeypatch):
+    """The documented `reproducible: false` value must not abort the dataset."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_unseeded"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["general"]["reproducible"] = False
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 0, "An unseeded run must not fail its dataset"
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert not df.empty
+    assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
+
+
+@pytest.mark.integration
+def test_reproducible_false_bypasses_the_split_cache(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Unseeded splits cannot be described by a cache key, so none is written."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+
+    # Isolated cache so only this run can have written to it.
+    cache_root = tmp_path / "cache"
+    ucr_target = cache_root / "ucr" / "GunPoint"
+    ucr_target.parent.mkdir(parents=True)
+    ucr_target.symlink_to(ucr_dataset_path.resolve())
+
+    config = _resolve_config(cache_root, "tests/_runner_unseeded_cache")
+    config["general"]["reproducible"] = False
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    assert not list((cache_root / "splits").glob("GunPoint_*")), (
+        "An unseeded run must not persist splits to the cache"
+    )
+
+
+# ── checkpoint reload without retraining (R22) ────────────────────────────────
+
+
+@pytest.mark.integration
+def test_checkpoint_reload_without_retraining(ucr_dataset_path, tmp_path, monkeypatch):
+    """Omitting `train` and pointing at a written checkpoint scores that model."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+
+    # Run 1 - train, so a checkpoint and its config file exist.
+    train_rel = "tests/_runner_ckpt_train"
+    config = _resolve_config(cache_root, train_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    model_dir = _experiment_dir(train_rel) / "GunPoint" / "FCN"
+    checkpoints = sorted(model_dir.glob("FCN_epoch_*.pt"))
+    assert checkpoints, "Run 1 wrote no checkpoint to reload"
+    assert ModelBase.config_path_for(checkpoints[-1]).is_file(), (
+        "No config file written beside the checkpoint"
+    )
+
+    # Run 2 - no training, just load the checkpoint and score it. The reload
+    # config names only the model and the path; init_params come from the
+    # config file beside the checkpoint. `train` is *omitted*, not falsified:
+    # the inherited default_settings value must not reinstate training.
+    reload_rel = "tests/_runner_ckpt_reload"
+    reload_config = _resolve_config(cache_root, reload_rel)
+    assert reload_config["train_config"]["default_settings"]["train"]
+    reload_config["train_config"]["models"] = [
+        {"model": "FCN", "model_ckpt_path": str(checkpoints[-1])}
+    ]
+    failures = main(str(_write_config(reload_config, tmp_path)))
+
+    assert failures == 0, "Scoring a pre-trained checkpoint must not fail"
+
+    log = (_experiment_dir(reload_rel) / "experiment.log").read_text()
+    assert "Not training FCN" in log
+
+    df = pd.read_csv(_experiment_dir(reload_rel) / "metrics.csv")
+    assert not df.empty, "No metric rows produced for the reloaded checkpoint"
+    assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
+
+    # Nothing was retrained: no new checkpoint under the reload run.
+    assert not list((_experiment_dir(reload_rel) / "GunPoint" / "FCN").glob("*.pt"))
+
+
+@pytest.mark.integration
+def test_checkpoint_entry_with_explicit_train_still_trains(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Only the *inherited* `train` default is dropped, so fine-tuning works."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+
+    train_rel = "tests/_runner_ckpt_ft_train"
+    config = _resolve_config(cache_root, train_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+    checkpoint = sorted(
+        (_experiment_dir(train_rel) / "GunPoint" / "FCN").glob("FCN_epoch_*.pt")
+    )[-1]
+
+    trained_epoch = int(checkpoint.stem.rsplit("_", 1)[1])
+
+    # The legacy string is used deliberately: it must still train, so the
+    # deprecation path stays covered end to end.
+    ft_rel = "tests/_runner_ckpt_ft"
+    ft_config = _resolve_config(cache_root, ft_rel)
+    ft_config["train_config"]["models"] = [
+        {
+            "model": "FCN",
+            "model_ckpt_path": str(checkpoint),
+            "train": "for_epochs",
+        }
+    ]
+    assert main(str(_write_config(ft_config, tmp_path))) == 0
+
+    ft_dir = _experiment_dir(ft_rel)
+    written = list((ft_dir / "GunPoint" / "FCN").glob("*.pt"))
+    assert written, "Explicit `train` must still train"
+
+    # Epoch numbering continues from the checkpoint rather than restarting at 1,
+    # so the new checkpoint cannot collide with the one it resumed from.
+    resumed_epoch = int(written[0].stem.rsplit("_", 1)[1])
+    assert resumed_epoch > trained_epoch, (
+        f"resumed run wrote {written[0].name}, restarting the epoch count"
+    )
+
+    log = (ft_dir / "experiment.log").read_text()
+    assert "deprecated" in log, "the legacy `train` value must warn"
+    # The epoch number is %2d-padded in the log line.
+    assert re.search(rf"Epoch +{trained_epoch + 1}/", log), (
+        f"expected the first epoch of the resumed run to be {trained_epoch + 1}"
+    )
+    # load_model resolves the path, so the log carries the absolute form.
+    assert f"Loaded FCN from checkpoint {checkpoint.absolute()}" in log
+    assert f"trained {trained_epoch} epoch(s)" in log
+
+    # The config file records the resume, and only then.
+    config_file = ModelBase.config_path_for(written[0])
+    recorded = json.loads(config_file.read_text())
+    assert recorded["epoch"] == resumed_epoch
+    assert recorded["resumed_from"] == str(checkpoint.absolute())
+
+
+@pytest.mark.integration
+def test_train_false_with_a_checkpoint_does_not_train(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """`train: false` is the explicit way to say "score these weights as-is"."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+
+    train_rel = "tests/_runner_trainfalse_train"
+    config = _resolve_config(cache_root, train_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+    checkpoint = sorted(
+        (_experiment_dir(train_rel) / "GunPoint" / "FCN").glob("FCN_epoch_*.pt")
+    )[-1]
+
+    off_rel = "tests/_runner_trainfalse"
+    off_config = _resolve_config(cache_root, off_rel)
+    off_config["train_config"]["models"] = [
+        {"model": "FCN", "model_ckpt_path": str(checkpoint), "train": False}
+    ]
+    assert main(str(_write_config(off_config, tmp_path))) == 0
+
+    off_dir = _experiment_dir(off_rel)
+    assert not list((off_dir / "GunPoint" / "FCN").glob("*.pt"))
+    assert "Not training FCN" in (off_dir / "experiment.log").read_text()
+    assert not pd.read_csv(off_dir / "metrics.csv").empty

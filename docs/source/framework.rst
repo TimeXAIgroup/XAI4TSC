@@ -43,7 +43,28 @@ Getting Started
               └── <model>/
                   ├── metrics.csv    # per-model results
                   ├── <model>_epoch_<n>.pt   # best checkpoint
+                  ├── <model>_epoch_<n>_config.json  # how to rebuild it
                   └── explanations/  # per-sample relevance plots
+
+   Every checkpoint is written with a config file named after it, so the two are
+   unambiguously paired. It records the model name, the resolved ``init_params``
+   - including the auto-detected ``in_channels`` and ``num_classes`` - the
+   ``epoch`` the weights represent, and ``resumed_from`` when the run continued
+   from an earlier checkpoint:
+
+   .. code-block:: json
+
+      {"model": "FCN",
+       "init_params": {"in_channels": 1, "num_classes": 2},
+       "epoch": 10}
+
+   To score a trained model again without retraining it, omit the ``train`` key
+   from the model entry and point ``model_ckpt_path`` at one of those
+   ``<model>_epoch_<n>.pt`` files; the architecture comes from the config file
+   beside it and does not have to be restated. Setting ``train`` on that entry
+   fine-tunes instead, and a fine-tuning run **continues** the epoch count, so
+   resuming ``FCN_epoch_10.pt`` with ``epochs: 5`` writes ``FCN_epoch_11.pt``
+   through ``FCN_epoch_15.pt`` rather than restarting at 1.
 
    Every ``metrics.csv`` has the same columns:
 

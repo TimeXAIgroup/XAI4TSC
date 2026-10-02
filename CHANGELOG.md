@@ -51,6 +51,28 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
   order instead of guessing it. `"auto"` keeps the previous heuristic and its
   warning; `"bct"` is the way to load data that genuinely has more channels than
   timesteps, which the heuristic would otherwise transpose into nonsense.
+- **A config file beside every checkpoint**: `save_model()` now writes
+  `<checkpoint>_config.json` next to each checkpoint it saves (e.g.
+  `FCN_epoch_10.pt` -> `FCN_epoch_10_config.json`), recording the model name, its
+  resolved constructor arguments, the `epoch` the weights represent, and
+  `resumed_from` when the run continued an earlier checkpoint. `load_model`
+  already read such a file, so a checkpoint can now be reloaded from its path
+  alone, without restating the architecture (including the runner's auto-detected
+  `in_channels` / `num_classes`) in the reload config. Being named after its
+  checkpoint means the pairing is unambiguous when a directory holds several.
+- **`load_model` now logs what it loaded**: the checkpoint path, which of the
+  three resolution routes produced the class (the checkpoint's own `model_class`,
+  the `MODELS` registry, or `class_name`/`class_path`), and how many epochs the
+  weights have had. It also reports what the checkpoint's config file
+  contributed, and warns when that file overrides a value the config set
+  explicitly - previously the architecture actually used could differ from the
+  one in the user's YAML with nothing recording it.
+- **Resuming continues the epoch count.** `train_model` gained `start_epoch`,
+  defaulting to the loaded checkpoint's epoch, so fine-tuning `FCN_epoch_10.pt`
+  for 5 more epochs logs `Epoch 11/15` and writes `FCN_epoch_11.pt` through
+  `FCN_epoch_15.pt`. Previously numbering restarted at 1, so the epoch in a
+  filename no longer said how much training the weights had had, and a resume
+  into an existing directory would overwrite the original run's checkpoint.
 - **`format` and `path` are part of the split-cache key.** Previously a cached
   split was reused for a different loader or a different local directory, so a
   `format: csv` request could be served numpy data from another dataset that
@@ -65,6 +87,20 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
   `None`.
 - `docs/source/framework.rst` now documents the `metrics.csv` column set, which
   was previously undocumented.
+- **`train` is a switch**, documented as `train: true | false`. Its two former
+  values, `"till_epoch"` and `"for_epochs"`, were never read by anything - they
+  had no effect since the initial release - so both are now accepted as `true`
+  with a deprecation warning, and any other string is a config error. The shipped
+  configs use `train: true`. `hyperparams.epochs` is the number of epochs to run
+  **in this call**; a resumed run continues its epoch count rather than adding to
+  the budget.
+- The module-level `save_model()` writes `model_dict_config.json` instead of
+  `config.json`, so one naming convention covers every checkpoint. `load_model`
+  still reads a directory-level `config.json` when present, so existing result
+  trees keep loading.
+- The runner detaches its run-level log handler when a run ends. Driving
+  `main()` more than once in a single process previously left the handler
+  attached, so every later run also wrote into the earlier runs' `experiment.log`.
 
 ### Fixed
 
@@ -74,6 +110,18 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
   draw cannot be described by a cache key - previously it would either have
   reused another run's splits or written a new cache directory per run. Seeded
   runs are unaffected: cache folder names and split outcomes are unchanged.
+- **Evaluating a pre-trained checkpoint without retraining now works.** The
+  workflow was unreachable in both of its halves. `load_model` only built a model
+  when the checkpoint carried a `model_class` key, which only the module-level
+  `save_model()` writes - so the `<Model>_epoch_<N>.pt` files the runner actually
+  produces failed to load, with an error naming class options the user had not
+  used. A bare state dict is now resolved against the `MODELS` registry (and the
+  sidecar above), a missing checkpoint path is reported with the checkpoints that
+  do exist beside it, and an unresolvable one names what was tried. Separately,
+  *omitting* `train` could not mean "do not retrain", because the entry inherited
+  `train: till_epoch` from `default_settings`; a model entry supplying
+  `model_ckpt_path` no longer inherits it, and the run logs that it is not
+  training.
 
 ## [1.1.0] - 2026-07-03
 

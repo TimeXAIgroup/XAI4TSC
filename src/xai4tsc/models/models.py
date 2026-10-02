@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import re
 from pathlib import Path
 
 import torch
@@ -59,11 +60,14 @@ def save_model(
         torch.save({"optim": optim_state_dict}, save_path / "optim_dict.pt")
         logger.info("Saved the optimizer state dict to %s", save_path / "optim_dict.pt")
 
-    # Save checkpoint information
+    # Save checkpoint information, named after the checkpoint it describes so the
+    # pairing is unambiguous (model_dict.pt -> model_dict_config.json).
     if ckpt is None:
         logger.warning("Saved a model dictionary without checkpoint information!")
-    with open(save_path / "config.json", "w") as f:
+    cfg_path = ModelBase.config_path_for(save_path / "model_dict.pt")
+    with open(cfg_path, "w") as f:
         json.dump(ckpt, f)
+    logger.info("Saved the model configuration to %s", cfg_path)
 
 
 def load_ext_model(
@@ -120,6 +124,130 @@ def _set_model_attrs(
     model.to(model.device)
 
 
+def _drop_none(cfg: dict) -> dict:
+    """Return *cfg* without keys whose value is ``None``, recursively."""
+    cleaned = {}
+    for key, value in cfg.items():
+        if value is None:
+            continue
+        cleaned[key] = _drop_none(value) if isinstance(value, dict) else value
+    return cleaned
+
+
+def _read_checkpoint_config(checkpoint_path: Path) -> tuple[dict, Path | None]:
+    """
+    Read the config file belonging to *checkpoint_path*.
+
+    Prefers ``<stem>_config.json`` beside the checkpoint and falls back to a
+    directory-level ``config.json``, the name earlier versions wrote.
+
+    Parameters
+    ----------
+    checkpoint_path : Path
+        Path to the ``.pt`` checkpoint.
+
+    Returns
+    -------
+    tuple[dict, Path or None]
+        The config mapping with ``None`` values dropped, and the file it came
+        from, or ``({}, None)`` when no config file exists.
+    """
+    candidates = [
+        ModelBase.config_path_for(checkpoint_path),
+        checkpoint_path.with_name("config.json"),  # legacy, pre-per-checkpoint
+    ]
+    for cfg_path in candidates:
+        if not cfg_path.is_file():
+            continue
+        try:
+            with open(cfg_path) as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Ignoring unreadable config %s: %s", cfg_path, exc)
+            continue
+        if isinstance(loaded, dict):
+            return _drop_none(loaded), cfg_path
+        logger.warning("Ignoring %s: expected a JSON object.", cfg_path)
+    return {}, None
+
+
+def _log_config_merge(loaded_cfg: dict, cfg_path: Path, model_config: dict) -> None:
+    """
+    Report what a checkpoint's config file contributed, and what it overrode.
+
+    The file takes precedence over the supplied config, so a silent merge would
+    let the architecture actually used differ from the one the user is reading.
+
+    Parameters
+    ----------
+    loaded_cfg : dict
+        Config read from *cfg_path*, already stripped of ``None`` values.
+    cfg_path : Path
+        File the config was read from.
+    model_config : dict
+        Config supplied by the caller, which *loaded_cfg* overrides.
+    """
+    supplied = []
+    for key, value in loaded_cfg.items():
+        if isinstance(value, dict) and value:
+            supplied.append(f"{key} ({', '.join(value)})")
+        else:
+            supplied.append(f"{key}={value}")
+    logger.info(
+        "%s supplied: %s; these take precedence.", cfg_path.name, ", ".join(supplied)
+    )
+    logger.debug("Full config read from %s: %s", cfg_path, loaded_cfg)
+
+    # Flag only genuine conflicts: a value the caller set that the file changes.
+    for key, value in loaded_cfg.items():
+        if key not in model_config:
+            continue
+        given = model_config[key]
+        if isinstance(value, dict) and isinstance(given, dict):
+            for sub, sub_value in value.items():
+                if sub in given and given[sub] is not None and given[sub] != sub_value:
+                    logger.warning(
+                        "%s overrides configured %s.%s: %s -> %s (the weights only "
+                        "fit the architecture they were trained with).",
+                        cfg_path.name,
+                        key,
+                        sub,
+                        given[sub],
+                        sub_value,
+                    )
+        elif given is not None and given != value:
+            logger.warning(
+                "%s overrides configured %s: %s -> %s (the weights only fit the "
+                "architecture they were trained with).",
+                cfg_path.name,
+                key,
+                given,
+                value,
+            )
+
+
+def _epoch_from_filename(checkpoint_path: Path) -> int | None:
+    """Return the epoch encoded in a ``<Model>_epoch_<N>.pt`` name, else ``None``."""
+    match = re.search(r"_epoch_(\d+)$", checkpoint_path.stem)
+    return int(match.group(1)) if match else None
+
+
+def _build_from_class(
+    model_class: type,
+    state_dict: dict,
+    model_params: dict | None,
+    name: str,
+    device: str | torch.device,
+    save_path: str | Path | None,
+) -> ModelBase:
+    """Instantiate *model_class*, load *state_dict* into it, and set attributes."""
+    filtered_params = dict_to_args(model_params, model_class) if model_params else {}
+    model = model_class(**(filtered_params or {}))
+    model.load_state_dict(state_dict)
+    _set_model_attrs(model, name, device, save_path, filtered_params)
+    return model
+
+
 def load_model(
     model_config: dict, device: str = "cpu", save_path: str | Path | None = None
 ) -> ModelBase:
@@ -128,6 +256,16 @@ def load_model(
 
     Looks for a ``.pt`` checkpoint path or a Python class path in
     *model_config* and returns a ready-to-use :class:`ModelBase` instance.
+
+    A ``.pt`` checkpoint may be either the self-describing dict written by
+    :func:`save_model` (carrying ``model_class``) or a bare state dict as
+    written by :meth:`~xai4tsc.models.base.ModelBase.save_model` - the form of
+    every ``<Model>_epoch_<N>.pt`` the experiment runner produces.  The class to
+    build is resolved in order from the checkpoint's own ``model_class``, the
+    ``model`` registry name, and finally ``class_name`` / ``class_path``.  A
+    ``config.json`` beside the checkpoint is merged in and takes precedence, so
+    the architecture the weights belong to need not be restated in
+    *model_config*.
 
     Parameters
     ----------
@@ -149,13 +287,12 @@ def load_model(
 
     Raises
     ------
+    FileNotFoundError
+        If ``model_ckpt_path`` names a ``.pt`` file that does not exist.
     ValueError
-        If no model checkpoint path is supplied.
-    ValueError
-        If no model class path is supplied or no class can be found.
+        If no class can be resolved for a supplied checkpoint, or if neither a
+        checkpoint path nor a registered ``model`` name is given.
     """
-    # TODO: Error check this
-
     model = None
     if "model_ckpt_path" in model_config:
         # A checkpoint is supplied
@@ -165,29 +302,82 @@ def load_model(
             # TODO implement
             logger.info("Model datatype not implemented, please use .pt")
         elif format == ".pt":
-            # Load model config if it exists and merge with supplied config
-            cfg_path = path.with_name("config.json")
-            has_cfg = cfg_path.exists()
-            if has_cfg:
-                with open(cfg_path) as f:
-                    loaded_cfg = json.load(f)
-                    model_config = merge_dicts(loaded_cfg, model_config)
+            if not path.is_file():
+                siblings = (
+                    sorted(f.name for f in path.parent.glob("*.pt"))
+                    if path.parent.is_dir()
+                    else []
+                )
+                hint = (
+                    f" Checkpoints present in {path.parent}: {siblings}."
+                    if siblings
+                    else f" No '.pt' files found in {path.parent}."
+                )
+                raise FileNotFoundError(
+                    f"Model checkpoint '{path}' does not exist.{hint}"
+                )
+
+            # Read the checkpoint's own config and merge it in. It describes the
+            # architecture the weights belong to, so it takes precedence.
+            loaded_cfg, cfg_path = _read_checkpoint_config(path)
+            if cfg_path is not None:
+                _log_config_merge(loaded_cfg, cfg_path, model_config)
+                model_config = merge_dicts(loaded_cfg, model_config)
             model_params = model_config.get("init_params")
 
-            # Load model checkpoint
+            ckpt_epoch = loaded_cfg.get("epoch")
+            if ckpt_epoch is None:
+                ckpt_epoch = _epoch_from_filename(path)
+            if ckpt_epoch is None:
+                logger.warning(
+                    "Cannot tell how many epochs '%s' was trained for (no 'epoch' "
+                    "in a %s and the name is not '<Model>_epoch_<N>.pt'). Epoch "
+                    "numbering restarts at 1 and will not reflect total training.",
+                    path.name,
+                    ModelBase.config_path_for(path).name,
+                )
+
+            # Load model checkpoint. Either the self-describing dict written by
+            # save_model(), or a bare state dict as written by
+            # ModelBase.save_model() - the form every <Model>_epoch_<N>.pt the
+            # experiment runner produces takes.
             model_ckpt = torch.load(path, map_location=device, weights_only=False)
-            if "model_class" in model_ckpt:
-                model_class = MODELS.get(model_ckpt["model_class"].lower())
+            wrapped = isinstance(model_ckpt, dict) and "model_state_dict" in model_ckpt
+            state_dict = model_ckpt["model_state_dict"] if wrapped else model_ckpt
+            ckpt_class = (
+                model_ckpt.get("model_class") if isinstance(model_ckpt, dict) else None
+            )
+
+            origin = None
+
+            # 1) The checkpoint names its own class.
+            if ckpt_class is not None:
+                model_class = MODELS.get(str(ckpt_class).lower())
                 if model_class is not None:
-                    filtered_params = (
-                        dict_to_args(model_params, model_class) if model_params else {}
+                    model = _build_from_class(
+                        model_class,
+                        state_dict,
+                        model_params,
+                        model_config["model"],
+                        device,
+                        save_path,
                     )
-                    model = model_class(**(filtered_params or {}))
-                    model.load_state_dict(model_ckpt["model_state_dict"])
-                    _set_model_attrs(
-                        model, model_config["model"], device, save_path, filtered_params
-                    )
-            # No registered model class found — try loading from source
+                    origin = "class from the checkpoint's 'model_class'"
+
+            # 2) A bare state dict: fall back to the registry name in the config.
+            registry_name = str(model_config.get("model", "")).lower()
+            if model is None and registry_name in MODELS:
+                model = _build_from_class(
+                    MODELS[registry_name],
+                    state_dict,
+                    model_params,
+                    model_config["model"],
+                    device,
+                    save_path,
+                )
+                origin = "class from the MODELS registry"
+
+            # 3) No registered model class found - try loading from source
             if model is None and "class_path" in model_config:
                 model = load_ext_model(
                     model_name=model_config["model"],
@@ -195,11 +385,35 @@ def load_model(
                     model_path=model_config["class_path"],
                     model_params=model_params,
                 )
-                model.load_state_dict(model_ckpt["model_state_dict"])
+                model.load_state_dict(state_dict)
                 _set_model_attrs(model, model_config["model"], device, save_path, {})
+                origin = f"class from {model_config['class_path']}"
+
+            if model is not None:
+                model.best_epoch = ckpt_epoch
+                model._loaded_from = path
+                logger.info(
+                    "Loaded %s from checkpoint %s (%s; %s)",
+                    model.name,
+                    path,
+                    origin,
+                    f"trained {ckpt_epoch} epoch(s)"
+                    if ckpt_epoch is not None
+                    else "training history unknown",
+                )
+
             if model is None:
+                tried = (
+                    f"its 'model_class' ({ckpt_class!r}) is not in the MODELS registry"
+                    if ckpt_class is not None
+                    else "it carries no 'model_class' key"
+                )
                 raise ValueError(
-                    "Unable to instantiate model from class name or class path."
+                    f"Unable to instantiate a model for checkpoint '{path}': "
+                    f"{tried}, the configured model name "
+                    f"{model_config.get('model')!r} is not registered either, "
+                    "and no 'class_name'/'class_path' was supplied. "
+                    f"Registered models: {sorted(MODELS)}."
                 )
         elif format == ".ckpt":
             # TODO implement
@@ -213,6 +427,9 @@ def load_model(
         model = model_class(**(filtered_params or {}))
         _set_model_attrs(
             model, model_config["model"], device, save_path, filtered_params
+        )
+        logger.info(
+            "Built %s from the MODELS registry (no checkpoint supplied).", model.name
         )
     else:
         raise ValueError("No model checkpoint path supplied!")

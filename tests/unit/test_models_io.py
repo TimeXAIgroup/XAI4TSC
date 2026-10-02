@@ -1,5 +1,8 @@
 """Unit tests for model persistence/registry — light torch use, no training."""
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
@@ -81,7 +84,7 @@ def test_save_model_writes_state_and_config(tmp_path):
     model = _TinyModel()
     save_model(model, ckpt={"epoch": 1}, save_path=tmp_path)
     assert (tmp_path / "model_dict.pt").exists()
-    assert (tmp_path / "config.json").exists()
+    assert (tmp_path / "model_dict_config.json").exists()
 
 
 @pytest.mark.unit
@@ -124,7 +127,7 @@ def test_load_model_unknown_name_raises():
 @pytest.mark.unit
 def test_save_then_load_round_trip_preserves_weights(tmp_path):
     original = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
-    # config.json (= ckpt) must carry the init_params so the reloaded model is
+    # The config file (= ckpt) must carry the init_params so the reloaded model is
     # built with a matching architecture before the state dict is applied.
     save_model(original, ckpt=_TINY_FCN, save_path=tmp_path)
 
@@ -607,3 +610,348 @@ def test_load_model_ckpt_returns_none_with_info(tmp_path, caplog):
         model = load_model({"model": "x", "model_ckpt_path": str(ckpt)})
     assert model is None
     assert "not implemented" in caplog.text.lower()
+
+
+# ── load_model: bare state-dict checkpoints (R22) ─────────────────────────────
+
+
+def _bare_checkpoint(tmp_path, config, name="FCN_epoch_3.pt", epoch=3):
+    """Train-free stand-in for what the runner writes: a checkpoint + its config."""
+    model = load_model(config, device="cpu", save_path=tmp_path)
+    model.save_model(tmp_path / name, epoch=epoch)
+    return model, tmp_path / name
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config", [_TINY_FCN, _TINY_LENET])
+def test_load_model_reloads_bare_state_dict_via_registry(tmp_path, config):
+    original, ckpt = _bare_checkpoint(tmp_path, config)
+
+    reloaded = load_model(
+        {**config, "model_ckpt_path": str(ckpt)}, device="cpu", save_path=tmp_path
+    )
+
+    assert type(reloaded) is type(original)
+    orig_state = original.state_dict()
+    assert orig_state.keys() == reloaded.state_dict().keys()
+    for key, tensor in orig_state.items():
+        assert torch.equal(tensor, reloaded.state_dict()[key])
+
+
+@pytest.mark.unit
+def test_load_model_reads_init_params_from_config_sidecar(tmp_path):
+    """Only ``model`` + ``model_ckpt_path`` is enough once the sidecar exists."""
+    original, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+
+    reloaded = load_model({"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert reloaded._init_params == _TINY_FCN["init_params"]
+    for key, tensor in original.state_dict().items():
+        assert torch.equal(tensor, reloaded.state_dict()[key])
+
+
+@pytest.mark.unit
+def test_load_model_sidecar_overrides_mismatched_config(tmp_path):
+    """The architecture the weights fit wins over a config written elsewhere."""
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+
+    # A reload config carrying another dataset's auto-detected values.
+    wrong = {
+        "model": "FCN",
+        "model_ckpt_path": str(ckpt),
+        "init_params": {"in_channels": 7, "num_classes": 5},
+    }
+    reloaded = load_model(wrong, device="cpu")
+
+    assert reloaded._init_params["in_channels"] == 1
+    assert reloaded._init_params["num_classes"] == 2
+
+
+@pytest.mark.unit
+def test_load_model_sidecar_nulls_do_not_override_config(tmp_path):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+    with open(ModelBase.config_path_for(ckpt), "w") as f:
+        json.dump({"model": None, "init_params": {"num_classes": None}}, f)
+
+    reloaded = load_model(
+        {**_TINY_FCN, "model_ckpt_path": str(ckpt)}, device="cpu", save_path=tmp_path
+    )
+
+    assert reloaded.name == "FCN"
+    assert reloaded._init_params["num_classes"] == 2
+
+
+@pytest.mark.unit
+def test_load_model_missing_checkpoint_names_path_and_siblings(tmp_path):
+    _bare_checkpoint(tmp_path, _TINY_FCN)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        load_model(
+            {**_TINY_FCN, "model_ckpt_path": str(tmp_path / "model_dict.pt")},
+            device="cpu",
+        )
+
+    message = str(excinfo.value)
+    assert "model_dict.pt" in message
+    assert "FCN_epoch_3.pt" in message
+
+
+@pytest.mark.unit
+def test_load_model_unresolvable_checkpoint_names_what_was_tried(tmp_path):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN, name="orphan.pt")
+    ModelBase.config_path_for(ckpt).unlink(missing_ok=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        load_model({"model": "not_registered", "model_ckpt_path": str(ckpt)})
+
+    message = str(excinfo.value)
+    assert "orphan.pt" in message
+    assert "not_registered" in message
+    assert "model_class" in message
+
+
+# ── the per-checkpoint config file (R22) ──────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_config_path_for_is_named_after_its_checkpoint():
+    assert ModelBase.config_path_for(Path("/r/FCN_epoch_10.pt")).name == (
+        "FCN_epoch_10_config.json"
+    )
+    assert ModelBase.config_path_for("/r/model_dict.pt").name == (
+        "model_dict_config.json"
+    )
+
+
+@pytest.mark.unit
+def test_save_model_writes_the_checkpoint_config_beside_it(tmp_path):
+    model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
+
+    model.save_model(tmp_path / "FCN_epoch_7.pt", epoch=7)
+
+    written = json.loads((tmp_path / "FCN_epoch_7_config.json").read_text())
+    assert written == {
+        "model": "FCN",
+        "init_params": _TINY_FCN["init_params"],
+        "epoch": 7,
+    }
+    # Not resumed, so the key is absent rather than null.
+    assert "resumed_from" not in written
+
+
+@pytest.mark.unit
+def test_checkpoint_config_records_unknown_epoch_as_null(tmp_path):
+    model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
+
+    model.save_model(tmp_path / "weights.pt")
+
+    written = json.loads((tmp_path / "weights_config.json").read_text())
+    assert written["epoch"] is None, "an unknown history must not become a guessed 0"
+
+
+@pytest.mark.unit
+def test_checkpoint_config_records_resumed_from_when_resumed(tmp_path):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+    resumed = load_model(
+        {"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu", save_path=tmp_path
+    )
+
+    resumed.save_model(tmp_path / "FCN_epoch_5.pt", epoch=5)
+
+    written = json.loads((tmp_path / "FCN_epoch_5_config.json").read_text())
+    assert written["resumed_from"] == str(ckpt)
+    assert written["epoch"] == 5
+
+
+@pytest.mark.unit
+def test_checkpoint_config_skipped_for_unnamed_model(tmp_path):
+    """A directly-constructed model has no name worth recording (see R28)."""
+    model = _TinyModel()
+
+    model.save_model(tmp_path / "x_epoch_1.pt")
+
+    assert not (tmp_path / "x_epoch_1_config.json").exists()
+
+
+# ── load_model logging and epoch provenance ───────────────────────────────────
+
+_LOGGER = "xai4tsc.models.models"
+
+
+@pytest.mark.unit
+def test_load_model_logs_the_checkpoint_path_and_registry_origin(tmp_path, caplog):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+
+    with caplog.at_level("INFO", logger=_LOGGER):
+        load_model({**_TINY_FCN, "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert str(ckpt) in caplog.text
+    assert "class from the MODELS registry" in caplog.text
+    assert "trained 3 epoch(s)" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_logs_model_class_origin(tmp_path, caplog):
+    original = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
+    save_model(original, ckpt=_TINY_FCN, save_path=tmp_path)
+
+    with caplog.at_level("INFO", logger=_LOGGER):
+        load_model(
+            {**_TINY_FCN, "model_ckpt_path": str(tmp_path / "model_dict.pt")},
+            device="cpu",
+        )
+
+    assert "class from the checkpoint's 'model_class'" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_logs_when_building_without_a_checkpoint(caplog):
+    with caplog.at_level("INFO", logger=_LOGGER):
+        load_model(_TINY_FCN, device="cpu")
+
+    assert "Built FCN from the MODELS registry" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_logs_what_the_config_file_supplied(tmp_path, caplog):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+
+    with caplog.at_level("INFO", logger=_LOGGER):
+        load_model({"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert "FCN_epoch_3_config.json supplied" in caplog.text
+    assert "take precedence" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_warns_when_the_config_overrides_a_given_value(tmp_path, caplog):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+    mismatched = {
+        "model": "FCN",
+        "model_ckpt_path": str(ckpt),
+        "init_params": {**_TINY_FCN["init_params"], "num_classes": 5},
+    }
+
+    with caplog.at_level("WARNING", logger=_LOGGER):
+        load_model(mismatched, device="cpu")
+
+    assert "overrides configured init_params.num_classes: 5 -> 2" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_seeds_best_epoch_from_the_config_file(tmp_path):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN, name="weights.pt", epoch=12)
+
+    model = load_model({**_TINY_FCN, "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert model.best_epoch == 12, "the config file is the primary source"
+    assert model._loaded_from == ckpt
+
+
+@pytest.mark.unit
+def test_load_model_falls_back_to_the_epoch_in_the_filename(tmp_path):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN, name="FCN_epoch_9.pt")
+    ModelBase.config_path_for(ckpt).unlink()
+
+    model = load_model({**_TINY_FCN, "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert model.best_epoch == 9
+
+
+@pytest.mark.unit
+def test_load_model_warns_when_the_epoch_cannot_be_inferred(tmp_path, caplog):
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN, name="weights.pt")
+    ModelBase.config_path_for(ckpt).unlink()
+
+    with caplog.at_level("WARNING", logger=_LOGGER):
+        model = load_model({**_TINY_FCN, "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert model.best_epoch is None
+    assert "Cannot tell how many epochs" in caplog.text
+    assert "numbering restarts at 1" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_model_honours_a_legacy_directory_level_config(tmp_path):
+    """Trees written before per-checkpoint configs must still load."""
+    _, ckpt = _bare_checkpoint(tmp_path, _TINY_FCN)
+    ModelBase.config_path_for(ckpt).unlink()
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump({"model": "FCN", "init_params": _TINY_FCN["init_params"]}, f)
+
+    model = load_model({"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu")
+
+    assert model._init_params == _TINY_FCN["init_params"]
+
+
+# ── resuming continues the epoch count ────────────────────────────────────────
+
+_TRAIN_HP = {
+    "epochs": 2,
+    "batchsize": 8,
+    "learn_rate": 1e-3,
+    "patience": 5,
+    "save_best": True,
+    "loss_func": "crossentropy",
+    "optimizer": "adam",
+}
+
+
+def _tiny_batch():
+    import numpy as np
+
+    return (
+        np.random.default_rng(0).standard_normal((16, 1, 32)).astype("float32"),
+        np.array([0, 1] * 8),
+    )
+
+
+@pytest.mark.unit
+def test_training_from_scratch_numbers_epochs_from_one(tmp_path):
+    model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
+    data, labels = _tiny_batch()
+
+    model.train_model(data, labels, _TRAIN_HP)
+
+    # The surviving checkpoint is the *best* epoch, which may be 1 or 2 - the
+    # point is that it is numbered within this call's budget.
+    assert model.best_epoch in (1, 2)
+    assert [f.name for f in tmp_path.glob("*.pt")] == [
+        f"FCN_epoch_{model.best_epoch}.pt"
+    ]
+
+
+@pytest.mark.unit
+def test_resumed_training_continues_the_epoch_count(tmp_path):
+    first = tmp_path / "first"
+    first.mkdir()
+    model = load_model(_TINY_FCN, device="cpu", save_path=first)
+    data, labels = _tiny_batch()
+    model.train_model(data, labels, _TRAIN_HP)
+    checkpoint = next(first.glob("FCN_epoch_*.pt"))
+
+    second = tmp_path / "second"
+    resumed = load_model(
+        {**_TINY_FCN, "model_ckpt_path": str(checkpoint)},
+        device="cpu",
+        save_path=second,
+    )
+    resumed.train_model(data, labels, _TRAIN_HP)
+
+    assert resumed.best_epoch > 2, "a resumed run must not restart the epoch count"
+    assert [f.name for f in second.glob("*.pt")] == [
+        f"FCN_epoch_{resumed.best_epoch}.pt"
+    ]
+    # Exactly one checkpoint/config pair survives: superseded ones are removed.
+    assert len(list(second.glob("*_config.json"))) == 1
+
+
+@pytest.mark.unit
+def test_explicit_start_epoch_overrides_the_checkpoint(tmp_path):
+    model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
+    data, labels = _tiny_batch()
+
+    model.train_model(data, labels, _TRAIN_HP, start_epoch=100)
+
+    assert model.best_epoch in (101, 102)
+    assert list(tmp_path.glob("FCN_epoch_10*.pt"))

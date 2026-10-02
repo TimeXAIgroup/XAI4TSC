@@ -80,7 +80,32 @@ def main(config_path: str, debug: bool = False) -> int:
         non-zero value as "this run needs attention" (the CLI turns it into a
         non-zero exit status).
     """
-    config = initial_setup(config_path, debug=debug)
+    config, run_log = initial_setup(config_path, debug=debug)
+    try:
+        return _run(config)
+    finally:
+        # Detach the run-level log, so a second run in this process does not
+        # also write into this one's experiment.log.
+        remove_file_log(run_log)
+
+
+def _run(config: dict) -> int:
+    """
+    Execute the pipeline for an already-resolved *config*.
+
+    Split from :func:`main` so the run-level log handler attached during setup is
+    always detached, whatever the run does.
+
+    Parameters
+    ----------
+    config : dict
+        Configuration as returned by :func:`initial_setup`.
+
+    Returns
+    -------
+    int
+        Total number of failures, as described on :func:`main`.
+    """
     config = config_resolve(config, master_path=MASTER_CONFIG)
     config_sanity_check(config)
     log_config = {**config, "results_rel_path": str(config["results_rel_path"])}
@@ -321,7 +346,10 @@ def main(config_path: str, debug: bool = False) -> int:
                 model_config = copy.deepcopy(model_config)
                 try:
                     # Update config
+                    entry_sets_train = "train" in model_config
                     model_config = merge_dicts(model_config, t_con["default_settings"])
+                    if "model_ckpt_path" in model_config and not entry_sets_train:
+                        model_config["train"] = None
 
                     # Auto-detect num_classes and in_channels when not explicitly set.
                     init_params = model_config.setdefault("init_params", {})
@@ -362,7 +390,17 @@ def main(config_path: str, debug: bool = False) -> int:
                     )
 
                     # Should the model be trained
-                    if "train" in model_config and model_config["train"] is not None:
+                    if not model_config.get("train"):
+                        logger.info(
+                            "%s/%s: Not training %s ('train' is not set) - %s.",
+                            m_ind + 1,
+                            len(t_con["models"]),
+                            model_config["model"],
+                            "explaining the weights loaded from the checkpoint"
+                            if "model_ckpt_path" in model_config
+                            else "the model is freshly initialised",
+                        )
+                    else:
                         # Log training start
                         logger.info(
                             "%s/%s: Training %s model...",
@@ -734,7 +772,9 @@ def main(config_path: str, debug: bool = False) -> int:
     )
 
 
-def initial_setup(config_path: str, debug: bool = False) -> dict:
+def initial_setup(
+    config_path: str, debug: bool = False
+) -> tuple[dict, logging.Handler]:
     """
     Set up experiment as described in the given configuration file.
 
@@ -747,8 +787,9 @@ def initial_setup(config_path: str, debug: bool = False) -> dict:
 
     Returns
     -------
-    dict
-        The extracted configuration.
+    tuple[dict, logging.Handler]
+        The extracted configuration and the run-level log handler, which the
+        caller detaches when the run ends.
     """
     _setup_console_logging(debug)
 
@@ -787,9 +828,9 @@ def initial_setup(config_path: str, debug: bool = False) -> dict:
             sys.exit(1)
 
     # Add file logging now that the results directory exists
-    _add_file_logging(debug, log_path=path / "experiment.log")
+    run_log = _add_file_logging(debug, log_path=path / "experiment.log")
 
-    return config
+    return config, run_log
 
 
 if __name__ == "__main__":

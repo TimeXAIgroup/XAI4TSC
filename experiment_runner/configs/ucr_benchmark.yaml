@@ -26,7 +26,7 @@ data_config:
 
 train_config:
   default_settings:
-    train: "till_epoch"
+    train: true
     hyperparams:
       epochs: 10
       batchsize: 8

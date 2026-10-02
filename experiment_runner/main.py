@@ -39,6 +39,7 @@ from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
 from .config import (
+    ConfigIssues,
     config_resolve,
     config_sanity_check,
     disambiguate,
@@ -85,16 +86,20 @@ def main(config_path: str, debug: bool = False) -> int:
         non-zero value as "this run needs attention" (the CLI turns it into a
         non-zero exit status).
     """
-    config, run_log = initial_setup(config_path, debug=debug)
+    # One collector for every config problem found anywhere in setup, so the run
+    # reports them as a single block once file logging is attached - and again at
+    # the end, where a user returning to a finished run will actually look.
+    issues = ConfigIssues()
+    config, run_log = initial_setup(config_path, debug=debug, issues=issues)
     try:
-        return _run(config)
+        return _run(config, issues)
     finally:
         # Detach the run-level log, so a second run in this process does not
         # also write into this one's experiment.log.
         remove_file_log(run_log)
 
 
-def _run(config: dict) -> int:
+def _run(config: dict, issues: ConfigIssues) -> int:
     """
     Execute the pipeline for an already-resolved *config*.
 
@@ -105,14 +110,18 @@ def _run(config: dict) -> int:
     ----------
     config : dict
         Configuration as returned by :func:`initial_setup`.
+    issues : ConfigIssues
+        Collector already holding anything :func:`initial_setup` found; the
+        remaining checks append to it and it is reported once, here.
 
     Returns
     -------
     int
         Total number of failures, as described on :func:`main`.
     """
-    config = config_resolve(config, master_path=MASTER_CONFIG)
-    config_sanity_check(config)
+    config = config_resolve(config, master_path=MASTER_CONFIG, issues=issues)
+    config_sanity_check(config, issues=issues)
+    issues.report()
     log_config = {**config, "results_rel_path": str(config["results_rel_path"])}
     logger.info(
         "Resolved configuration:\n%s",
@@ -769,6 +778,10 @@ def _run(config: dict) -> int:
                 _format_label_list(failures),
             )
 
+    # A long run scrolls its configuration report out of view, so repeat the
+    # warnings here where someone coming back to a finished run will see them.
+    issues.report(repeat=True)
+
     return (
         len(failed_datasets)
         + len(failed_models)
@@ -778,7 +791,7 @@ def _run(config: dict) -> int:
 
 
 def initial_setup(
-    config_path: str, debug: bool = False
+    config_path: str, debug: bool = False, issues: ConfigIssues | None = None
 ) -> tuple[dict, logging.Handler]:
     """
     Set up experiment as described in the given configuration file.
@@ -789,6 +802,9 @@ def initial_setup(
         Path to the experiment configuration.
     debug : bool
         Enable debug-level logging.
+    issues : ConfigIssues, optional
+        Collector for config warnings found here.  Deferring them is what gets
+        them into ``experiment.log``, which does not exist yet at this point.
 
     Returns
     -------
@@ -819,7 +835,7 @@ def initial_setup(
             raise
 
     # Reject an incomplete config before anything is created on disk.
-    validate_user_config(config)
+    validate_user_config(config, issues)
 
     logger.info("--- Starting setup ---")
     # Generate a folder for the experiment:

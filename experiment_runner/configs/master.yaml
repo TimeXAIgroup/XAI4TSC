@@ -330,6 +330,9 @@ evaluation_config:
     metric_call_params:
       softmax: false
   metrics:                  # REQUIRED. List of {metric: <name>, ...} entries.
+                            # Metric names are case-sensitive display names (unlike model and
+                            # explainer names, which are matched case-insensitively), and an
+                            # unregistered one is a config error.
                             # Each metric's parameters are listed below with the value the
                             # metric's own class defaults to. To SET one, nest it under
                             # 'metric_class_params' (constructor) or 'metric_call_params'

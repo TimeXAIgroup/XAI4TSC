@@ -11,6 +11,11 @@ manager) without disturbing the console or other file sinks. All functions
 target the ``'xai4tsc'`` named logger only and never touch the root logger, so
 enabling logging here does not affect the host application's own logging
 configuration.
+
+Console output tints whole lines above ``INFO`` when the stream is a terminal,
+following the ``NO_COLOR`` and ``FORCE_COLOR`` conventions, so piped or redirected
+output stays plain. ``INFO`` lines are left uncoloured, since they are the bulk of
+the output. File sinks are never coloured, so a log file holds no escape codes.
 """
 
 import logging
@@ -32,7 +37,55 @@ _KIND_CONSOLE = "console"
 _KIND_FILE = "file"
 
 
-def _make_formatter(level: int) -> logging.Formatter:
+# ANSI SGR codes for the levels worth noticing. INFO is deliberately absent: it is
+# the bulk of the output, so colouring it would leave nothing standing out.
+_LEVEL_COLORS = {
+    logging.DEBUG: "\033[36m",  # cyan
+    logging.WARNING: "\033[33m",  # yellow
+    logging.ERROR: "\033[31m",  # red
+    logging.CRITICAL: "\033[1;31m",  # bold red
+}
+_RESET = "\033[0m"
+
+
+class _ColorFormatter(logging.Formatter):
+    """
+    Formatter that tints a whole line, for console output only.
+
+    Records at ``INFO`` are left plain, so the lines carrying colour are exactly
+    the ones that want attention.  Everything else is wrapped end to end -
+    timestamp, level and message - which is both the most visible option and works
+    with grep: the escape codes sit only at the line's edges, so a pattern spanning
+    the timestamp, level and message (``"WARNING: Config"``) still matches. Colouring
+    the parts separately would put a reset between the level name and the colon that
+    follows it, and break exactly that.
+
+    The record is never mutated, so other handlers - a file sink in particular -
+    are unaffected and receive no escape codes.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Render *record*, wrapping the whole line in its level's colour."""
+        text = super().format(record)
+        color = _LEVEL_COLORS.get(record.levelno)
+        return f"{color}{text}{_RESET}" if color else text
+
+
+def _supports_color(stream: object) -> bool:
+    """
+    Return whether *stream* should receive ANSI colour.
+
+    Honours the ``NO_COLOR`` and ``FORCE_COLOR`` conventions, and otherwise
+    colours only a real terminal, so piped or redirected output stays plain.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _make_formatter(level: int, color: bool = False) -> logging.Formatter:
     """
     Return a log formatter for the given verbosity level.
 
@@ -41,6 +94,9 @@ def _make_formatter(level: int) -> logging.Formatter:
     level : int
         Numeric logging level. When at or below :data:`logging.DEBUG`, the
         logger name is included in the format string.
+    color : bool
+        Tint the level name with ANSI codes. Only ever true for the console
+        handler; a file sink must stay free of escape codes.
 
     Returns
     -------
@@ -52,7 +108,7 @@ def _make_formatter(level: int) -> logging.Formatter:
         if level <= logging.DEBUG
         else "%(asctime)s, %(levelname)s: %(message)s"
     )
-    return logging.Formatter(fmt)
+    return _ColorFormatter(fmt) if color else logging.Formatter(fmt)
 
 
 def _coerce_level(level: int | str) -> int:
@@ -170,7 +226,7 @@ def enable_logging(
         setattr(console, _KIND_ATTR, _KIND_CONSOLE)
         logger.addHandler(console)
     console.setLevel(lvl)
-    console.setFormatter(_make_formatter(lvl))
+    console.setFormatter(_make_formatter(lvl, color=_supports_color(console.stream)))
 
     # Silence noisy third-party loggers.
     logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)

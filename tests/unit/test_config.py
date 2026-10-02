@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 from experiment_runner.config import (
+    ConfigIssues,
     _merge_warn_drop,
     _normalize_train_switch,
     config_resolve,
@@ -539,7 +540,7 @@ def test_explicitly_empty_lists_are_allowed_but_warn(caplog):
     with caplog.at_level("WARNING", logger=_CFG_LOGGER):
         validate_user_config(cfg)
 
-    assert caplog.text.count("will do nothing") == 4
+    assert caplog.text.count("this list is empty") == 4
 
 
 @pytest.mark.unit
@@ -686,3 +687,244 @@ def test_master_documented_defaults_match_the_code():
             )
 
     assert not problems, "master.yaml documents stale defaults: " + "; ".join(problems)
+
+
+# ── entry validation: names raise, ignored keys warn (R6, R7, R20) ────────────
+
+
+def _entry_config(**sections):
+    """Return a valid config with one entry per level, overridable per test."""
+    cfg = _minimal_user_config()
+    cfg["data_config"]["datasets"] = [{"dataset": "GunPoint"}]
+    cfg["train_config"]["models"] = [{"model": "FCN"}]
+    cfg["explanation_config"]["explainers"] = [{"method": "Integrated_Gradients"}]
+    cfg["evaluation_config"]["metrics"] = [{"metric": "Complexity"}]
+    for section, entries in sections.items():
+        key = {
+            "data_config": "datasets",
+            "train_config": "models",
+            "explanation_config": "explainers",
+            "evaluation_config": "metrics",
+        }[section]
+        cfg[section][key] = entries
+    return config_resolve(cfg, MASTER_CONFIG)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("section", "entries", "where"),
+    [
+        (
+            "data_config",
+            [{"dataset": "GunPoint", "bogus": 1}],
+            "datasets[0] (GunPoint)",
+        ),
+        ("train_config", [{"model": "FCN", "bogus": 1}], "models[0] (FCN)"),
+        (
+            "explanation_config",
+            [{"method": "Integrated_Gradients", "bogus": 1}],
+            "explainers[0] (Integrated_Gradients)",
+        ),
+        (
+            "evaluation_config",
+            [{"metric": "Complexity", "bogus": 1}],
+            "metrics[0] (Complexity)",
+        ),
+    ],
+)
+def test_unknown_entry_key_warns_naming_its_location(section, entries, where, caplog):
+    cfg = _entry_config(**{section: entries})
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        assert config_sanity_check(cfg) is True
+
+    assert "'bogus'" in caplog.text
+    assert where in caplog.text
+
+
+@pytest.mark.unit
+def test_typo_in_an_explainer_parameter_suggests_the_real_name(caplog):
+    cfg = _entry_config(
+        explanation_config=[{"method": "Integrated_Gradients", "nsteps": 3}]
+    )
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        config_sanity_check(cfg)
+
+    assert "Did you mean 'n_steps'?" in caplog.text
+
+
+@pytest.mark.unit
+def test_metric_parameter_at_top_level_names_where_it_belongs(caplog):
+    """R20: the user did everything but nest it, so say where it goes."""
+    cfg = _entry_config(
+        evaluation_config=[{"metric": "Pixel-Flipping", "features_in_step": 1}]
+    )
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        config_sanity_check(cfg)
+
+    assert "'metric_class_params'" in caplog.text
+    assert "features_in_step" in caplog.text
+
+
+@pytest.mark.unit
+def test_model_parameter_at_top_level_names_init_params(caplog):
+    cfg = _entry_config(train_config=[{"model": "FCN", "filters": [8, 16, 8]}])
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        config_sanity_check(cfg)
+
+    assert "'init_params'" in caplog.text
+
+
+@pytest.mark.unit
+def test_unregistered_metric_name_raises():
+    """R6: a misspelled metric used to warn and silently shorten metrics.csv."""
+    cfg = _entry_config(evaluation_config=[{"metric": "Complexety"}])
+
+    with pytest.raises(ValueError) as excinfo:
+        config_sanity_check(cfg)
+
+    assert "Did you mean 'Complexity'?" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_metric_name_case_mismatch_names_the_registered_spelling():
+    cfg = _entry_config(evaluation_config=[{"metric": "complexity"}])
+
+    with pytest.raises(ValueError, match=r"registered spelling is 'Complexity'"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_nested_base_entry_is_validated_too():
+    cfg = _entry_config(
+        explanation_config=[
+            {"method": "SIGN", "base": {"method": "NotAnExplainer9999"}},
+        ]
+    )
+
+    with pytest.raises(ValueError, match="NotAnExplainer9999"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_default_settings_keys_and_runner_keys_are_accepted(caplog):
+    """An entry may override any default_settings key, plus its structural ones."""
+    cfg = _entry_config(
+        data_config=[
+            {"dataset": "UEA", "max_samples": 5, "overrides": {"X": {"max_samples": 1}}}
+        ],
+        explanation_config=[
+            {"method": "Occlusion", "target": "label", "strides": 2},
+        ],
+        evaluation_config=[
+            {"metric": "Complexity", "animate": True, "animate_fps": 3},
+        ],
+    )
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        assert config_sanity_check(cfg) is True
+
+    assert "not a known" not in caplog.text
+    assert "not read at" not in caplog.text
+
+
+@pytest.mark.unit
+def test_all_problems_are_reported_in_one_run(caplog):
+    cfg = _entry_config(
+        train_config=[{"model": "FCN", "bogus_model_key": 1}],
+        explanation_config=[{"method": "Integrated_Gradients", "nsteps": 3}],
+        evaluation_config=[{"metric": "Nope9999"}, {"metric": "Alsonope9999"}],
+    )
+
+    with (
+        caplog.at_level("WARNING", logger=_CFG_LOGGER),
+        pytest.raises(ValueError) as excinfo,
+    ):
+        config_sanity_check(cfg)
+
+    # Both errors in one message...
+    assert "Nope9999" in str(excinfo.value)
+    assert "Alsonope9999" in str(excinfo.value)
+    # ...and the warnings still logged, even though the run then failed.
+    assert "bogus_model_key" in caplog.text
+    assert "nsteps" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "config_file", sorted((_RUNNER / "configs").glob("*.yaml")), ids=lambda p: p.name
+)
+def test_shipped_configs_raise_no_entry_warnings(config_file, caplog):
+    """The false-positive guard: a shipped config must validate silently."""
+    if config_file.name == "master.yaml":
+        pytest.skip("master.yaml is a reference, not a runnable config")
+
+    cfg = config_resolve(yaml.safe_load(config_file.read_text()), MASTER_CONFIG)
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        assert config_sanity_check(cfg) is True
+
+    assert "not a known" not in caplog.text, caplog.text
+    assert "not read at" not in caplog.text, caplog.text
+
+
+# ── one collected report ──────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_settings_and_entry_problems_share_one_report(caplog):
+    """Every config check appends to one collector, so the count is honest."""
+    issues = ConfigIssues()
+    user = _minimal_user_config()
+    user["bogus_top_level"] = 1
+    user["general"]["bogus_general"] = 1
+    user["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients", "nsteps": 3}
+    ]
+    resolved = config_resolve(user, MASTER_CONFIG, issues=issues)
+    config_sanity_check(resolved, issues=issues)
+
+    # Nothing logged yet: the caller decides when to report.
+    assert not caplog.text
+    assert len(issues.warnings) == 3
+
+    with caplog.at_level("INFO", logger=_CFG_LOGGER):
+        issues.report()
+
+    assert "0 error(s), 3 warning(s)" in caplog.text
+    for expected in ("bogus_top_level", "bogus_general", "nsteps"):
+        assert expected in caplog.text
+
+
+@pytest.mark.unit
+def test_dropped_setting_suggests_the_real_key(caplog):
+    user = _minimal_user_config()
+    user["data_config"]["default_settings"] = {"trainsplit": 0.5}
+
+    with caplog.at_level("WARNING", logger=_CFG_LOGGER):
+        config_resolve(user, MASTER_CONFIG)
+
+    assert "Did you mean 'train_split'?" in caplog.text
+
+
+@pytest.mark.unit
+def test_repeat_restates_warnings_without_raising(caplog):
+    issues = ConfigIssues()
+    issues.warn("somewhere", "a setting was ignored")
+    issues.error("elsewhere", "fatal")
+
+    with caplog.at_level("INFO", logger=_CFG_LOGGER):
+        issues.report(repeat=True)
+
+    assert "repeated (1)" in caplog.text
+    assert "a setting was ignored" in caplog.text
+    assert "fatal" not in caplog.text
+
+
+@pytest.mark.unit
+def test_report_is_silent_when_nothing_was_collected(caplog):
+    with caplog.at_level("INFO", logger=_CFG_LOGGER):
+        ConfigIssues().report()
+    assert caplog.text == ""

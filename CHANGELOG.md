@@ -127,6 +127,34 @@ is a minor version bump; the importable `xai4tsc` package API is unchanged.
 
 ### Fixed
 
+- **One configuration report, repeated at the end.** Every config check now feeds a
+  single collector, so unknown settings-block keys, deprecated values, unknown entry
+  keys and unregistered names appear as one block with an honest count, directly
+  after file logging is attached rather than scattered through the setup output. The
+  warnings are restated after `--- Experiment Finished ---`, because a long run
+  scrolls them out of view and the point of a warning is that it gets read. The
+  empty-list warnings now reach `experiment.log` too: they are found before that file
+  exists, so they are deferred rather than lost. Unknown settings keys also gained a
+  did-you-mean suggestion (`'trainsplit'` -> `'train_split'`).
+- **Console logging is colourised** when writing to a terminal: lines above `INFO`
+  are tinted. The escape codes sit only at a line's edges, so output stays greppable 
+	this includes patterns that span fields, such as `grep "WARNING:"`. Follows the `NO_COLOR`
+  and `FORCE_COLOR` conventions, and log files are never coloured.
+- **Config entries are validated, split by consequence.** Nothing checked the keys
+  or names *inside* a `datasets` / `models` / `explainers` / `metrics` entry, which
+  is where most real typos land: `nsteps` instead of `n_steps` was accepted,
+  dropped, and the explainer silently ran with its own default. Entries are now
+  checked against the keys that are actually read, and problems are collected into
+  one report so a config with several mistakes takes one run to fix:
+  - naming a component that is not registered is an **error** - including a
+    misspelled *metric*, which previously only warned and silently shortened
+    `metrics.csv`. The message suggests the nearest registered name, and for a
+    case-only mismatch gives the exact spelling (metric names are case-sensitive
+    display names, unlike model and explainer names).
+  - a key the runner will never read is a **warning**: the entry still runs, just
+    not as written. A parameter in the wrong place says where it belongs -
+    explainers take theirs at the entry's top level, models under `init_params`,
+    metrics under `metric_class_params` / `metric_call_params`.
 - `general.reproducible: false` raised `UnboundLocalError` and silently skipped
   every dataset; the seeded and unseeded paths now both work. An unseeded run
   additionally **bypasses the split cache** in both directions, since a random

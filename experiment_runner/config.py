@@ -5,6 +5,8 @@ Resolves user YAML against ``master.yaml``, applies per-method defaults,
 and validates model and explainer names against the live runtime registries.
 """
 
+import difflib
+import inspect
 import logging
 from pathlib import Path
 
@@ -137,7 +139,9 @@ def register_external_components(config: dict) -> None:
             register_metric(name, cls)
 
 
-def _merge_warn_drop(user: dict, master: dict, context: str) -> dict:
+def _merge_warn_drop(
+    user: dict, master: dict, context: str, issues: "ConfigIssues | None" = None
+) -> dict:
     """
     Merge user config into master config, warning and dropping unknown keys.
 
@@ -152,21 +156,35 @@ def _merge_warn_drop(user: dict, master: dict, context: str) -> dict:
         Master config section defining known keys.
     context : str
         Human-readable path for warning messages (e.g. ``"general"``).
+    issues : ConfigIssues, optional
+        Collector for the unknown keys found.  When omitted, one is created and
+        reported immediately, which keeps standalone calls self-contained.
 
     Returns
     -------
     dict
         Merged dict starting from master, overlaid with valid user keys.
     """
+    own_report = issues is None
+    issues = ConfigIssues() if issues is None else issues
+
     result = dict(master)
     for key, value in user.items():
         if key not in master:
-            logger.warning("Unknown key '%s' in '%s', ignoring.", key, context)
+            issues.warn(
+                context,
+                f"'{key}' is not a known setting and was dropped."
+                f"{_suggest(key, set(master))}",
+            )
             continue
         if isinstance(value, dict) and isinstance(master[key], dict):
-            result[key] = _merge_warn_drop(value, master[key], f"{context}.{key}")
+            result[key] = _merge_warn_drop(
+                value, master[key], f"{context}.{key}", issues
+            )
         else:
             result[key] = value
+    if own_report:
+        issues.report()
     return result
 
 
@@ -182,7 +200,9 @@ _REQUIRED_LISTS = (
 """The four component lists: what the experiment runs, which cannot be defaulted."""
 
 
-def validate_user_config(user_config: dict) -> None:
+def validate_user_config(
+    user_config: dict, issues: "ConfigIssues | None" = None
+) -> None:
     """
     Check that a user config supplies everything that cannot be defaulted.
 
@@ -196,6 +216,10 @@ def validate_user_config(user_config: dict) -> None:
     ----------
     user_config : dict
         Raw config dict as loaded from the user YAML.
+    issues : ConfigIssues, optional
+        Collector for the empty-list warnings.  This check must run before the
+        results directory exists, hence before file logging is attached, so
+        deferring its warnings is what gets them into ``experiment.log``.
 
     Raises
     ------
@@ -227,12 +251,16 @@ def validate_user_config(user_config: dict) -> None:
         raise ValueError(err_msg)
 
     for name in empty:
-        logger.warning(
-            "'%s' is empty - that level of the pipeline will do nothing.", name
-        )
+        message = "this list is empty, so that level of the pipeline will do nothing."
+        if issues is None:
+            logger.warning("'%s': %s", name, message)
+        else:
+            issues.warn(name, message)
 
 
-def config_resolve(user_config: dict, master_path: Path) -> dict:
+def config_resolve(
+    user_config: dict, master_path: Path, issues: "ConfigIssues | None" = None
+) -> dict:
     """
     Resolve a user config against the master config.
 
@@ -257,6 +285,9 @@ def config_resolve(user_config: dict, master_path: Path) -> dict:
         Raw config dict as loaded from the user YAML.
     master_path : Path
         Path to master.yaml.
+    issues : ConfigIssues, optional
+        Collector for the unknown keys dropped here, so they are reported with
+        every other config problem instead of on their own.
 
     Returns
     -------
@@ -267,13 +298,15 @@ def config_resolve(user_config: dict, master_path: Path) -> dict:
         master = yaml.safe_load(f)
 
     # Warn + drop at the top level and recursively inside known sections
-    return _merge_warn_drop(user_config, master, "root")
+    return _merge_warn_drop(user_config, master, "root", issues)
 
 
 _LEGACY_TRAIN_VALUES = frozenset({"till_epoch", "for_epochs"})
 
 
-def _normalize_train_switch(train_config: dict) -> None:
+def _normalize_train_switch(
+    train_config: dict, issues: "ConfigIssues | None" = None
+) -> None:
     """
     Normalise every ``train`` value in *train_config* to a bool or ``None``.
 
@@ -287,6 +320,9 @@ def _normalize_train_switch(train_config: dict) -> None:
     ----------
     train_config : dict
         The ``train_config`` section, modified in place.
+    issues : ConfigIssues, optional
+        Collector for the deprecation warning.  When omitted it is logged
+        directly.
 
     Raises
     ------
@@ -318,65 +354,299 @@ def _normalize_train_switch(train_config: dict) -> None:
         raise ValueError(err_msg)
 
     if deprecated_used:
-        logger.warning(
+        message = (
             "'train' values 'till_epoch' / 'for_epochs' are deprecated and were "
             "treated as true. Neither was ever read, so they behaved identically; "
             "use 'train: true'. 'epochs' is the number of epochs to run in this "
             "call, and a run resuming from a checkpoint continues its epoch count."
         )
+        if issues is None:
+            logger.warning(message)
+        else:
+            issues.warn("train_config", message)
 
 
-def config_sanity_check(config: dict) -> bool:
+class ConfigIssues:
+    """
+    Collector for config problems, so one run reports all of them in one place.
+
+    Split by consequence: an **error** means the experiment cannot run as
+    configured, a **warning** means the run proceeds but not as the user wrote it.
+    Every config check appends here rather than logging as it goes - unknown keys
+    in the settings blocks, deprecated values, unknown entry keys, unregistered
+    component names - so the report is a single block with an honest count, rather
+    than warnings scattered through the setup output.
+
+    Warnings are logged even when errors follow, so a config with several mistakes
+    takes one run to fix rather than one run per mistake.
+    """
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+
+    def error(self, where: str, message: str) -> None:
+        """Record a problem that prevents the run."""
+        self.errors.append(f"{where}: {message}")
+
+    def warn(self, where: str, message: str) -> None:
+        """Record something the run will proceed without honouring."""
+        self.warnings.append(f"{where}: {message}")
+
+    def report(self, repeat: bool = False) -> None:
+        """
+        Log everything collected as one block, then raise if anything was fatal.
+
+        Parameters
+        ----------
+        repeat : bool
+            ``True`` when re-printing at the end of a finished run, which only
+            re-states the warnings and never raises.  A long run scrolls its
+            configuration report out of view, so the warnings are shown again
+            where the user will actually be looking.
+
+        Raises
+        ------
+        ValueError
+            If any error was recorded and *repeat* is false; the message carries
+            every one of them.
+        """
+        if not self.errors and not self.warnings:
+            return
+        headline = (
+            "--- Configuration warnings, repeated (%d) ---"
+            if repeat
+            else "--- Configuration check: %d error(s), %d warning(s) ---"
+        )
+        logger.info(
+            headline % (len(self.warnings),)
+            if repeat
+            else headline % (len(self.errors), len(self.warnings))
+        )
+        if self.warnings:
+            logger.warning(
+                "The run proceeds, but these settings were not honoured:\n  %s",
+                "\n  ".join(self.warnings),
+            )
+        if self.errors and not repeat:
+            err_msg = "The run cannot proceed:\n  " + "\n  ".join(self.errors)
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+
+
+# Per-entry keys that no `default_settings` block declares: structural, or read by
+# the runner rather than passed to the component.
+_ENTRY_EXTRAS = {
+    "dataset": frozenset({"init_params", "overrides"}),
+    "model": frozenset({"init_params", "model_ckpt_path", "class_name", "class_path"}),
+    "method": frozenset({"class_name", "class_path"}),
+    "metric": frozenset(
+        {"animate", "animate_sample", "animate_fps", "class_name", "class_path"}
+    ),
+}
+
+# identity key -> (config section, list key)
+_ENTRY_SECTIONS = {
+    "dataset": ("data_config", "datasets"),
+    "model": ("train_config", "models"),
+    "method": ("explanation_config", "explainers"),
+    "metric": ("evaluation_config", "metrics"),
+}
+
+# Where a component's parameters belong. Explainers take theirs at the entry's top
+# level and so are absent here; the other two nest them
+# describes.
+_PARAM_HOME = {
+    "model": "'init_params'",
+    "metric": "'metric_class_params' (constructor) or 'metric_call_params' (call time)",
+}
+
+_ENTRY_LABEL = {
+    "dataset": "dataset setting",
+    "model": "model entry key",
+    "method": "explainer entry key",
+    "metric": "metric entry key",
+}
+
+
+def _suggest(key: str, candidates: set[str]) -> str:
+    """Return a ' Did you mean ...?' hint for *key*, or an empty string."""
+    close = difflib.get_close_matches(key, sorted(candidates), n=1, cutoff=0.7)
+    return f" Did you mean '{close[0]}'?" if close else ""
+
+
+def _check_component_name(
+    kind: str, name: str, registry: dict, where: str, issues: ConfigIssues
+) -> type | None:
+    """
+    Resolve an entry's component name against its registry, recording an error.
+
+    Models and explainers are looked up case-insensitively; metric keys are
+    user-facing display names and are matched exactly, so a case-only mismatch is
+    reported with the registered spelling.
+
+    Returns
+    -------
+    type or None
+        The registered class, or ``None`` when the name does not resolve.
+    """
+    exact = name if kind == "metric" else name.lower()
+    if exact in registry:
+        return registry[exact]
+
+    case_match = [key for key in registry if key.lower() == name.lower()]
+    if case_match:
+        # Only metrics can reach this: model and explainer lookups are already
+        # case-insensitive, so a case-only mismatch there would have resolved.
+        hint = (
+            " Metric names are case-sensitive display names; the registered "
+            f"spelling is '{case_match[0]}'."
+        )
+    else:
+        hint = (
+            f"{_suggest(name, set(registry))} Register it at runtime with "
+            f"register_{'explainer' if kind == 'method' else kind}(), or check the "
+            "available names."
+        )
+    issues.error(where, f"{kind} '{name}' is not registered.{hint}")
+    return None
+
+
+def _validate_entry(
+    entry: dict,
+    kind: str,
+    where: str,
+    overridable: set[str],
+    registry: dict | None,
+    issues: ConfigIssues,
+) -> None:
+    """Check one list entry's name and keys; see :func:`config_sanity_check`."""
+    name = entry.get(kind)
+    where = f"{where} ({name})"
+    cls = None
+    if registry is not None and isinstance(name, str):
+        cls = _check_component_name(kind, name, registry, where, issues)
+
+    # Explainers take their parameters at the entry's top level; a partial-wrapped
+    # metric has no introspectable signature, and model parameters are nested.
+    params: set[str] = set()
+    if cls is not None and kind in ("method", "model"):
+        params = set(inspect.signature(cls.__init__).parameters) - {"self"}
+
+    accepted = {kind} | overridable | _ENTRY_EXTRAS[kind]
+    if kind == "method":
+        accepted |= params
+
+    for key in entry:
+        if key in accepted:
+            continue
+        if kind in _PARAM_HOME and (key in params or kind == "metric"):
+            issues.warn(
+                where,
+                f"'{key}' is not read at an entry's top level; "
+                f"{'parameters of this ' + kind} go under {_PARAM_HOME[kind]}.",
+            )
+        else:
+            label = _ENTRY_LABEL[kind]
+            issues.warn(
+                where, f"'{key}' is not a known {label}.{_suggest(key, accepted)}"
+            )
+
+    # A wrapper explainer nests the method it wraps, with its own parameters.
+    if kind == "method" and isinstance(entry.get("base"), dict):
+        _validate_entry(
+            entry["base"], kind, f"{where}.base", overridable, registry, issues
+        )
+
+
+def _validate_entries(config: dict, issues: ConfigIssues) -> None:
+    """Validate every component list entry's name and keys."""
+    from xai4tsc.evaluation.evaluate import METRICS
+    from xai4tsc.models.models import MODELS
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    registries = {"model": MODELS, "method": EXPLAINERS, "metric": METRICS}
+    for kind, (section, list_key) in _ENTRY_SECTIONS.items():
+        block = config.get(section) or {}
+        # The resolved default_settings is exactly the set of keys an entry may
+        # override: _merge_warn_drop has already dropped anything master
+        # does not declare.
+        overridable = set(block.get("default_settings") or {})
+        for index, entry in enumerate(block.get(list_key) or []):
+            if not isinstance(entry, dict):
+                issues.error(
+                    f"{section}.{list_key}[{index}]",
+                    f"expected a mapping, got {entry!r}",
+                )
+                continue
+            _validate_entry(
+                entry,
+                kind,
+                f"{section}.{list_key}[{index}]",
+                overridable,
+                registries.get(kind),
+                issues,
+            )
+
+
+def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> bool:
     """
     Check whether the supplied config contains errors.
 
     First registers any external components declared via ``class_name`` /
-    ``class_path`` (see :func:`register_external_components`), then validates
-    models and explainers against the live runtime registries so that both
-    custom entries added via ``register_model()`` / ``register_explainer()`` and
-    external classes loaded from source are accepted.
+    ``class_path`` (see :func:`register_external_components`), then validates every
+    component list entry against the live runtime registries, so that both custom
+    entries added via ``register_model()`` / ``register_explainer()`` /
+    ``register_metric()`` and external classes loaded from source are accepted.
+
+    Problems are **split by consequence** and collected into one report:
+
+    * an unregistered component name is an **error** - the entry cannot run;
+    * a key the runner will never read is a **warning** - the entry runs, but not
+      as the user wrote it. This is where most real typos land, because a parameter
+      name that does not match is dropped by
+      :func:`~xai4tsc.utils.utils.dict_to_args` and the component silently uses its
+      own default.
+
+    Keys in the *mapping* sections are handled separately, by
+    :func:`_merge_warn_drop` during resolution; this function owns the *list*
+    entries, which that merge cannot see into.
 
     Parameters
     ----------
     config : dict
         Configuration to check.
+    issues : ConfigIssues, optional
+        Collector to append to, so these problems are reported alongside those
+        found during resolution.  When omitted, one is created and reported here.
 
     Returns
     -------
     bool
         ``True`` if the configuration contains no errors.
+
+    Raises
+    ------
+    ValueError
+        If any entry names an unregistered component, or a domain-restricted
+        metric has no explainer that can satisfy it.
     """
     # Last-resort silent extension: load external classes into the registries
     # before validating, so configured-but-unregistered names can still resolve.
     register_external_components(config)
 
-    _normalize_train_switch(config["train_config"])
+    own_report = issues is None
+    issues = ConfigIssues() if issues is None else issues
+
+    _normalize_train_switch(config["train_config"], issues)
 
     # Lazy imports to avoid circular dependencies at module level
-    from xai4tsc.models.models import MODELS
     from xai4tsc.xai.explain import EXPLAINERS
 
-    # Validate models against live registry
-    for model_conf in config["train_config"]["models"]:
-        name = model_conf["model"]
-        if name.lower() not in MODELS:
-            err_msg = (
-                f"Model '{name}' is not registered. "
-                "Use register_model() or check MODELS."
-            )
-            logger.error(err_msg)
-            raise ValueError(err_msg)
-
-    # Validate explainers against live registry (case-insensitive)
-    for exp_conf in config["explanation_config"]["explainers"]:
-        name = exp_conf["method"].lower()
-        if name not in EXPLAINERS:
-            err_msg = (
-                f"Explainer '{name}' is not registered. "
-                "Use register_explainer() or check EXPLAINERS."
-            )
-            logger.error(err_msg)
-            raise ValueError(err_msg)
+    # Component names and entry keys, collected so one run reports all of them.
+    _validate_entries(config, issues)
+    if own_report:
+        issues.report()
 
     # Domain compatibility: a domain-restricted metric (e.g. a frequency
     # perturbation metric) is pointless unless at least one configured explainer

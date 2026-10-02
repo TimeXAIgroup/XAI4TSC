@@ -932,3 +932,88 @@ def test_freqrise_fft_needs_no_transform(ucr_dataset_path, tmp_path, monkeypatch
     df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
     assert not df.empty
     assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
+
+
+# ── entry validation end to end (R6, R7) ──────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_misspelled_metric_fails_before_training(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """R6: this used to exit 0 with a silently short metrics.csv."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = f"tests/_runner_bad_metric_{tmp_path.name}"
+    shutil.rmtree(results_rel, ignore_errors=True)
+
+    config = _resolve_config(cache_root, results_rel)
+    config["evaluation_config"]["metrics"] = [{"metric": "Complexety"}]
+
+    with pytest.raises(ValueError, match="Complexity"):
+        main(str(_write_config(config, tmp_path)))
+
+    # The run directory is created during setup, but no model was ever trained.
+    assert not list(Path(results_rel).glob("**/*.pt"))
+
+
+@pytest.mark.integration
+def test_typo_in_an_explainer_parameter_warns_but_completes(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """R7: the value is ignored, so say so rather than silently use the default."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_param_typo"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients", "nsteps": 3}
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "'nsteps' is not a known explainer entry key" in log
+    assert "Did you mean 'n_steps'?" in log
+
+
+@pytest.mark.integration
+def test_config_warnings_are_repeated_at_the_end(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A long run scrolls the config report away, so it is restated at the end."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_repeat_warnings"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients", "nsteps": 3}
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+
+    # Reported once up front, under the header, and again after the run finished.
+    assert "Configuration check: 0 error(s), 1 warning(s)" in log
+    assert "Configuration warnings, repeated (1)" in log
+    assert log.index("Experiment Finished") < log.index("repeated (1)")
+    # The whole report sits after file logging starts, so experiment.log has it all.
+    assert log.index("Now also logging to file") < log.index("Configuration check")
+
+
+@pytest.mark.integration
+def test_empty_list_warning_reaches_the_log_file(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """Deferred, because the check runs before experiment.log exists."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_empty_metrics"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["evaluation_config"]["metrics"] = []
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "evaluation_config.metrics: this list is empty" in log

@@ -12,7 +12,13 @@ import logging
 import pytest
 
 import xai4tsc
-from xai4tsc.logging_config import _resolve_log_file
+from xai4tsc.logging_config import (
+    _LEVEL_COLORS,
+    _RESET,
+    _make_formatter,
+    _resolve_log_file,
+    _supports_color,
+)
 
 _LOGGER_NAME = "xai4tsc"
 
@@ -182,3 +188,104 @@ def test_file_log_context_manager_detaches_on_error(tmp_path):
     with pytest.raises(ValueError, match="boom"), xai4tsc.file_log(tmp_path / "e.log"):
         raise ValueError("boom")
     assert _file_handlers(logger) == []
+
+
+# ── console colouring ─────────────────────────────────────────────────────────
+
+_ESC = "\033"
+
+
+def _render(level: int, color: bool) -> str:
+    """Format one record of *level* through the console formatter."""
+    formatter = _make_formatter(logging.DEBUG, color=color)
+    record = logging.LogRecord(
+        name="xai4tsc.test",
+        level=level,
+        pathname=__file__,
+        lineno=1,
+        msg="the message",
+        args=(),
+        exc_info=None,
+    )
+    return formatter.format(record)
+
+
+@pytest.mark.unit
+def test_info_lines_are_never_coloured():
+    """INFO is the bulk of the output, so colour there would signal nothing."""
+    assert _ESC not in _render(logging.INFO, color=True)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "level", [logging.DEBUG, logging.WARNING, logging.ERROR, logging.CRITICAL]
+)
+def test_other_levels_colour_the_whole_line(level):
+    rendered = _render(level, color=True)
+    color = _LEVEL_COLORS[level]
+
+    # One span, wrapping the line end to end.
+    assert rendered.count(color) == 1, rendered
+    assert rendered.startswith(color)
+    assert rendered.endswith(f"the message{_RESET}")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR, logging.CRITICAL])
+def test_coloured_lines_stay_greppable(level):
+    """
+    Escape codes only at the edges, so a pattern spanning fields still matches.
+
+    Colouring the timestamp and level name separately put a reset between the
+    level and its colon, which broke ``grep "WARNING:"``.
+    """
+    rendered = _render(level, color=True)
+
+    assert f"{logging.getLevelName(level)}: the message" in rendered
+    assert _ESC not in rendered[len(_LEVEL_COLORS[level]) : -len(_RESET)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("level", [logging.INFO, logging.WARNING, logging.ERROR])
+def test_plain_formatter_emits_no_escape_codes(level):
+    """What a file sink uses: never coloured, whatever the level."""
+    assert _ESC not in _render(level, color=False)
+
+
+@pytest.mark.unit
+def test_colouring_a_record_does_not_leak_into_other_handlers():
+    """The record is shared, so a file sink formatting it next must see it plain."""
+    record = logging.LogRecord(
+        name="xai4tsc.test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="shared",
+        args=(),
+        exc_info=None,
+    )
+    _make_formatter(logging.INFO, color=True).format(record)
+
+    assert record.levelname == "WARNING"
+    assert _ESC not in _make_formatter(logging.INFO, color=False).format(record)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env", "isatty", "expected"),
+    [
+        ({"NO_COLOR": "1"}, True, False),
+        ({"NO_COLOR": "1", "FORCE_COLOR": "1"}, True, False),
+        ({"FORCE_COLOR": "1"}, False, True),
+        ({}, True, True),
+        ({}, False, False),
+    ],
+)
+def test_colour_support_honours_the_conventions(env, isatty, expected, monkeypatch):
+    for var in ("NO_COLOR", "FORCE_COLOR"):
+        monkeypatch.delenv(var, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    stream = type("S", (), {"isatty": lambda self: isatty})()
+    assert _supports_color(stream) is expected

@@ -114,9 +114,20 @@ Getting Started
    component lists -- ``data_config.datasets``, ``train_config.models``,
    ``explanation_config.explainers`` and ``evaluation_config.metrics`` -- must be
    supplied. The settings blocks describe *how* an experiment runs; the lists
-	 describe *what* it runs sensible default. Omitting one fails with a message
-	 naming it, before anything is written to disk. Set a list to ``[]`` to skip
-	 that level deliberately: the run then warns and completes.
+   describe *what* it runs, which has no sensible default. Omitting one fails with
+   a message naming it, before anything is written to disk. Set a list to ``[]`` to
+   skip that level deliberately: the run then warns and completes.
+
+   **Config checks.** Problems are split by consequence and reported together, so
+   one run surfaces all of them. Naming a component that is not registered is an
+   **error**: the entry cannot run, and the message suggests the closest registered
+   name. Supplying a key the runner will never read is a **warning**: the entry
+   runs, but not as written. That second case is where most typos land, because a
+   parameter name that does not match is dropped and the component silently uses
+   its own default. Note where parameters belong, which differs by entry kind:
+   explainers take theirs at the entry's top level, models under ``init_params``,
+   and metrics under ``metric_class_params`` or ``metric_call_params``. A parameter
+   in the wrong place is reported with the place it belongs.
 
    **Where defaults live.** Parameter defaults belong to the class that consumes
    them -- a model's or explainer's constructor, or

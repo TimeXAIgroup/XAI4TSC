@@ -589,6 +589,40 @@ def _validate_entries(config: dict, issues: ConfigIssues) -> None:
             )
 
 
+def _configured_data_domains(config: dict) -> set:
+    """
+    Return the signal domains the configured datasets' arrays are expressed in.
+
+    A dataset entry's ``data_domain`` is only honoured for a local (``path``)
+    dataset; UCR/UEA data is always raw series and a synthetic dataset declares its
+    own domain on the class, so those contribute whatever they declare.
+
+    Parameters
+    ----------
+    config : dict
+        A resolved configuration.
+
+    Returns
+    -------
+    set of Domain
+        One entry per distinct domain, defaulting to the time domain.
+    """
+    from xai4tsc.data.datasets import SYNTHETIC_DATASETS
+    from xai4tsc.xai._types import Domain, resolve_data_domain
+
+    domains = set()
+    for entry in config.get("data_config", {}).get("datasets") or []:
+        name = entry.get("dataset")
+        synthetic = SYNTHETIC_DATASETS.get(name)
+        if synthetic is not None:
+            domains.add(synthetic.data_domain)
+        elif entry.get("path"):
+            domains.add(resolve_data_domain(entry.get("data_domain", "time")))
+        else:
+            domains.add(Domain.TIME)
+    return domains or {Domain.TIME}
+
+
 def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> bool:
     """
     Check whether the supplied config contains errors.
@@ -648,19 +682,47 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     if own_report:
         issues.report()
 
-    # Domain compatibility: a domain-restricted metric (e.g. a frequency
-    # perturbation metric) is pointless unless at least one configured explainer
-    # produces a matching domain. Validate up front against the static capability
-    # sets (incompatible explainer/metric pairs are skipped at runtime).
-    from xai4tsc.evaluation.evaluate import METRICS
+    # Domain compatibility. Every configured dataset declares the domain its arrays
+    # are in, which is the domain the model consumes, so it decides two things:
+    # which explainers can read it, and what a plain attributor's explanation ends up
+    # in. Both are static, so both are checked here rather than failing per dataset.
+    from xai4tsc.evaluation.evaluate import required_domains_for
+
+    data_domains = _configured_data_domains(config)
 
     explainer_domains: set = set()
     for exp_conf in config["explanation_config"]["explainers"]:
         cls = EXPLAINERS.get(exp_conf["method"].lower())
-        if cls is not None:
+        if cls is None:
+            continue
+        accepted = getattr(cls, "accepts_data_domains", set())
+        unreadable = data_domains - accepted if accepted else set()
+        if accepted and not (data_domains & accepted):
+            err_msg = (
+                f"Explainer '{exp_conf['method']}' consumes "
+                f"{{{', '.join(sorted(d.value for d in accepted))}}} data, but no "
+                "configured dataset provides it."
+            )
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+        if unreadable:
+            logger.warning(
+                "Explainer '%s' cannot consume %s data; those datasets will fail.",
+                exp_conf["method"],
+                ", ".join(sorted(d.value for d in unreadable)),
+            )
+        # A plain attributor explains in whichever domain the data is, so its
+        # capability is the set of configured data domains, not its declared default.
+        if getattr(cls, "explains_in_data_domain", False):
+            explainer_domains |= data_domains & accepted if accepted else data_domains
+        else:
             explainer_domains |= getattr(cls, "explanation_domains", set())
     for metric_conf in config.get("evaluation_config", {}).get("metrics", []):
-        required = getattr(METRICS.get(metric_conf["metric"]), "required_domains", None)
+        # A metric tied to the model-native domain is satisfiable by any configured
+        # data domain; the per-pair runtime check uses the explanation's own.
+        required: set = set()
+        for data_domain in data_domains:
+            required |= required_domains_for(metric_conf["metric"], data_domain)
         if required and not (required & explainer_domains):
             err_msg = (
                 f"Metric '{metric_conf['metric']}' requires an explanation in "

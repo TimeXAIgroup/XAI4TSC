@@ -7,6 +7,8 @@ Submodules:
   ``METRICS`` registry.
 - :mod:`~xai4tsc.evaluation.base` — the :class:`EvaluatorBase` /
   :class:`QuantusEvaluator` wrappers.
+- :mod:`~xai4tsc.evaluation.quantus_groups` — what each Quantus metric consumes
+  (``QUANTUS_GROUPS``) and the explanation domains that follow from it.
 - :mod:`~xai4tsc.evaluation.frequency_evaluate`,
   :mod:`~xai4tsc.evaluation.timefrequency_perturbation`,
   :mod:`~xai4tsc.evaluation.timefrequency_auc` — native frequency and
@@ -19,13 +21,23 @@ to callables that produce an :class:`EvaluatorBase` (native subclasses, or the s
 """
 
 from .base import EvaluatorBase, QuantusEvaluator
-from .evaluate import METRICS, QUANTUS_METRICS, evaluate, register_metric
+from .evaluate import (
+    METRICS,
+    QUANTUS_METRICS,
+    evaluate,
+    register_metric,
+    required_domains_for,
+)
+from .quantus_groups import QUANTUS_GROUPS, QuantusGroup
 
 __all__ = [
     "METRICS",
+    "QUANTUS_GROUPS",
     "QUANTUS_METRICS",
     "EvaluatorBase",
     "QuantusEvaluator",
+    "QuantusGroup",
     "evaluate",
     "register_metric",
+    "required_domains_for",
 ]

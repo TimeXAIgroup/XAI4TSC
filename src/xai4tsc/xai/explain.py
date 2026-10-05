@@ -18,7 +18,7 @@ from . import (
     random_baseline,
     wrappers,
 )
-from ._types import Domain, Explanation, is_multi_target
+from ._types import Domain, Explanation, is_multi_target, resolve_data_domain
 from .base import ExplainerBase
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ def generate_explanation(
     device: str = "cpu",
     save_path: Path | str | None = None,
     visualization_type: list | None = None,
+    data_domain: str | Domain = Domain.TIME,
 ) -> Explanation | None:
     """
     Generate an explanation for the given indices or for random samples.
@@ -73,6 +74,11 @@ def generate_explanation(
         Path to save the explanation visualisation to, by default None
     visualization_type : list, optional
         Plot styles to render when saving, by default ``["points"]``.
+    data_domain : str or Domain, optional
+        Signal domain *data* is expressed in, i.e. the domain the model consumes
+        (``"time"`` by default; see :attr:`xai4tsc.data.DatasetBase.data_domain`).
+        A plain attributor explains in this domain; a domain-changing explainer is
+        refused on data it cannot transform from.
 
     Returns
     -------
@@ -113,6 +119,7 @@ def generate_explanation(
         orig_indices=indices,
         save_path=save_path,
         visualization_type=visualization_type,
+        data_domain=data_domain,
     )
     return explanation
 
@@ -129,6 +136,7 @@ def _get_explanation(
     orig_indices: np.ndarray | None = None,
     save_path: Path | None = None,
     visualization_type: list | None = None,
+    data_domain: str | Domain = Domain.TIME,
 ) -> Explanation:
     """
     Use the supplied parameters to explain the given samples.
@@ -158,6 +166,12 @@ def _get_explanation(
         Path to save visualisation to, by default None
     visualization_type : list, optional
         Plot styles to render when saving, by default ``["points"]``.
+    data_domain : str or Domain, optional
+        Signal domain *data* is expressed in, i.e. the domain the model consumes
+        (``"time"`` by default; see :attr:`xai4tsc.data.DatasetBase.data_domain`).
+        A plain attributor explains in this domain, so it is what the resulting
+        ``explanation_domain`` becomes; a domain-changing explainer declares which
+        domains it can consume and is refused on the others.
 
     Returns
     -------
@@ -168,6 +182,8 @@ def _get_explanation(
     ------
     NotImplementedError
         Thrown for not implemented explanation methods.
+    ValueError
+        If the explainer cannot consume data in *data_domain*.
     """
     if visualization_type is None:
         visualization_type = ["points"]
@@ -175,11 +191,29 @@ def _get_explanation(
     explainer_key = method.lower()
     explainer_instance = build_explainer(explainer_key, params)
 
-    # Derive the realized explanation domain. For single-capability explainers
-    # it is the sole member; multi-capability explainers (e.g. FreqRISE) must set
-    # exp.explanation_domain themselves inside explain() and are validated below.
+    data_domain = resolve_data_domain(data_domain)
+
+    # A domain-changing explainer transforms its input, so it can only start from a
+    # domain it knows how to transform; anything else would transform data that is
+    # already in the target domain. An empty set means "any domain".
+    accepted = explainer_instance.accepts_data_domains
+    if accepted and data_domain not in accepted:
+        raise ValueError(
+            f"Explainer '{explainer_key}' consumes "
+            f"{sorted(d.value for d in accepted)} data, but the data is "
+            f"{data_domain.value}."
+        )
+
+    # Derive the realized explanation domain. A plain attributor assigns relevance
+    # to the features it was given, so its explanation is in the data's own domain.
+    # For a domain-changing explainer it is the sole declared member; multi-capability
+    # ones (e.g. FreqRISE) must set exp.explanation_domain themselves inside
+    # explain() and are validated below.
     domains = explainer_instance.explanation_domains
-    realized_domain = next(iter(domains)) if len(domains) == 1 else Domain.TIME
+    if explainer_instance.explains_in_data_domain:
+        realized_domain = data_domain
+    else:
+        realized_domain = next(iter(domains)) if len(domains) == 1 else Domain.TIME
 
     # Create explanation data structure
     exp = Explanation(
@@ -191,6 +225,7 @@ def _get_explanation(
         encoder=encoder,
         indices=orig_indices,
         meta=None,
+        data_domain=data_domain,
         explanation_domain=realized_domain,
         transform=getattr(explainer_instance, "transform", None),
     )

@@ -928,3 +928,23 @@ def test_report_is_silent_when_nothing_was_collected(caplog):
     with caplog.at_level("INFO", logger=_CFG_LOGGER):
         ConfigIssues().report()
     assert caplog.text == ""
+
+
+@pytest.mark.unit
+def test_channel_first_is_a_settable_call_param():
+    # Master is also the key whitelist, so a user can only set channel_first if
+    # master declares it; dropping it there would silently ignore the override and
+    # hand the axis order back to Quantus to guess.
+    defaults = config_resolve(_minimal_user_config(), MASTER_CONFIG)[
+        "evaluation_config"
+    ]["default_settings"]["metric_call_params"]
+    assert defaults["channel_first"] is True
+
+    user = _minimal_user_config()
+    user["evaluation_config"]["default_settings"] = {
+        "metric_call_params": {"channel_first": False}
+    }
+    overridden = config_resolve(user, MASTER_CONFIG)["evaluation_config"][
+        "default_settings"
+    ]["metric_call_params"]
+    assert overridden["channel_first"] is False

@@ -11,6 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
+from .._domains import Domain
 from .data_loaders import load_json, load_metadata
 
 logger = logging.getLogger(__name__)
@@ -417,10 +418,22 @@ class DatasetBase(ABC):
 
     Provides concrete implementations of splitting, saving, and loading
     pre-split data.  Subclasses only need to implement :meth:`load`.
+
+    Data domain
+    -----------
+    :attr:`data_domain` is the signal domain the loaded arrays are *expressed in*,
+    and it travels downstream on :attr:`xai4tsc.Explanation.data_domain`, where it
+    defines the model-native domain that explainers and metrics are checked against.
+    It is the time domain for raw series, which is every dataset shipped here;
+    a dataset of spectra declares otherwise. Subclasses that know their own
+    domain set it as a class attribute; :class:`~xai4tsc.data.LocalDataset` takes it
+    as a constructor argument, since only the user knows what is in the file.
     """
 
     name: str = None
     """Human-readable dataset identifier."""
+    data_domain: Domain = Domain.TIME
+    """Signal domain the loaded arrays are expressed in (see above)."""
     _splits: list = None
     """Cached list of (X, y, metadata) tuples set by :meth:`split`."""
     _encoder = None

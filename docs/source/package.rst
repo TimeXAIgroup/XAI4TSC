@@ -113,6 +113,72 @@ Registry key                                  Class
 ``Time-Frequency AUC``                       :class:`~xai4tsc.evaluation.timefrequency_auc.TimeFrequencyAUCEvaluator`
 ===========================================  ============================================================================
 
+Data domain
+~~~~~~~~~~~
+
+A dataset declares the signal domain its arrays are *expressed in* via
+:attr:`xai4tsc.data.DatasetBase.data_domain`, and that is the domain the model
+trained on it consumes - the **model-native domain**. It is the time domain for raw
+series, which is every dataset shipped here; a dataset of (real-valued) spectra
+declares ``"frequency"``. A :class:`~xai4tsc.data.LocalDataset` takes it as a
+constructor argument, because only the caller knows what is in the file, while
+UCR/UEA data is always raw series and a synthetic dataset declares its own on the
+class. Unlike ``layout``, which describes a file and is resolved away at load time,
+this one travels: pass it to
+:func:`~xai4tsc.xai.generate_explanation` and it lands on
+:attr:`xai4tsc.Explanation.data_domain`, where it decides two things.
+
+First, what a plain attributor's explanation domain *is*: relevance is assigned to
+the features the model was given, so it comes out in the data's own domain, and
+``Integrated_Gradients`` on a spectra-trained model yields a frequency explanation.
+Explainers that deliberately change domain (``Frequency``, ``TimeFrequency``,
+``FreqRISE``, the ``Random_*`` baselines) set
+:attr:`~xai4tsc.xai.ExplainerBase.explains_in_data_domain` to ``False`` and name
+their output instead.
+
+Second, which explainers can read the data at all:
+:attr:`~xai4tsc.xai.ExplainerBase.accepts_data_domains` declares the domains an
+explainer can consume (empty means any). The domain-lifting explainers consume
+time-domain data only, so pointing one at frequency data is refused rather than
+transforming it a second time.
+
+Metric domains
+~~~~~~~~~~~~~~
+
+Which explanation domains a metric can score is declared on the registry value, and
+:func:`~xai4tsc.evaluation.required_domains_for` is the reader. A metric defined
+*for* a domain names it in ``required_domains`` (an empty set means any domain); one
+that perturbs the input and re-queries the model instead sets
+``requires_native_domain``, which ties it to the **model-native domain** - the domain
+the model's inputs live in, :attr:`xai4tsc.Explanation.data_domain`. That is the time
+domain for a model trained on raw series and the frequency domain for one trained on
+spectra, so these metrics follow the model rather than being fixed to time.
+
+For the Quantus metrics the choice follows from what each one consumes, recorded in
+:data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`:
+
+=======================  ===========================  ===  ===========================
+Group                    Its own code reads           n    Explanation domain
+=======================  ===========================  ===  ===========================
+``ATTRIBUTION_ONLY``     ``a_batch``                  3    any
+``MODEL_PERTURBATION``   ``x_batch`` + ``model``      16   model-native
+``LOCALISATION``         ``x_batch`` + ``s_batch``    6    model-native
+``RE_EXPLAIN``           ``+ explain_func``           12   model-native
+=======================  ===========================  ===  ===========================
+
+So ``"Complexity"``, ``"Effective Complexity"`` and ``"Sparseness"`` score an
+explanation in any domain, including one lifted out of the data's own (the adapter
+supplies inputs on the same coefficient grid), while a metric that perturbs the input
+needs the explanation in the domain the model predicts in.
+
+:meth:`~xai4tsc.evaluation.base.QuantusEvaluator.evaluate` also takes
+``channel_first``, the axis order of the inputs, which defaults to ``True`` for the
+framework's canonical ``(B, C, T)``. It is passed on to the Quantus metric; left
+unset there it is inferred from the shape, and the guess is wrong for an input with
+more channels than timesteps. Pass it through ``metric_call_params`` when calling
+:func:`~xai4tsc.evaluation.evaluate`, or set it under
+``evaluation_config.default_settings.metric_call_params`` in a runner config.
+
 Extending the package
 ~~~~~~~~~~~~~~~~~~~~~~~
 

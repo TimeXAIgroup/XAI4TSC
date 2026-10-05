@@ -67,6 +67,16 @@ data_config:
                             #   "bct":  trust as (B, C, T) -- use this when the data genuinely
                             #           has more channels than timesteps, which "auto" corrupts
                             #   "btc":  always transpose
+    data_domain: "time"     # signal domain a local array is expressed in, i.e. what the model
+                            # trained on it consumes: "time" (raw series, the default),
+                            # "frequency" or "time_frequency".
+                            # Non-time data must still be real float32 (e.g. magnitude
+                            # spectra), and the domain-lifting explainers (Frequency,
+                            # TimeFrequency, FreqRISE, Random_Frequency,
+                            # Random_TimeFrequency) consume time-domain data only, so pairing
+                            # one with a non-time dataset is a config error.
+                            # Ignored for UCR/UEA (always raw series) and for synthetic
+                            # datasets, which declare their own domain in code.
     download: true          # Download UCR dataset if not found locally
     path: null              # Local path; if set, LocalDataset is used instead of UcrUeaDataset
     is_presplit: false      # true = load directly via load_saved_splits(), bypass cache
@@ -329,6 +339,10 @@ evaluation_config:
       return_aggregate: true
     metric_call_params:
       softmax: false
+      channel_first: true   # axis order of the data as the metric sees it. Everything
+                            # downstream of loading is (B, C, T), so true is right for
+                            # every shipped dataset; a dataset's `layout` is about its
+                            # file and is already resolved by then.
   metrics:                  # REQUIRED. List of {metric: <name>, ...} entries.
                             # Metric names are case-sensitive display names (unlike model and
                             # explainer names, which are matched case-insensitively), and an
@@ -338,6 +352,14 @@ evaluation_config:
                             # 'metric_class_params' (constructor) or 'metric_call_params'
                             # (call time) on the entry or in default_settings above -
                             # a parameter written at an entry's top level is not read.
+                            # Explanation domains: the Quantus metrics are grouped by
+                            # what they read. 'Complexity', 'Effective Complexity' and
+                            # 'Sparseness' read the attribution alone and so score a
+                            # frequency or time-frequency explanation too; the other 34
+                            # perturb the input, need ground-truth masks, or re-explain,
+                            # and need the explanation in the model-native domain, the
+                            # one the model's inputs live in (the time domain for every
+                            # dataset shipped here).
                             # Per-entry runner keys, available on every metric:
                             #   animate: false        write a GIF of the perturbation curve;
                             #     only the perturbation metrics implement it, others warn
@@ -356,13 +378,14 @@ evaluation_config:
     - metric: Completeness
                             # params (set via metric_class_params):
                             #   perturb_baseline: "black"   baseline for perturbed features: black, white, mean, random
-    - metric: Complexity
+    - metric: Complexity    # attribution-only: scores any explanation domain
     - metric: Consistency
     - metric: Continuity Test
                             # params (set via metric_class_params):
                             #   nr_steps: 28                number of perturbation steps along the translation path
                             #   perturb_baseline: "black"   baseline for perturbed region
-    - metric: Effective Complexity
+    - metric: Effective Complexity 
+                            # attribution-only: scores any explanation domain
                             # params (set via metric_class_params):
                             #   eps: 1.0e-5   threshold below which an attribution is considered zero
     - metric: Efficient MPRT
@@ -468,7 +491,7 @@ evaluation_config:
                             #   seed: 42                   random seed for weight randomisation
                             #   nr_samples: 50             number of noise samples for smoothing
                             #   noise_magnitude: 0.1       magnitude of Gaussian noise added to weights
-    - metric: Sparseness
+    - metric: Sparseness                  # attribution-only: scores any explanation domain
     - metric: Sufficiency
                             # params (set via metric_class_params):
                             #   threshold: 0.6                fraction of features considered "sufficient" for classification

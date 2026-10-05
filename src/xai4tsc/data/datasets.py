@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_UCR_UEA_dataset
 
+from .._domains import Domain, resolve_data_domain
 from .base import (
     DatasetBase,
     _class_index_view,
@@ -341,6 +342,7 @@ class LocalDataset(DatasetBase):
         name: str,
         data_format: str = "numpy",
         layout: str = "auto",
+        data_domain: str | Domain = "time",
         pad_series: bool = False,
         max_samples: int | None = None,
         sample_strategy: str = "random",
@@ -365,6 +367,12 @@ class LocalDataset(DatasetBase):
             ``(B, C, T)``, ``"btc"`` always transposes. Set ``"bct"`` for data that
             genuinely has more channels than timesteps, which ``"auto"`` would
             otherwise corrupt.
+        data_domain : str or Domain
+            Signal domain the stored arrays are expressed in: ``"time"`` (default),
+            ``"frequency"`` or ``"time_frequency"``. Only the user knows this about
+            a file, it is set downstream as the model-native domain (see
+            :class:`~xai4tsc.data.DatasetBase`). Non-time data must still be real
+            ``float32``, e.g. magnitude spectra, not complex coefficients.
         pad_series : bool
             If ``True``, variable-length data (list of arrays) is zero-padded to
             the length of the longest series before returning.  If ``False``
@@ -389,6 +397,7 @@ class LocalDataset(DatasetBase):
         self.name = name
         self.data_format = data_format
         self.layout = layout
+        self.data_domain = resolve_data_domain(data_domain)
         self.pad_series = pad_series
 
     def load(self) -> tuple:
@@ -605,6 +614,11 @@ class FreqShapesDataset(SyntheticDataset):
        arrangement until the generator is validated.
     """
 
+    data_domain: Domain = Domain.TIME
+    """Raw series, despite the name: the *discriminative features* are frequencies
+    localized in time, while the arrays themselves are time-domain
+    ``(B, 1, 500)`` ``float32``."""
+
     def __init__(
         self,
         name: str = "freq_shapes",
@@ -712,6 +726,7 @@ def load_dataset(
     max_series_length: int | None = None,
     series_position: str = "first",
     layout: str = "auto",
+    data_domain: str = "time",
     **kwargs: object,
 ) -> DatasetBase:
     """
@@ -750,6 +765,11 @@ def load_dataset(
         Axis order of a local array: ``"auto"`` (default), ``"bct"`` or ``"btc"``.
         Only meaningful with *path*; UCR/UEA and synthetic data are already
         ``(B, C, T)``, so it is not forwarded to them.
+    data_domain : str
+        Signal domain a local array is expressed in: ``"time"`` (default),
+        ``"frequency"`` or ``"time_frequency"``. Only meaningful with *path*:
+        UCR/UEA data is always raw series and a synthetic dataset declares its own
+        domain, so a non-default value is ignored with a warning for those.
     **kwargs
         Forwarded to the selected subclass constructor (e.g. ``download``,
         ``data_format``).
@@ -760,6 +780,14 @@ def load_dataset(
         max_series_length=max_series_length,
         series_position=series_position,
     )
+    if data_domain != "time" and path is None:
+        logger.warning(
+            "'data_domain: %s' is ignored for '%s': UCR/UEA data is always raw "
+            "series and a synthetic dataset declares its own domain. Only a local "
+            "('path') dataset takes this setting.",
+            data_domain,
+            name,
+        )
     if name in SYNTHETIC_DATASETS:
         # Generation params arrive as kwargs (the runner forwards `init_params`).
         for k in ("data_format", "download", "use_predefined_splits"):
@@ -785,6 +813,7 @@ def load_dataset(
             path,
             name=name,
             layout=layout,
+            data_domain=data_domain,
             pad_series=pad_series,
             **restriction_kwargs,
             **kwargs,

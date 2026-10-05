@@ -462,3 +462,21 @@ def test_config_accepts_tfauc_on_frequency_explainer():
     from experiment_runner.config import config_sanity_check
 
     assert config_sanity_check(_cfg("FreqRISE", "Time-Frequency AUC"))
+
+
+@pytest.mark.unit
+def test_config_rejects_quantus_metric_without_a_time_explainer():
+    # Quantus metrics that perturb the input need a time-domain explanation; a
+    # frequency-only config pairing one with them cannot produce a single score.
+    from experiment_runner.config import config_sanity_check
+
+    with pytest.raises(ValueError, match="requires an explanation in domain"):
+        config_sanity_check(_cfg("FreqRISE", "Pixel-Flipping"))
+
+
+@pytest.mark.unit
+def test_config_accepts_an_attribution_only_metric_on_a_frequency_explainer():
+    # Complexity reads only the attribution, so it applies in any domain.
+    from experiment_runner.config import config_sanity_check
+
+    assert config_sanity_check(_cfg("FreqRISE", "Complexity"))

@@ -51,10 +51,27 @@ class ExplainerBase(ABC):
     """Signal domains this explainer *can* produce explanations in. A set of
     :class:`~xai4tsc.xai.Domain` members (capability declaration, mirroring
     :attr:`data_applicability`). Checked statically by the runner's config sanity
-    check before any explainer is instantiated. Defaults to ``{Domain.TIME}``;
-    frequency/time-frequency explainers override it. The realized domain of a
-    produced explanation (``Explanation.explanation_domain``) must be a member of
-    this set."""
+    check before any explainer is instantiated. Only read when
+    :attr:`explains_in_data_domain` is ``False``; a domain-changing explainer
+    (frequency / time-frequency) overrides both. The realized domain of a produced
+    explanation (``Explanation.explanation_domain``) must be a member of this set."""
+
+    explains_in_data_domain: ClassVar[bool] = True
+    """Whether the relevance comes out in the same domain as the input.
+
+    True for a plain attributor: it assigns relevance to the input features it was
+    given, so the explanation is in the **model-native domain** - the time domain
+    for a model trained on raw series, the frequency domain for one trained on
+    spectra (:attr:`xai4tsc.Explanation.data_domain`). Explainers that deliberately
+    change domain set this to ``False`` and name their output in
+    :attr:`explanation_domains` instead."""
+
+    accepts_data_domains: ClassVar[set[Domain]] = set()
+    """Data domains this explainer can consume; empty means any.
+
+    A domain-changing explainer transforms its input, so it declares the domain it
+    can transform *from*. Pointing one at data already in its target domain would
+    transform it a second time, which is why that pairing is refused."""
 
     @abstractmethod
     def explain(
@@ -202,12 +219,14 @@ class WrapperExplainer(ExplainerBase, ABC):
         method = base_cfg.pop("method")
         self._base = build_explainer(method, base_cfg)
         # A wrapper reports the same explanation type, data applicability, and
-        # explanation domains as the method it extends. Domain-changing wrappers
-        # (e.g. Frequency/TimeFrequency) override explanation_domains *after*
-        # calling super().__init__().
+        # domain declarations as the method it extends. Domain-changing wrappers
+        # (e.g. Frequency/TimeFrequency) override them *after* calling
+        # super().__init__().
         self.explanation_type = self._base.explanation_type
         self.data_applicability = self._base.data_applicability
         self.explanation_domains = self._base.explanation_domains
+        self.explains_in_data_domain = self._base.explains_in_data_domain
+        self.accepts_data_domains = set(self._base.accepts_data_domains)
 
     def _run_base(
         self,

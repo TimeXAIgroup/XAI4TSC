@@ -31,7 +31,7 @@ from xai4tsc.data import (
     SyntheticDataset,
     load_dataset,
 )
-from xai4tsc.evaluation.evaluate import METRICS
+from xai4tsc.evaluation.evaluate import required_domains_for
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils.utils import merge_dicts
@@ -490,6 +490,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 },
                                 metadata=test_metadata,
                                 explanation_dir=explanation_dir,
+                                data_domain=ds.data_domain,
                             )
 
                             logger.info(
@@ -523,10 +524,9 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 # Skip domain-restricted metrics on incompatible
                                 # explanations (e.g. a frequency metric on a
                                 # time-domain attribution)
-                                required_domains = getattr(
-                                    METRICS.get(metric_config["metric"]),
-                                    "required_domains",
-                                    None,
+                                required_domains = required_domains_for(
+                                    metric_config["metric"],
+                                    explanation.data_domain,
                                 )
                                 if (
                                     required_domains

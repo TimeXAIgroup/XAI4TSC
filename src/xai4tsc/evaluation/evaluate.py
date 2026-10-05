@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 import quantus as q
 
 from ..utils.utils import dict_to_args
+from ..xai._types import Domain
 from .base import EvaluatorBase, QuantusEvaluator
 from .frequency_evaluate import FrequencyEvaluator
+from .quantus_groups import quantus_requires_native_domain
 from .timefrequency_auc import TimeFrequencyAUCEvaluator
 from .timefrequency_perturbation import (
     TimeFrequencyEvaluator,
@@ -70,6 +72,19 @@ def evaluate(
         logger.warning("Metric %s is not registered, it will be skipped!", metric)
         return None
 
+    # A metric that declares required_domains cannot score an explanation from
+    # another domain; refuse here rather than letting the backend raise.
+    required = required_domains_for(metric, explanation.data_domain)
+    if required and explanation.explanation_domain not in required:
+        logger.warning(
+            "Metric %s requires an explanation in domain(s) %s but the explanation "
+            "is %s, it will be skipped!",
+            metric,
+            sorted(d.value for d in required),
+            explanation.explanation_domain.value,
+        )
+        return None
+
     model.eval()
     # Every METRICS value is a callable -> EvaluatorBase (a native subclass, or
     # partial(QuantusEvaluator, name) for Quantus metrics), so dispatch is uniform.
@@ -89,6 +104,37 @@ def evaluate(
     )
     logger.info("%s: %s", metric, result)
     return result
+
+
+def required_domains_for(metric: str, data_domain: Domain = Domain.TIME) -> set[Domain]:
+    """
+    Return the explanation domains a registered metric can score.
+
+    Reads the declaration off the registry *value*, so it covers native evaluator
+    classes, user-registered subclasses, and the Quantus entries alike (those carry
+    their per-name declaration on the factory; see :func:`_quantus_entry`). A metric
+    that requires the model-native domain resolves to ``{data_domain}``.
+
+    Parameters
+    ----------
+    metric : str
+        Registry key for the metric.
+    data_domain : Domain
+        The domain the model's inputs live in, i.e.
+        :attr:`xai4tsc.Explanation.data_domain`. The default reflects that every
+        shipped loader produces time-domain data; pass the explanation's own value
+        where it is known.
+
+    Returns
+    -------
+    set of Domain
+        The domains the metric applies to; an empty set means any domain, which is
+        also what an unregistered name returns.
+    """
+    entry = METRICS.get(metric)
+    if getattr(entry, "requires_native_domain", False):
+        return {data_domain}
+    return getattr(entry, "required_domains", None) or set()
 
 
 def register_metric(name: str, metric_class: type) -> None:
@@ -165,6 +211,31 @@ QUANTUS_METRICS = {
 }
 
 
+def _quantus_entry(name: str) -> partial:
+    """
+    Build the ``METRICS`` entry for one Quantus metric.
+
+    A bare ``functools.partial`` hides the wrapped class's declarations, and
+    :func:`required_domains_for` reads them off the registry value to decide whether a
+    metric can score an explanation. They are therefore attached to the factory, per
+    metric name (see :mod:`~xai4tsc.evaluation.quantus_groups`).
+
+    Parameters
+    ----------
+    name : str
+        A key of ``QUANTUS_METRICS``.
+
+    Returns
+    -------
+    functools.partial
+        A callable producing a :class:`~xai4tsc.evaluation.base.QuantusEvaluator`.
+    """
+    entry = partial(QuantusEvaluator, name)
+    entry.requires_native_domain = quantus_requires_native_domain(name)
+    entry.data_applicability = QuantusEvaluator.data_applicability
+    return entry
+
+
 # Unified metric registry. Every value is a callable -> EvaluatorBase: native metrics
 # are EvaluatorBase subclasses; each Quantus metric is mapped in via the single
 # QuantusEvaluator, bound to its name with functools.partial.
@@ -176,5 +247,5 @@ METRICS: dict[str, type | Callable] = {
     # Ground-truth localization metric (needs per-sample GT metadata).
     "Time-Frequency AUC": TimeFrequencyAUCEvaluator,
     # Quantus-library metrics, adapted by the single QuantusEvaluator.
-    **{name: partial(QuantusEvaluator, name) for name in QUANTUS_METRICS},
+    **{name: _quantus_entry(name) for name in QUANTUS_METRICS},
 }

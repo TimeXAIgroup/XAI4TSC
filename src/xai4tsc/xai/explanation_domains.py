@@ -49,6 +49,8 @@ class FrequencyExplainer(WrapperExplainer):
 
     data_applicability: ClassVar[set[DataType]] = {DataType.TIME_SERIES}
     explanation_domains: ClassVar[set[Domain]] = {Domain.FREQUENCY}
+    explains_in_data_domain: ClassVar[bool] = False
+    accepts_data_domains: ClassVar[set[Domain]] = {Domain.TIME}
 
     def __init__(
         self,
@@ -60,6 +62,8 @@ class FrequencyExplainer(WrapperExplainer):
         # this wrapper *changes* the domain, so override after super().__init__().
         self.data_applicability = {DataType.TIME_SERIES}
         self.explanation_domains = {Domain.FREQUENCY}
+        self.explains_in_data_domain = False
+        self.accepts_data_domains = {Domain.TIME}
         self.transform = resolve_transform(transform) or FourierTransform()
 
     def explain(
@@ -98,6 +102,8 @@ class TimeFrequencyExplainer(WrapperExplainer):
 
     data_applicability: ClassVar[set[DataType]] = {DataType.TIME_SERIES}
     explanation_domains: ClassVar[set[Domain]] = {Domain.TIME_FREQUENCY}
+    explains_in_data_domain: ClassVar[bool] = False
+    accepts_data_domains: ClassVar[set[Domain]] = {Domain.TIME}
 
     def __init__(
         self,
@@ -107,6 +113,8 @@ class TimeFrequencyExplainer(WrapperExplainer):
         super().__init__(base)
         self.data_applicability = {DataType.TIME_SERIES}
         self.explanation_domains = {Domain.TIME_FREQUENCY}
+        self.explains_in_data_domain = False
+        self.accepts_data_domains = {Domain.TIME}
         self.transform = resolve_transform(transform)
         if self.transform is None:
             raise ValueError(

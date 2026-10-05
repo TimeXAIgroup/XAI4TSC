@@ -91,6 +91,8 @@ class FreqRISEExplainer(PerturbationExplainer):
         Domain.FREQUENCY,
         Domain.TIME_FREQUENCY,
     }
+    explains_in_data_domain: ClassVar[bool] = False
+    accepts_data_domains: ClassVar[set[Domain]] = {Domain.TIME}
 
     def __init__(
         self,

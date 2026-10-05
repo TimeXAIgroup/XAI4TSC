@@ -511,6 +511,101 @@ def test_status_skipped_domain_row_is_recorded(ucr_dataset_path, tmp_path, monke
 
 
 @pytest.mark.integration
+def test_quantus_metrics_follow_their_group_across_domains(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """
+    A Quantus metric is paired with a frequency explanation only if it can score it.
+
+    `Complexity` reads the attribution alone, so it applies in any domain;
+    `Pixel-Flipping` perturbs the input and re-queries the model, so it is
+    time-domain only. Both used to be run against both explainers, and both used to
+    raise `AssertionError` on the frequency one.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_quantus_domains"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["explanation_config"]["explainers"] = [
+        {"method": "Integrated_Gradients"},
+        {
+            "method": "Frequency",
+            "base": {"method": "Integrated_Gradients"},
+            "transform": {"name": "rfft", "params": {}},
+        },
+    ]
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Complexity"},
+        {"metric": "Pixel-Flipping"},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    status = {
+        (row["explainer"], row["metric"]): row["status"] for _, row in df.iterrows()
+    }
+    assert status[("Integrated_Gradients", "Complexity")] == "ok"
+    assert status[("Integrated_Gradients", "Pixel-Flipping")] == "ok"
+    assert status[("FREQUENCY-Integrated_Gradients", "Complexity")] == "ok"
+    assert status[("FREQUENCY-Integrated_Gradients", "Pixel-Flipping")] == (
+        "skipped-domain"
+    )
+
+
+@pytest.mark.integration
+def test_frequency_native_dataset_scores_input_perturbing_metrics(
+    tmp_path, monkeypatch
+):
+    """
+    `data_domain: frequency` makes the model-native domain the frequency domain.
+
+    A model trained on spectra consumes coefficients, so a plain attributor's
+    relevance is a frequency explanation and `Pixel-Flipping` - which perturbs the
+    input and re-queries the model - applies there. It used to be refused as
+    "time-domain only", which was never about time but about the model.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_freq_native"
+
+    # Real-valued magnitude spectra: 33 rFFT bins of a 64-sample series.
+    data_dir = tmp_path / "spectra"
+    data_dir.mkdir()
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 2, 40)
+    series = rng.normal(size=(40, 1, 64)) + labels[:, None, None]
+    spectra = np.abs(np.fft.rfft(series, axis=-1)).astype(np.float32)
+    np.save(data_dir / "data.npy", spectra)
+    (data_dir / "label.json").write_text(
+        json.dumps([{"label": str(int(y))} for y in labels])
+    )
+
+    config = _resolve_config(tmp_path / "cache", results_rel)
+    config["data_config"]["datasets"] = [
+        {
+            "dataset": "spectra",
+            "path": str(data_dir),
+            "layout": "bct",
+            "data_domain": "frequency",
+        }
+    ]
+    config["train_config"]["models"] = [
+        {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
+    ]
+    config["explanation_config"]["explainers"] = [{"method": "Integrated_Gradients"}]
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Pixel-Flipping"},
+        {"metric": "Complexity"},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert set(df["metric"]) == {"Pixel-Flipping", "Complexity"}
+    assert (df["status"] == "ok").all(), df.loc[df["status"] != "ok"].to_dict("records")
+    assert df["score"].notna().all()
+
+
+@pytest.mark.integration
 def test_header_only_metrics_csv_when_nothing_succeeds(
     ucr_dataset_path, tmp_path, monkeypatch
 ):
@@ -586,10 +681,10 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     `layout: bct` stops the shape heuristic corrupting genuine C>T data.
 
     With `layout: auto` the array is read as (B, T, C) and transposed, so the
-    model is built on the wrong axis. Metrics are skipped on purpose: Quantus runs
-    the same shape guess in `infer_channel_first` and transposes `x_batch` for a
-    C>T input while leaving `a_batch` alone, so no Quantus metric can score this
-    data however it was loaded.
+    model is built on the wrong axis. The data is also scored: Quantus used to run
+    the same shape guess in `infer_channel_first` and transpose `x_batch` for a C>T
+    input while leaving `a_batch` alone, until the adapter started stating the
+    canonical layout instead of letting it be inferred.
     """
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
     results_rel = "tests/_runner_layout"
@@ -608,12 +703,7 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
 
     config = _resolve_config(tmp_path / "cache", results_rel)
     config["data_config"]["datasets"] = [
-        {
-            "dataset": "wide",
-            "path": str(data_dir),
-            "layout": "bct",
-            "skip_metrics": True,
-        }
+        {"dataset": "wide", "path": str(data_dir), "layout": "bct"}
     ]
     config["train_config"]["models"] = [
         {"model": "LeNet", "init_params": {"in_channels": 40, "num_classes": 2}}
@@ -627,6 +717,12 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     assert list(model_dir.glob("explanations/explanations_*/*.png")), (
         "no explanations produced for the C>T data"
     )
+
+    # ...and the metrics scored it rather than failing an axis-order mismatch.
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert not df.empty, "no metric rows for the C>T data"
+    assert (df["status"] == "ok").all(), df.loc[df["status"] != "ok"].to_dict("records")
+    assert df["score"].notna().all()
 
 
 @pytest.mark.integration

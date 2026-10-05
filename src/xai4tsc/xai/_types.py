@@ -1,53 +1,26 @@
-"""``Explanation`` dataclass plus the ``DataType`` and ``Domain`` enums."""
+"""``Explanation`` dataclass; re-exports the ``DataType`` / ``Domain`` vocabulary."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
+from .._domains import DATA_DOMAINS, DataType, Domain, resolve_data_domain
+
+__all__ = [
+    "DATA_DOMAINS",
+    "DataType",
+    "Domain",
+    "Explanation",
+    "is_multi_target",
+    "resolve_data_domain",
+]
+
 if TYPE_CHECKING:
     from xai4tsc.utils.fourier_transforms import DomainTransform
-
-
-class DataType(Enum):
-    """
-    Data domains an explainer is applicable to.
-
-    Mirrors the role of Quantus' ``DataType`` enum: each explainer declares a
-    ``data_applicability`` set built from these members (see
-    :attr:`xai4tsc.xai.ExplainerBase.data_applicability`).
-    """
-
-    AGNOSTIC = "Agnostic"
-    """Domain-agnostic — applies to any input (e.g. images, tabular, time series)."""
-
-    TIME_SERIES = "Time Series"
-    """Specific to time series classification."""
-
-
-class Domain(Enum):
-    """
-    Signal domain a piece of data or an explanation lives in.
-
-    A distinct axis from :class:`DataType`: ``DataType`` says *what kind of
-    input* an explainer applies to, while ``Domain`` says *which signal domain*
-    a concrete array is expressed in. Used by the :class:`Explanation` fields
-    ``data_domain`` / ``explanation_domain`` and by the explainer capability set
-    :attr:`xai4tsc.xai.ExplainerBase.explanation_domains`.
-    """
-
-    TIME = "Time"
-    """Time domain (the raw series)."""
-
-    FREQUENCY = "Frequency"
-    """Frequency domain (e.g. via a Fourier transform)."""
-
-    TIME_FREQUENCY = "Time-Frequency"
-    """Time-frequency domain (e.g. via a short-time Fourier transform)."""
 
 
 @dataclass

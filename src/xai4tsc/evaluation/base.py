@@ -145,12 +145,24 @@ class EvaluatorBase(ABC):
 
     Domain applicability
     --------------------
-    Like explainers, evaluators declare where they apply via two Quantus-style class
-    attributes: :attr:`data_applicability` (a set of ``DataType`` members) and
-    :attr:`required_domains` (a set of ``Domain`` members the explanation must be in).
-    The runner skips a metric whose ``required_domains`` does not contain the
-    explanation's domain; an empty set means "applies to any domain" (the Quantus
-    default).
+    Like explainers, evaluators declare where they apply via Quantus-style class
+    attributes: :attr:`data_applicability` (a set of ``DataType`` members) and, on two
+    axes, which explanation domains they can score.
+
+    - :attr:`required_domains` names the domains outright (an empty set means any),
+      which is what a metric defined *for* a domain uses, e.g. a frequency
+      perturbation curve.
+    - :attr:`requires_native_domain` instead ties the metric to the **model-native
+      domain**: the domain the model's inputs live in
+      (:attr:`xai4tsc.Explanation.data_domain`). A metric that perturbs the input and
+      re-queries the model needs this, because that is the space it can predict in -
+      the time domain for a model trained on raw series, the frequency domain for one
+      trained on spectra.
+
+    Read the two together via
+    :func:`~xai4tsc.evaluation.evaluate.required_domains_for`, which resolves the
+    native rule against a given data domain; the runner skips a metric whose result
+    does not contain the explanation's domain.
 
     Contract — attributions are real-valued
     ---------------------------------------
@@ -170,6 +182,9 @@ class EvaluatorBase(ABC):
 
     required_domains: ClassVar[set[Domain]] = set()
     """Explanation domains this evaluator requires; empty means any domain."""
+
+    requires_native_domain: ClassVar[bool] = False
+    """Whether the explanation must be in the model-native domain (see above)."""
 
     @staticmethod
     def real_attribution(a_batch: np.ndarray | None) -> np.ndarray | None:
@@ -251,7 +266,18 @@ class QuantusEvaluator(EvaluatorBase):
         )
         score = evaluator.evaluate(model, explanation, data, labels)
 
+    Domain applicability
+    --------------------
+    Which explanation domains a Quantus metric can score depends on what the metric
+    reads: one that reads only the attribution applies in any
+    domain, while one that perturbs the input and re-queries the model needs the
+    model-native domain. :attr:`requires_native_domain` is therefore set per metric
+    *name* from :data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`; the class
+    attribute is the conservative ``True`` default.
     """
+
+    requires_native_domain: ClassVar[bool] = True
+    """Conservative default; the instance relaxes it per metric name."""
 
     def __init__(self, name: str, **metric_class_params: object) -> None:
         """
@@ -275,6 +301,7 @@ class QuantusEvaluator(EvaluatorBase):
             If *name* is not a registered Quantus metric.
         """
         from .evaluate import QUANTUS_METRICS
+        from .quantus_groups import quantus_requires_native_domain
 
         if name not in QUANTUS_METRICS:
             raise ValueError(
@@ -284,6 +311,7 @@ class QuantusEvaluator(EvaluatorBase):
         self._metric_class = QUANTUS_METRICS[name]
         self._metric_class_params = metric_class_params
         self.metric_name = name
+        self.requires_native_domain = quantus_requires_native_domain(name)
 
     def evaluate(
         self,
@@ -292,6 +320,7 @@ class QuantusEvaluator(EvaluatorBase):
         data: np.ndarray,
         labels: np.ndarray,
         device: str = "cpu",
+        channel_first: bool = True,
         **call_params: object,
     ) -> float | np.ndarray:
         """
@@ -299,6 +328,32 @@ class QuantusEvaluator(EvaluatorBase):
 
         The metric is reinstantiated on each call to avoid state leakage
         between evaluations.
+
+        Parameters
+        ----------
+        model :
+            The model being explained.
+        explanation : Explanation
+            The explanation to score; supplies the attribution and its domain.
+        data : np.ndarray
+            Input samples in the framework's canonical ``(B, C, T)`` order.
+        labels : np.ndarray
+            Target labels.
+        device : str
+            Compute device.
+        channel_first : bool
+            Axis order of *data*, passed straight to the Quantus metric. The default
+            matches the framework's canonical ``(B, C, T)``; set it to ``False`` for
+            channel-last inputs. Left to Quantus it is guessed from the shape, and
+            the guess is wrong for an input with more channels than timesteps.
+        **call_params
+            Further keyword arguments for the Quantus metric's ``__call__``,
+            filtered to its signature.
+
+        Returns
+        -------
+        float or np.ndarray
+            The metric's score(s).
         """
         class_name = self._metric_class.__name__
 
@@ -320,25 +375,79 @@ class QuantusEvaluator(EvaluatorBase):
         merged = {**auto_params, **user_params}
         init_params = dict_to_args(merged, self._metric_class.__init__)
         metric = self._metric_class(**(init_params or {}))
+
+        # The axis order is stated rather than left to Quantus, which infers it from
+        # the shape and gets it wrong for an input with more channels than timesteps.
         filtered_call = (
-            dict_to_args(call_params, metric.__call__) if call_params else None
+            dict_to_args(
+                {"channel_first": channel_first, **call_params}, metric.__call__
+            )
+            or {}
         )
+
         # Metric backends operate on real attributions; reduce complex (freq/TF)
         # explanations to magnitude, leaving real ones untouched.
         a_batch = self.real_attribution(explanation.exp_values)
-        if filtered_call:
-            return metric(
-                model=model,
-                x_batch=data,
-                y_batch=labels,
-                a_batch=a_batch,
-                device=device,
-                **filtered_call,
-            )
         return metric(
             model=model,
-            x_batch=data,
+            x_batch=self._domain_inputs(explanation, data),
             y_batch=labels,
             a_batch=a_batch,
             device=device,
+            **filtered_call,
         )
+
+    @staticmethod
+    def _domain_inputs(explanation: Explanation, data: np.ndarray) -> np.ndarray:
+        """
+        Return the inputs expressed in the explanation's own domain.
+
+        Quantus asserts that the attribution and the input correspond, so an
+        attribution on a coefficient grid needs inputs on that same grid. The values
+        are never read by the metrics this path serves (they are the attribution-only
+        group, see :mod:`~xai4tsc.evaluation.quantus_groups`); the grid is.
+
+        *data* is already in the right domain whenever the explanation is in the
+        model-native one (``explanation_domain == data_domain``), which covers both a
+        time-domain explanation of a time-domain model and a frequency explanation of
+        a model trained on spectra. Only an explanation lifted *out* of the data's
+        domain needs transforming.
+
+        Parameters
+        ----------
+        explanation : Explanation
+            The explanation being scored; supplies both domains and the transform.
+        data : np.ndarray
+            Inputs in the model-native domain, shape ``(B, C, T)`` in the time domain.
+
+        Returns
+        -------
+        np.ndarray
+            *data* unchanged when the explanation is in the data's own domain, else
+            the magnitude of its coefficients in the explanation's domain.
+
+        Raises
+        ------
+        ValueError
+            If the explanation is in another domain and carries no transform, or if
+            its domain is not reachable from the data's by a forward transform.
+        """
+        import torch
+
+        if explanation.explanation_domain is explanation.data_domain:
+            return data
+        transform = explanation.transform
+        if transform is None:
+            raise ValueError(
+                "Scoring a "
+                f"{explanation.explanation_domain.value} explanation requires a "
+                "domain transform; none was available on the explanation."
+            )
+        if explanation.data_domain is not Domain.TIME:
+            raise ValueError(
+                "Inputs can only be lifted from the time domain, but the data is "
+                f"{explanation.data_domain.value} and the explanation is "
+                f"{explanation.explanation_domain.value}."
+            )
+        coefficients = transform.forward(torch.as_tensor(np.asarray(data)))
+        return np.abs(coefficients.detach().cpu().numpy()).astype(np.float32)

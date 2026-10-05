@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
     from xai4tsc.models.base import ModelBase
-    from xai4tsc.xai._types import Explanation
+    from xai4tsc.xai._types import Domain, Explanation
 
 logger = logging.getLogger("xai4tsc.runner.explain")
 
@@ -104,6 +104,7 @@ def _generate_explanation(
     splits: dict[str, np.ndarray | None] | None = None,
     metadata: list | None = None,
     explanation_dir: Path | None = None,
+    data_domain: str | Domain = "time",
 ) -> Explanation:
     """
     Runner wrapper: unpacks config dicts and delegates to generate_explanation().
@@ -128,6 +129,9 @@ def _generate_explanation(
         Explainer configuration, by default None
     data_config : dict, optional
         Dataset configuration, by default None
+    data_domain : str or Domain, optional
+        Signal domain the data is expressed in, taken from the loaded dataset
+        (``"time"`` for every dataset shipped here).
     save_path : Path, optional
         Base directory for saved artifacts; falls back to the configured
         results path when ``None``.
@@ -182,6 +186,7 @@ def _generate_explanation(
             device=device,
             save_path=explanation_dir,
             visualization_type=visualization_type,
+            data_domain=data_domain,
         )
     # Explain random samples
     elif explainer_config["samples"]["type"] == "random":
@@ -199,6 +204,7 @@ def _generate_explanation(
             device=device,
             save_path=explanation_dir,
             visualization_type=visualization_type,
+            data_domain=data_domain,
         )
     else:
         # "all" case
@@ -216,6 +222,7 @@ def _generate_explanation(
             device=device,
             save_path=explanation_dir,
             visualization_type=visualization_type,
+            data_domain=data_domain,
         )
     # Attach per-sample ground-truth metadata for the explained samples (aligned
     # to explanation.indices) so ground-truth metrics (e.g. TimeFrequencyAUC) can

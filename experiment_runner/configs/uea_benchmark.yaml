@@ -73,7 +73,7 @@ evaluation_config:
       disable_warnings: true
       return_aggregate: true
     metric_call_params:
-      softmax: false
+      softmax: true
   metrics:
     - metric: "Complexity"           # cheapest metric (no perturbation loop)
 

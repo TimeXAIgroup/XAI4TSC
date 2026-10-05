@@ -33,9 +33,10 @@ from sktime.datasets.tsc_dataset_names import (
 
 logger = logging.getLogger("xai4tsc.runner.download")
 
-UCR_BULK_URL = "http://www.timeseriesclassification.com/aeon-toolkit/Archives/Univariate2018_ts.zip"
-UEA_BULK_URL = "http://www.timeseriesclassification.com/aeon-toolkit/Archives/Multivariate2018_ts.zip"
-_INDIVIDUAL_URL = "https://timeseriesclassification.com/aeon-toolkit/{name}.zip"
+_BASE_URL = "https://timeseriesclassification.com/aeon-toolkit"
+UCR_BULK_URL = f"{_BASE_URL}/Archives/Univariate2018_ts.zip"
+UEA_BULK_URL = f"{_BASE_URL}/Archives/Multivariate2018_ts.zip"
+_INDIVIDUAL_URL = _BASE_URL + "/{name}.zip"
 
 _UCR_SET = set(_UCR_NAMES)
 _UEA_SET = set(_UEA_NAMES)
@@ -83,12 +84,14 @@ def ensure_datasets_cached(
     ucr_missing = {n for n in missing if n in _UCR_SET}
     uea_missing = {n for n in missing if n in _UEA_SET}
 
+    bulk_failed = False
+
     if uses_ucr_wildcard and len(ucr_missing) >= len(dataset_names) // 2:
         logger.info(
             "UCR wildcard active — downloading bulk archive (%d missing).",
             len(ucr_missing),
         )
-        _download_bulk(cache_dir, UCR_BULK_URL)
+        bulk_failed |= not _download_bulk(cache_dir, UCR_BULK_URL)
         ucr_missing = {n for n in ucr_missing if not _is_cached(cache_dir, n)}
 
     if uses_uea_wildcard and len(uea_missing) >= len(dataset_names) // 2:
@@ -96,16 +99,25 @@ def ensure_datasets_cached(
             "UEA wildcard active — downloading bulk archive (%d missing).",
             len(uea_missing),
         )
-        _download_bulk(cache_dir, UEA_BULK_URL)
+        bulk_failed |= not _download_bulk(cache_dir, UEA_BULK_URL)
         uea_missing = {n for n in uea_missing if not _is_cached(cache_dir, n)}
 
     remaining = sorted(ucr_missing | uea_missing)
     if remaining:
-        logger.info(
-            "Downloading %d individual dataset(s): %s",
-            len(remaining),
-            ", ".join(remaining[:10]) + (" …" if len(remaining) > 10 else ""),
-        )
+        listing = ", ".join(remaining[:10]) + (" …" if len(remaining) > 10 else "")
+        if bulk_failed:
+            # The fast path is gone; say so, and say what it now costs, because the
+            # run still succeeds and the only other sign is how long it takes.
+            logger.warning(
+                "Bulk archive unavailable - falling back to %d sequential "
+                "per-dataset download(s), which is considerably slower: %s",
+                len(remaining),
+                listing,
+            )
+        else:
+            logger.info(
+                "Downloading %d individual dataset(s): %s", len(remaining), listing
+            )
         for name in remaining:
             _download_individual(cache_dir, name)
 
@@ -215,15 +227,36 @@ def _extract_and_flatten(zip_path: Path, cache_dir: Path) -> None:
     logger.info("Extracted %d dataset(s) from '%s'.", moved, inner_prefix)
 
 
-def _download_bulk(cache_dir: Path, url: str) -> None:
-    """Download the bulk archive zip, extract+flatten, then delete the zip."""
+def _download_bulk(cache_dir: Path, url: str) -> bool:
+    """
+    Download the bulk archive zip, extract+flatten, then delete the zip.
+
+    Parameters
+    ----------
+    cache_dir:
+        Directory the extracted datasets are written to.
+    url:
+        Archive URL to fetch.
+
+    Returns
+    -------
+    bool
+        ``True`` if the archive was fetched and extracted, ``False`` if it failed.
+        A failure is recoverable: the caller falls back to per-dataset downloads.
+    """
     zip_name = url.rsplit("/", 1)[-1]
     zip_path = cache_dir / f"_tmp_{zip_name}"
     try:
         _download_file(url, zip_path)
         _extract_and_flatten(zip_path, cache_dir)
-    except Exception:
-        logger.exception("Bulk download failed for %s.", url)
+    except Exception as exc:
+        # Recoverable: the caller retries the datasets one by one, so this is a
+        # warning rather than an error, with the traceback kept for --debug.
+        logger.warning("Bulk archive download failed for %s: %s", url, exc)
+        logger.debug("Bulk download traceback", exc_info=True)
+        return False
+    else:
+        return True
     finally:
         if zip_path.exists():
             zip_path.unlink()

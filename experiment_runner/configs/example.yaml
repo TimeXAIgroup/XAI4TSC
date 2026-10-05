@@ -78,7 +78,7 @@ evaluation_config:
       disable_warnings: true
       return_aggregate: true
     metric_call_params:
-      softmax: false
+      softmax: true         # score probabilities, not raw logits (models emit logits)
   metrics:
     - metric: "Complexity"          # cheap: counts non-zero attributions
     - metric: "Pixel-Flipping"      # faithfulness via progressive perturbation

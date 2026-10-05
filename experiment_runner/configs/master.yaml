@@ -338,7 +338,16 @@ evaluation_config:
       display_progressbar: true
       return_aggregate: true
     metric_call_params:
-      softmax: false
+      softmax: true         # whether the metric sees probabilities or raw logits when it
+                            # re-queries the model. Only perturbation-based metrics read it
+                            # (Pixel-Flipping, Faithfulness *, Monotonicity *, Selectivity,
+                            # SensitivityN, Sufficiency, Region Segmentation, ...);
+                            # attribution-only metrics such as Complexity ignore it.
+                            # Models here emit raw logits from forward() by contract, so
+                            # false makes those metrics score unnormalised values: unbounded,
+                            # possibly negative, and not comparable across models, datasets
+                            # or runs. Set it to false only for an external model that
+                            # already ends in a Softmax layer.
       channel_first: true   # axis order of the data as the metric sees it. Everything
                             # downstream of loading is (B, C, T), so true is right for
                             # every shipped dataset; a dataset's `layout` is about its

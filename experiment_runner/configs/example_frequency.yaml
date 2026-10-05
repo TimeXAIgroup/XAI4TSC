@@ -97,7 +97,7 @@ evaluation_config:
       disable_warnings: true
       return_aggregate: true
     metric_call_params:
-      softmax: false
+      softmax: true
   metrics:
     - metric: "Frequency Perturbation"        # needs a FREQUENCY explainer
       metric_class_params:

@@ -317,3 +317,23 @@ def test_freqrise_fft_localizes_to_discriminative_frequency(k0):
     assert abs(int(rel.argmax()) - k0) <= 1  # peak at the right frequency
     assert rel[k0] >= 0.8  # k0 is at (or next to) the dominant bin
     assert rel[np.abs(bins - k0) >= 5].max() < 0.5  # bin
+
+
+@pytest.mark.unit
+def test_freqrise_infers_targets_from_a_bare_nn_module():
+    """
+    FreqRISE's ``targets is None`` fallback must work on a plain ``nn.Module``.
+
+    It previously called ``ModelBase.predict`` there, so a bare module raised
+    ``AttributeError``; everything after that line already used the module
+    directly, which is why only this path was affected.
+    """
+    bare = nn.Sequential(nn.Flatten(), nn.Linear(32, 2))
+    data = np.random.randn(1, 1, 32).astype(np.float32)
+
+    out = FreqRISEExplainer(
+        domain="fft", num_batches=2, batch_size=2, num_cells=4
+    ).explain(bare, _make_exp(data), "cpu", targets=None)
+
+    assert out.shape[0] == 1
+    assert np.all(np.isfinite(out))

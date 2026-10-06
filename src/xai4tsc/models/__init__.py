@@ -7,14 +7,16 @@ Submodules:
   ResNet, LSTM, XLSTM, PatchTST), the ``MODELS`` registry, and the
   :func:`load_model` factory.
 - :mod:`~xai4tsc.models.base` — the :class:`ModelBase` ABC (training,
-  prediction, evaluation, checkpoint save/load).
+  prediction, evaluation, checkpoint save/load) and
+  :func:`~xai4tsc.models.base.predict_probs`, which runs inference on any
+  ``nn.Module``.
 
 Subclass :class:`~xai4tsc.models.base.ModelBase` to add a custom model;
 use :func:`~xai4tsc.models.models.load_model` to instantiate one by name or
 from a checkpoint.
 """
 
-from .base import ModelBase
+from .base import ModelBase, predict_probs
 from .models import (
     FCN,
     LSTM,
@@ -37,5 +39,6 @@ __all__ = [
     "PatchTST",
     "ResNet",
     "load_model",
+    "predict_probs",
     "register_model",
 ]

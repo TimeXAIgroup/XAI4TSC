@@ -1,8 +1,8 @@
 """
 Captum-backed feature attribution explainers (IG, DeepLIFT, Occlusion, ...).
 
-Also hosts :class:`TSHAPExplainer`, a pure-NumPy perturbation method (exact
-2-player Shapley over time windows) that only queries ``model.predict``.
+Also hosts :class:`TSHAPExplainer`, a perturbation method (exact 2-player Shapley
+over time windows) that queries the model by forward pass alone.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from captum.attr import (
     Occlusion,
 )
 
+from ..models.base import predict_probs
 from ..utils.perturbation import baseline_replacement, resolve_perturb_func
 from ._types import DataType
 from .base import GradientExplainer, PerturbationExplainer
@@ -319,7 +320,7 @@ class TSHAPExplainer(PerturbationExplainer):
         data = np.asarray(exp.data, dtype=np.float32)
         n_samples, _, n_timesteps = data.shape
         if targets is None:
-            targets = model.predict(data)[0].tolist()
+            targets = predict_probs(model, data).argmax(axis=1).tolist()
         w_l = self._window_len(n_timesteps)
 
         out = np.zeros_like(data, dtype=np.float32)
@@ -411,8 +412,7 @@ class TSHAPExplainer(PerturbationExplainer):
     ) -> np.ndarray:
         """Return the *target*-class probability for each series in *batch*."""
         batch = np.ascontiguousarray(batch, dtype=np.float32)
-        _, probs = model.predict(batch)
-        return np.asarray(probs)[:, target]
+        return predict_probs(model, batch)[:, target]
 
     def _full_background(self, x: np.ndarray) -> np.ndarray:
         """Replace every timestep of *x* with the chosen baseline → ``x̄``."""

@@ -43,6 +43,7 @@ import torch
 from torch.fft import irfft, rfft
 from torch.nn.functional import interpolate
 
+from ..models.base import predict_probs
 from ..utils.fourier_transforms import (
     DomainTransform,
     RFFTransform,
@@ -141,7 +142,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         if isinstance(self.transform, RFFTransform):
             self.transform.n = timesteps
         if targets is None:
-            targets = model.predict(exp.data)[0].tolist()
+            targets = predict_probs(model, exp.data).argmax(axis=1).tolist()
 
         model = model.eval().to(device)
         spatial_dims = 2 if self.domain == "stft" else 1

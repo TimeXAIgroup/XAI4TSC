@@ -3,11 +3,12 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
-from xai4tsc.models.base import ModelBase
+from xai4tsc.models.base import ModelBase, predict_probs
 from xai4tsc.models.models import (
     LSTM,
     MODELS,
@@ -955,3 +956,80 @@ def test_explicit_start_epoch_overrides_the_checkpoint(tmp_path):
 
     assert model.best_epoch in (101, 102)
     assert list(tmp_path.glob("FCN_epoch_10*.pt"))
+
+
+# ── predict_probs ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_predict_probs_returns_a_distribution():
+    model = load_model(_TINY_FCN, device="cpu")
+    data = np.random.randn(5, 1, 16).astype(np.float32)
+
+    probs = predict_probs(model, data)
+
+    assert probs.shape == (5, 2)
+    assert np.allclose(probs.sum(axis=1), 1.0)
+    assert (probs >= 0).all()
+
+
+@pytest.mark.unit
+def test_predict_probs_matches_model_base_predict():
+    """ModelBase.predict delegates, so the two must agree exactly."""
+    model = load_model(_TINY_FCN, device="cpu")
+    data = np.random.randn(4, 1, 16).astype(np.float32)
+
+    _, via_method = model.predict(data)
+
+    assert np.array_equal(predict_probs(model, data), via_method)
+
+
+@pytest.mark.unit
+def test_predict_probs_works_on_a_bare_nn_module():
+    """The point of the helper: no ModelBase, so no .predict to call."""
+    bare = nn.Sequential(nn.Flatten(), nn.Linear(16, 3))
+
+    probs = predict_probs(bare, np.random.randn(2, 1, 16).astype(np.float32))
+
+    assert probs.shape == (2, 3)
+    assert np.allclose(probs.sum(axis=1), 1.0)
+
+
+@pytest.mark.unit
+def test_predict_probs_leaves_train_mode_untouched():
+    """The model may belong to the caller — a metric re-explaining, say."""
+    model = load_model(_TINY_FCN, device="cpu")
+    data = np.random.randn(2, 1, 16).astype(np.float32)
+
+    model.train()
+    predict_probs(model, data)
+    assert model.training, "predict_probs must not switch the model to eval"
+
+    model.eval()
+    predict_probs(model, data)
+    assert not model.training
+
+
+@pytest.mark.unit
+def test_predict_probs_handles_a_parameterless_module():
+    """No parameters means no device to move to; the input is used as-is."""
+
+    class _Constant(nn.Module):
+        def forward(self, x):
+            return torch.zeros(x.shape[0], 2)
+
+    probs = predict_probs(_Constant(), np.zeros((3, 1, 8), dtype=np.float32))
+
+    assert np.allclose(probs, 0.5)
+
+
+@pytest.mark.unit
+def test_predict_probs_accepts_tensor_and_ndarray_alike():
+    """One entry point serves callers holding either; evaluate_model passes tensors."""
+    model = load_model(_TINY_FCN, device="cpu")
+    array = np.random.randn(3, 1, 16).astype(np.float32)
+
+    from_array = predict_probs(model, array)
+    from_tensor = predict_probs(model, torch.from_numpy(array))
+
+    assert np.array_equal(from_array, from_tensor)

@@ -8,7 +8,7 @@ import torch
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
 from ..data.base import class_names, decode_labels
-from ..models.base import ModelBase
+from ..models.base import ModelBase, predict_probs
 from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
 from ..utils.utils import dict_to_args
 from . import (
@@ -262,7 +262,7 @@ def _get_explanation(
         exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
     else:
         # Explain the model's predicted class for each sample.
-        method_targets = model.predict(exp.data)[0].tolist()
+        method_targets = predict_probs(model, exp.data).argmax(axis=1).tolist()
         exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
 
     # Save results as specified

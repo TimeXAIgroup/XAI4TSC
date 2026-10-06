@@ -1,15 +1,19 @@
 """
 Unit tests for TSHAP: perturbation helpers, the explainer, and runner wiring.
 
-The Shapley efficiency identity holds for *any* model, so these tests use a
-fast NumPy stub model exposing ``predict`` instead of training a network — no
-torch, no I/O.
+The Shapley efficiency identity holds for *any* model, so these tests use tiny
+analytic stub models instead of training a network — no I/O. They are real
+``nn.Module`` subclasses returning **logits**, because TSHAP queries the model
+the way Captum and Quantus do, by calling it; the softmax applied downstream
+reproduces the probabilities each stub is defined by.
 """
 
 import numpy as np
 import pytest
+import torch
 from experiment_runner import explain as runner_explain
 from sklearn.preprocessing import LabelEncoder
+from torch import nn
 
 from xai4tsc.utils.perturbation import baseline_replacement, resolve_perturb_func
 from xai4tsc.xai import DataType, is_multi_target
@@ -20,44 +24,28 @@ from xai4tsc.xai.feature_attribution import TSHAPExplainer
 # ── stub models ───────────────────────────────────────────────────────────────
 
 
-class _StubModel:
-    """Base stub: the orchestrator calls ``eval()`` before explaining."""
+class _SumModel(nn.Module):
+    """Two-class model whose class-1 logit is the sum of all inputs."""
 
-    def eval(self):
-        return self
-
-
-class _SumModel(_StubModel):
-    """Two-class model whose class-1 logit is the sum of all inputs (softmax)."""
-
-    def predict(self, data, labels=None):
-        data = np.asarray(data, dtype=np.float64)
-        s = data.reshape(data.shape[0], -1).sum(axis=1)
-        logits = np.stack([np.zeros_like(s), s], axis=1)
-        e = np.exp(logits - logits.max(axis=1, keepdims=True))
-        probs = e / e.sum(axis=1, keepdims=True)
-        return np.argmax(probs, axis=1), probs
+    def forward(self, x):
+        s = x.reshape(x.shape[0], -1).sum(dim=1)
+        return torch.stack([torch.zeros_like(s), s], dim=1)
 
 
-class _ChannelSumModel(_StubModel):
+class _ChannelSumModel(nn.Module):
     """Class-1 logit is the sum of channel 0 only (channels are not symmetric)."""
 
-    def predict(self, data, labels=None):
-        data = np.asarray(data, dtype=np.float64)
-        s = data[:, 0, :].sum(axis=1)
-        logits = np.stack([np.zeros_like(s), s], axis=1)
-        e = np.exp(logits - logits.max(axis=1, keepdims=True))
-        probs = e / e.sum(axis=1, keepdims=True)
-        return np.argmax(probs, axis=1), probs
+    def forward(self, x):
+        s = x[:, 0, :].sum(dim=1)
+        return torch.stack([torch.zeros_like(s), s], dim=1)
 
 
-class _ConstModel(_StubModel):
-    """Returns a fixed probability vector regardless of the input."""
+class _ConstModel(nn.Module):
+    """Constant logits, so the softmax is a fixed ``[0.3, 0.7]`` for any input."""
 
-    def predict(self, data, labels=None):
-        n = len(data)
-        probs = np.tile([0.3, 0.7], (n, 1))
-        return np.argmax(probs, axis=1), probs
+    def forward(self, x):
+        logits = torch.log(torch.tensor([0.3, 0.7], dtype=x.dtype))
+        return logits.expand(x.shape[0], 2)
 
 
 def _make_exp(data, encoder=None):
@@ -377,3 +365,38 @@ def test_resolve_background_data_none_and_passthrough():
     assert runner_explain._resolve_background_data(None, {}) is None
     arr = np.zeros((1, 1, 3))
     assert runner_explain._resolve_background_data(arr, {}) is arr
+
+
+# ── bare nn.Module support ────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_tshap_explains_a_bare_nn_module():
+    """
+    TSHAP must work on a plain ``nn.Module``, which is what its signature promises.
+
+    It previously called ``ModelBase.predict`` from ``_target_probs``, so anything
+    but a ``ModelBase`` raised ``AttributeError`` on every call.
+    """
+    bare = nn.Sequential(nn.Flatten(), nn.Linear(16, 2))
+    data = np.random.randn(2, 1, 16).astype(np.float32)
+
+    out = TSHAPExplainer(window_length=0.25, stride=4).explain(
+        bare, _make_exp(data), "cpu", targets=[1, 1]
+    )
+
+    assert out.shape == data.shape
+    assert np.all(np.isfinite(out))
+
+
+@pytest.mark.unit
+def test_tshap_infers_targets_from_a_bare_nn_module():
+    """The ``targets is None`` fallback must not need ``ModelBase`` either."""
+    bare = nn.Sequential(nn.Flatten(), nn.Linear(16, 2))
+    data = np.random.randn(2, 1, 16).astype(np.float32)
+
+    out = TSHAPExplainer(window_length=0.25, stride=4).explain(
+        bare, _make_exp(data), "cpu", targets=None
+    )
+
+    assert out.shape == data.shape

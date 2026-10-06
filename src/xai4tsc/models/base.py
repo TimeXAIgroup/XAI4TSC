@@ -25,6 +25,34 @@ from ..utils.defaults import t_con_defaults
 logger = logging.getLogger(__name__)
 
 
+def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarray:
+    """
+    Return softmax class probabilities for *data* from any :class:`~torch.nn.Module`.
+
+    Models here emit raw logits from ``forward()`` by contract, so the softmax is
+    applied on the way out. The model's train/eval mode is left untouched and belongs
+    to the caller.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to run. Must return logits of shape ``(n_samples, n_classes)``.
+    data : np.ndarray or torch.Tensor
+        Input samples, shape ``(n_samples, n_channels, n_timesteps)``.
+
+    Returns
+    -------
+    np.ndarray
+        Probabilities of shape ``(n_samples, n_classes)``, rows summing to 1.
+    """
+    tensor = torch.as_tensor(data, dtype=torch.float32)
+    param = next(model.parameters(), None)
+    if param is not None:
+        tensor = tensor.to(param.device)
+    with torch.no_grad():
+        return F.softmax(model(tensor), dim=1).detach().cpu().numpy()
+
+
 class ModelBase(nn.Module, ABC):
     """
     Base class for all time series classification models.
@@ -111,12 +139,10 @@ class ModelBase(nn.Module, ABC):
         tuple[np.ndarray, np.ndarray]
             ``(out_classes, out_probs)`` — both numpy arrays.
         """
-        t_data = torch.from_numpy(data).type(torch.FloatTensor).to(self.device)
         self.eval()
-        with torch.no_grad():
-            # Models emit raw logits; softmax so the returned array is a true
-            # probability distribution (argmax is unchanged by softmax).
-            out_probs = F.softmax(self(t_data), dim=1).detach().cpu().numpy()
+        # Models emit raw logits; predict_probs softmaxes them so the returned array
+        # is a true probability distribution (argmax is unchanged by softmax).
+        out_probs = predict_probs(self, data)
         out_classes = np.argmax(out_probs, axis=1)
         if labels is not None:
             accuracy = sum(out_classes == labels) / len(labels)
@@ -512,11 +538,13 @@ class ModelBase(nn.Module, ABC):
             drop_last=False,
         )
         for x, y in loader:
+            # The explicit move keeps the async host-to-device copy; predict_probs
+            # then finds the batch already on the model's device and does not move
+            # it again.
             x = x.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True)
-            probs = F.softmax(self(x), dim=1)
             y_true.append(y.detach().cpu().numpy())
-            y_probs_list.append(probs.detach().cpu().numpy())
+            y_probs_list.append(predict_probs(self, x))
 
         y_true = np.concatenate(y_true).astype(np.int64)
         y_probs = np.concatenate(y_probs_list).astype(np.float32)

@@ -159,6 +159,22 @@ BLOCKED_BY_BACKEND: dict[str, str] = {
         "it reshapes a (B, C, T) batch to (B, C, 1, T) and feeds that to the model, "
         "which a 1-D convolutional model cannot accept"
     ),
+    "Focus": (
+        "it splits the attribution into four quadrants, which needs a second "
+        "spatial axis that a (B, C, T) series does not have"
+    ),
+    "IROF": (
+        "it segments the input into super-pixels, which needs a 2-D image "
+        "rather than a series"
+    ),
+    "Infidelity": (
+        "it pads over two spatial axes, so the pad width never matches the "
+        "axes of a (B, C, T) series"
+    ),
+    "ROAD": (
+        "its imputation resolves pixel neighbours from a second spatial axis "
+        "that a (B, C, T) series does not have"
+    ),
     "Smooth MPRT": (
         "its implementation calls the library's own explain function directly "
         "instead of the one it was given, so it would silently score a vanilla "
@@ -171,9 +187,14 @@ BLOCKED_BY_BACKEND: dict[str, str] = {
 }
 """Metrics whose Quantus implementation cannot serve a time series correctly.
 
-All three are in :attr:`QuantusGroup.RE_EXPLAIN`, so they would otherwise look
-merely unconfigured once an explain func is supplied. They are refused with the
-reason instead, because no setting on this side makes them work. ``Smooth MPRT``
-is the dangerous one: it *returns a number*, so without this it would report a
-score for an explainer it never ran.
+Four of them index a second spatial axis that a ``(B, C, T)`` series does not
+have - super-pixels, quadrants, 2-D padding, pixel neighbourhoods - and raise
+somewhere inside the library. Refusing them here turns an obscure ``IndexError``
+or shape assertion into a stated reason, and keeps them out of the error column
+where they look like something worth fixing.
+
+``Smooth MPRT`` is the dangerous one and the reason this table is not just about
+shapes: it *returns a number*. It calls the library's own explain function
+instead of the one it is given, so without this entry it would report a
+plausible score for an explainer it never ran.
 """

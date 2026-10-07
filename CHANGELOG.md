@@ -21,10 +21,13 @@ by `generate_explanation()` are unaffected.
   re-explain perturbed or randomised inputs failed because the framework never
   supplied an `explain_func`. `Explanation` now records `explainer_params`, so the
   evaluator rebuilds the explainer that produced the attribution and hands Quantus a
-  callable for it. Three metrics that remain are refused with a stated reason
-  rather than raising: `Continuity Test` and `InputInvariance` assume 2-D image
-  input, and `Smooth MPRT` calls the library's own explain function internally, so it
-  would score an explainer it never ran.
+  callable for it.
+- **Unsupported metrics are refused with a reason** instead of raising from inside
+  the library, and are reported as `skipped-unsupported`. Six index a second spatial
+  axis a `(B, C, T)` series does not have (`Continuity Test`, `InputInvariance`,
+  `Focus`, `IROF`, `Infidelity`, `ROAD`); `Smooth MPRT` calls the library's own
+  explain function internally, so it would score an explainer it never ran. The only
+  metrics still raising are the six localisation ones that need ground-truth masks.
 - **Summary rows**: Added a summary to an experiment log, listing successful, failed
   and skipped datasets/models/explainers/metrics.
 - **Result identities**: repeating a `datasets:`, `models:`, `explainers:` or

@@ -179,11 +179,14 @@ how it was produced: a re-explanation has to use the *same* method with the *sam
 settings, or the metric measures a configuration difference instead of the property
 it claims to.
 
-Three of the twelve are refused rather than scored, listed with their reasons in
-:data:`~xai4tsc.evaluation.quantus_groups.BLOCKED_BY_BACKEND`. Two assume 2-D image
-input in their own code. The third, ``"Smooth MPRT"``, is the one worth knowing
-about: it calls the library's own explain function directly instead of the one it is
-given, so it would return a plausible number for an explainer it never ran.
+Seven metrics across the groups are refused rather than scored, each with its
+reason in :data:`~xai4tsc.evaluation.quantus_groups.BLOCKED_BY_BACKEND`. Six of them
+index a second spatial axis a ``(B, C, T)`` series does not have - super-pixels,
+quadrants, 2-D padding, pixel neighbourhoods - and raise inside the library, so
+refusing them replaces an obscure ``IndexError`` with a stated reason. The seventh,
+``"Smooth MPRT"``, is the one worth knowing about: it *returns a number*, because it
+calls the library's own explain function instead of the one it is given, so without
+the entry it would report a plausible score for an explainer it never ran.
 
 :meth:`~xai4tsc.evaluation.base.QuantusEvaluator.evaluate` also takes
 ``channel_first``, the axis order of the inputs, which defaults to ``True`` for the

@@ -607,7 +607,7 @@ def test_master_metric_entries_carry_only_their_identity():
 
 @pytest.mark.unit
 def test_master_hyperparams_match_the_package_defaults():
-    from xai4tsc.utils.defaults import t_con_defaults
+    from xai4tsc.models.base import t_con_defaults
 
     master = yaml.safe_load(MASTER_CONFIG.read_text())
     hyperparams = master["train_config"]["default_settings"]["hyperparams"]

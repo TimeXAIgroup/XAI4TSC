@@ -10,10 +10,10 @@ from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
 from xai4tsc.evaluation.base import (
     QuantusEvaluator,
     _apply_fraction_params,
+    _fraction_params_T,
     _resolve_callable_perturb_func,
     _resolve_string_callables,
 )
-from xai4tsc.utils.defaults import _fraction_params_T
 
 # A real (class_name, param) pair from the live registry so these tests track
 # the actual fraction-param configuration rather than a hard-coded guess.

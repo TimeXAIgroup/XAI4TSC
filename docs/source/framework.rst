@@ -131,7 +131,7 @@ Getting Started
 
    **Where defaults live.** Parameter defaults belong to the class that consumes
    them -- a model's or explainer's constructor, or
-   :data:`xai4tsc.utils.defaults.t_con_defaults` for training hyperparameters -- so
+   :data:`xai4tsc.models.base.t_con_defaults` for training hyperparameters -- so
    a value you omit behaves identically whether you drive the pipeline from a YAML
    config or import the package. ``master.yaml`` documents those defaults in
    comments but does not supply them, so the two entry points cannot diverge.

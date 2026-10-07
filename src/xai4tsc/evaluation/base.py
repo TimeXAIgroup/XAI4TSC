@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 
 from ..models.base import predict_probs
-from ..utils.defaults import _fraction_params_T, eval_metric_defaults
 from ..utils.perturbation import resolve_perturb_func
 from ..utils.utils import dict_to_args
 from ..xai._types import DataType, Domain
@@ -23,6 +22,42 @@ if TYPE_CHECKING:
     from ..xai._types import Explanation
 
 logger = logging.getLogger(__name__)
+
+# Params whose values (float in 0.0-1.0) represent a fraction of series length T
+# and are converted to integers at runtime: max(1, int(fraction * T)).
+# Keys = Quantus class name; values = set of param names that accept T-fractions.
+# Named _T to distinguish from future _fraction_params_C (channel-relative params).
+_fraction_params_T: dict[str, set[str]] = {  # noqa: N816 — _T denotes time axis
+    "FaithfulnessCorrelation": {"subset_size"},
+    "TopKIntersection": {"k"},
+}
+
+# Per-metric constructor defaults for QuantusEvaluator, filling in values whose
+# Quantus defaults are sized for images rather than series.
+# Keys are Quantus class names; values map param names to scalars or callables.
+# Callables receive the x_batch array (shape B, C, T) and return a scalar, so a
+# default that depends on the *model* has no home here.
+# Float values for params listed in _fraction_params_T are treated as fractions
+# of series length T and converted to integers at runtime.
+eval_metric_defaults = {
+    "FaithfulnessCorrelation": {
+        # 5 % of series length; Quantus default (224) is ImageNet-sized
+        "subset_size": 0.05,
+    },
+    "TopKIntersection": {
+        # 10 % of series length; Quantus default (1000) exceeds most TSC series
+        "k": 0.1,
+    },
+    "MPRT": {
+        # One score per randomised layer. With return_aggregate (the framework
+        # default) Quantus asserts that one of the two correlation reductions is
+        # on; without it the result is a dict, which the runner cannot reduce.
+        "return_last_correlation": True,
+    },
+    "SmoothMPRT": {
+        "return_last_correlation": True,
+    },
+}
 
 # Callable-typed params that can be specified as strings in config.
 # A string value is resolved via _resolve_callable_perturb_func and dropped

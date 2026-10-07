@@ -20,9 +20,24 @@ from sklearn.metrics import (
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from ..utils.defaults import t_con_defaults
-
 logger = logging.getLogger(__name__)
+
+t_con_defaults = {
+    "epochs": 20,
+    "batchsize": 8,
+    "learn_rate": 1e-3,
+    "patience": 3,
+    "save_best": True,
+    "loss_func": "crossentropy",
+    "optimizer": "adam",
+}
+"""Training hyperparameter defaults.
+
+:meth:`ModelBase.train_model` falls back to these per key, so a hyperparameter the
+caller omits behaves the same whether the pipeline is driven from a YAML config or
+from the package API. ``master.yaml`` documents them in comments and a test holds
+the two in step; it does not supply them.
+"""
 
 
 def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarray:

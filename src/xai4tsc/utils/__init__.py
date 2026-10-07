@@ -10,7 +10,6 @@ Submodules:
   :func:`rescale_array`, :func:`load_class_from_path`.
 - :mod:`~xai4tsc.utils.animation` — GIF animation of perturbation sweeps.
 - :mod:`~xai4tsc.utils.perturbation` — shared perturbation functions.
-- :mod:`~xai4tsc.utils.defaults` — fraction-parameter configuration.
 """
 
 from .fourier_transforms import (

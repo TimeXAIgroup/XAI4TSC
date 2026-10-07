@@ -12,7 +12,7 @@ from ..utils.utils import dict_to_args
 from ..xai._types import Domain
 from .base import EvaluatorBase, QuantusEvaluator
 from .frequency_evaluate import FrequencyEvaluator
-from .quantus_groups import quantus_requires_native_domain
+from .quantus_groups import BLOCKED_BY_BACKEND, quantus_requires_native_domain
 from .timefrequency_auc import TimeFrequencyAUCEvaluator
 from .timefrequency_perturbation import (
     TimeFrequencyEvaluator,
@@ -82,6 +82,16 @@ def evaluate(
             metric,
             sorted(d.value for d in required),
             explanation.explanation_domain.value,
+        )
+        return None
+
+    # A handful of Quantus metrics assume 2-D image input deep in their own code,
+    # so no setting on this side makes them work on a time series.
+    if metric in BLOCKED_BY_BACKEND:
+        logger.warning(
+            "Metric %s cannot score a time series: %s. It will be skipped!",
+            metric,
+            BLOCKED_BY_BACKEND[metric],
         )
         return None
 

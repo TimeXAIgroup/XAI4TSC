@@ -49,6 +49,7 @@ class _BadEncoder:
 def _make_explanation(encoder):
     return Explanation(
         explainer="integrated_gradients",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=np.zeros((2, 1, 4), dtype=np.float32),
         data=np.zeros((2, 1, 4), dtype=np.float32),

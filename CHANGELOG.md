@@ -7,11 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Experiment-runner reliability release. The `metrics.csv` schema changes, so this
-is a minor version bump; the importable `xai4tsc` package API is unchanged.
+Experiment-runner reliability release. The `metrics.csv` schema changes and
+`xai4tsc.Explanation` gains a required field, so this is a minor version bump with
+one breaking change to the importable API.
+
+**Migration**: code that constructs an `Explanation` by hand must pass
+`explainer_params` (use `{}` if there is nothing to record). Explanations produced
+by `generate_explanation()` are unaffected.
 
 ### Added
 
+- **Robustness and randomisation metrics now work**: the twelve Quantus metrics that
+  re-explain perturbed or randomised inputs failed because the framework never
+  supplied an `explain_func`. `Explanation` now records `explainer_params`, so the
+  evaluator rebuilds the explainer that produced the attribution and hands Quantus a
+  callable for it. Three metrics that remain are refused with a stated reason
+  rather than raising: `Continuity Test` and `InputInvariance` assume 2-D image
+  input, and `Smooth MPRT` calls the library's own explain function internally, so it
+  would score an explainer it never ran.
 - **Summary rows**: Added a summary to an experiment log, listing successful, failed
   and skipped datasets/models/explainers/metrics.
 - **Result identities**: repeating a `datasets:`, `models:`, `explainers:` or

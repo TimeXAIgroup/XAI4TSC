@@ -218,6 +218,7 @@ def _get_explanation(
     # Create explanation data structure
     exp = Explanation(
         explainer=explainer_key,
+        explainer_params=dict(params or {}),
         explanation_type=explainer_instance.explanation_type,
         exp_values=None,
         data=data,

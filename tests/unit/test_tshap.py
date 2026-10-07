@@ -51,6 +51,7 @@ class _ConstModel(nn.Module):
 def _make_exp(data, encoder=None):
     return Explanation(
         explainer="tshap",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=data.astype(np.float32),

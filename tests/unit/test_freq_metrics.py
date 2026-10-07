@@ -288,6 +288,7 @@ def _gt_meta(n, freq=7, pos=0, length=None, channel=0):
 def _freq_explanation(a, data, metadata, transform):
     return Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=a,
         data=data,

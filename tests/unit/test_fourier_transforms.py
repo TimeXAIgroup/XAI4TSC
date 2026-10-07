@@ -114,6 +114,7 @@ def test_get_transform_unknown_raises():
 def test_explanation_domain_defaults_are_time():
     exp = Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=np.zeros((2, 1, 8)),

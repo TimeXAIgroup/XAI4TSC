@@ -132,3 +132,48 @@ def quantus_requires_native_domain(name: str) -> bool:
     if group is None:
         return True
     return group in _NATIVE_DOMAIN_GROUPS
+
+
+def quantus_requires_explain_func(name: str) -> bool:
+    """
+    Return whether the named Quantus metric re-explains and so needs an explain func.
+
+    Parameters
+    ----------
+    name : str
+        A key of ``QUANTUS_METRICS`` (the metric's display name).
+
+    Returns
+    -------
+    bool
+        ``True`` for the ``RE_EXPLAIN`` group only. An unclassified name is treated
+        as not requiring one: supplying the callable to a metric that ignores it is
+        harmless, whereas demanding one that is never used would refuse a metric
+        that works.
+    """
+    return QUANTUS_GROUPS.get(name) is QuantusGroup.RE_EXPLAIN
+
+
+BLOCKED_BY_BACKEND: dict[str, str] = {
+    "Continuity Test": (
+        "it reshapes a (B, C, T) batch to (B, C, 1, T) and feeds that to the model, "
+        "which a 1-D convolutional model cannot accept"
+    ),
+    "Smooth MPRT": (
+        "its implementation calls the library's own explain function directly "
+        "instead of the one it was given, so it would silently score a vanilla "
+        "gradient rather than the explainer under evaluation"
+    ),
+    "InputInvariance": (
+        "it reads 'out_channels' off the model's second named module, which is a "
+        "container rather than a conv layer in every model shipped here"
+    ),
+}
+"""Metrics whose Quantus implementation cannot serve a time series correctly.
+
+All three are in :attr:`QuantusGroup.RE_EXPLAIN`, so they would otherwise look
+merely unconfigured once an explain func is supplied. They are refused with the
+reason instead, because no setting on this side makes them work. ``Smooth MPRT``
+is the dangerous one: it *returns a number*, so without this it would report a
+score for an explainer it never ran.
+"""

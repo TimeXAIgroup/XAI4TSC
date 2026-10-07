@@ -32,6 +32,7 @@ from xai4tsc.data import (
     load_dataset,
 )
 from xai4tsc.evaluation.evaluate import required_domains_for
+from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils.utils import merge_dicts
@@ -553,6 +554,29 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 "explanation is "
                                                 f"{explanation.explanation_domain.value}"
                                             ),
+                                        )
+                                    )
+                                    continue
+
+                                # A few Quantus metrics assume 2-D image input in
+                                # their own code; no setting here makes them work.
+                                blocked = BLOCKED_BY_BACKEND.get(
+                                    metric_config["metric"]
+                                )
+                                if blocked:
+                                    logger.info(
+                                        "Skipping %s: %s.",
+                                        metric_config["metric"],
+                                        blocked,
+                                    )
+                                    metric_rows.append(
+                                        _result_row(
+                                            dataset_id,
+                                            model_id,
+                                            explainer,
+                                            metric_ids[metric_ind],
+                                            "skipped-unsupported",
+                                            detail=blocked,
                                         )
                                     )
                                     continue

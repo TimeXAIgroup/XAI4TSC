@@ -32,6 +32,11 @@ class Explanation:
     ----------
     explainer : str
         Name of the explainer method that produced this explanation.
+    explainer_params : dict
+        Parameters the explainer was built with, as supplied. Lets a consumer
+        rebuild an equivalently configured explainer via
+        :func:`~xai4tsc.xai.explain.build_explainer`, which is what the
+        re-explaining evaluation metrics need. Empty when none were given.
     explanation_type : str
         Category of explanation, e.g. ``"feature_attribution"``.
     exp_values : np.ndarray
@@ -73,6 +78,7 @@ class Explanation:
     """
 
     explainer: str
+    explainer_params: dict
     explanation_type: str
     exp_values: np.ndarray
     data: np.ndarray

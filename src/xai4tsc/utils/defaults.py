@@ -33,4 +33,13 @@ eval_metric_defaults = {
         # 10 % of series length; Quantus default (1000) exceeds most TSC series
         "k": 0.1,
     },
+    "MPRT": {
+        # One score per randomised layer. With return_aggregate (the framework
+        # default) Quantus asserts that one of the two correlation reductions is
+        # on; without it the result is a dict, which the runner cannot reduce.
+        "return_last_correlation": True,
+    },
+    "SmoothMPRT": {
+        "return_last_correlation": True,
+    },
 }

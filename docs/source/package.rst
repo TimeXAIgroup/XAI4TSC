@@ -171,6 +171,20 @@ explanation in any domain, including one lifted out of the data's own (the adapt
 supplies inputs on the same coefficient grid), while a metric that perturbs the input
 needs the explanation in the domain the model predicts in.
 
+The ``RE_EXPLAIN`` metrics re-run the explainer on perturbed or randomised inputs,
+so they need a callable rather than just the stored attribution. The adapter builds
+one from :attr:`xai4tsc.Explanation.explainer` and
+:attr:`xai4tsc.Explanation.explainer_params`, which is why the explanation records
+how it was produced: a re-explanation has to use the *same* method with the *same*
+settings, or the metric measures a configuration difference instead of the property
+it claims to.
+
+Three of the twelve are refused rather than scored, listed with their reasons in
+:data:`~xai4tsc.evaluation.quantus_groups.BLOCKED_BY_BACKEND`. Two assume 2-D image
+input in their own code. The third, ``"Smooth MPRT"``, is the one worth knowing
+about: it calls the library's own explain function directly instead of the one it is
+given, so it would return a plausible number for an explainer it never ran.
+
 :meth:`~xai4tsc.evaluation.base.QuantusEvaluator.evaluate` also takes
 ``channel_first``, the axis order of the inputs, which defaults to ``True`` for the
 framework's canonical ``(B, C, T)``. It is passed on to the Quantus metric; left

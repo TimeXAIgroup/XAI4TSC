@@ -12,9 +12,32 @@ import pytest
 import yaml
 from experiment_runner.main import main
 
+from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
 from xai4tsc.models.base import ModelBase
 
 _TEST_CONFIG = Path(__file__).parent.parent / "fixtures" / "test_config.yaml"
+
+
+class _RaisingEvaluator(EvaluatorBase):
+    """
+    A metric that always raises, for exercising per-metric error isolation.
+
+    Earlier these tests borrowed ``Max-Sensitivity``, which raised only because
+    the framework supplied no ``explain_func``. That is fixed, so the failure has
+    to be deliberate rather than inherited from whichever metric is broken today.
+    """
+
+    def evaluate(self, model, explanation, data, labels, device="cpu", **kwargs):
+        """Raise unconditionally."""
+        raise RuntimeError("deliberate metric failure for isolation testing")
+
+
+@pytest.fixture
+def raising_metric():
+    """Register ``Always-Raises`` for the duration of one test."""
+    register_metric("Always-Raises", _RaisingEvaluator)
+    yield "Always-Raises"
+    METRICS.pop("Always-Raises", None)
 
 
 def _resolve_config(cache_path: Path, results_path: str, seed: int = 42) -> dict:
@@ -239,7 +262,7 @@ def test_runner_counts_skipped_datasets_separately(
 
 @pytest.mark.integration
 def test_failing_metric_does_not_discard_the_rest(
-    ucr_dataset_path, tmp_path, monkeypatch
+    ucr_dataset_path, tmp_path, monkeypatch, raising_metric
 ):
     """A raising metric costs only itself; later metrics still run and are saved."""
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
@@ -247,10 +270,9 @@ def test_failing_metric_does_not_discard_the_rest(
     results_rel = "tests/_runner_iso_metric"
 
     config = _resolve_config(cache_root, results_rel)
-    # Max-Sensitivity re-explains internally and needs an `explain_func` the
-    # framework never supplies, so it raises. Complexity is queued behind it.
+    # A metric that always raises, with Complexity queued behind it.
     config["evaluation_config"]["metrics"] = [
-        {"metric": "Max-Sensitivity"},
+        {"metric": raising_metric},
         {"metric": "Complexity"},
     ]
     failures = main(str(_write_config(config, tmp_path)))
@@ -262,7 +284,7 @@ def test_failing_metric_does_not_discard_the_rest(
     # The dataset itself completed: only the metric failed.
     assert "1/1 dataset(s) completed, 0 skipped, 0 failed" in log
     assert "Failed metric evaluation(s) (1):" in log
-    assert "Max-Sensitivity" in log
+    assert raising_metric in log
 
     metrics_csv = experiment_dir / "metrics.csv"
     assert metrics_csv.exists(), "metrics.csv must still be written"
@@ -271,7 +293,7 @@ def test_failing_metric_does_not_discard_the_rest(
     # The metric queued behind the failure still ran, and the failure itself is
     # now recorded rather than dropped from the results.
     assert status["Complexity"] == "ok", "The metric after the failure must run"
-    assert status["Max-Sensitivity"] == "error"
+    assert status[raising_metric] == "error"
 
 
 @pytest.mark.integration
@@ -457,7 +479,7 @@ def test_unique_entries_keep_their_plain_names(ucr_dataset_path, tmp_path, monke
 
 @pytest.mark.integration
 def test_status_error_row_records_the_exception(
-    ucr_dataset_path, tmp_path, monkeypatch
+    ucr_dataset_path, tmp_path, monkeypatch, raising_metric
 ):
     """A raising metric is recorded as an `error` row naming the exception."""
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
@@ -466,18 +488,18 @@ def test_status_error_row_records_the_exception(
 
     config = _resolve_config(cache_root, results_rel)
     config["evaluation_config"]["metrics"] = [
-        {"metric": "Max-Sensitivity"},
+        {"metric": raising_metric},
         {"metric": "Complexity"},
     ]
     assert main(str(_write_config(config, tmp_path))) == 1
 
     df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
     by_metric = dict(zip(df["metric"], df["status"], strict=True))
-    assert by_metric == {"Max-Sensitivity": "error", "Complexity": "ok"}
+    assert by_metric == {raising_metric: "error", "Complexity": "ok"}
 
     failed = df.loc[df["status"] == "error"].iloc[0]
     assert pd.isna(failed["score"]), "an error row must carry no score"
-    assert "explain_func" in failed["detail"]
+    assert "deliberate metric failure" in failed["detail"]
 
 
 @pytest.mark.integration

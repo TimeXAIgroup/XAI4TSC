@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 
+from ..models.base import predict_probs
 from ..utils.defaults import _fraction_params_T, eval_metric_defaults
 from ..utils.perturbation import resolve_perturb_func
 from ..utils.utils import dict_to_args
@@ -301,7 +303,10 @@ class QuantusEvaluator(EvaluatorBase):
             If *name* is not a registered Quantus metric.
         """
         from .evaluate import QUANTUS_METRICS
-        from .quantus_groups import quantus_requires_native_domain
+        from .quantus_groups import (
+            quantus_requires_explain_func,
+            quantus_requires_native_domain,
+        )
 
         if name not in QUANTUS_METRICS:
             raise ValueError(
@@ -312,6 +317,7 @@ class QuantusEvaluator(EvaluatorBase):
         self._metric_class_params = metric_class_params
         self.metric_name = name
         self.requires_native_domain = quantus_requires_native_domain(name)
+        self._requires_explain_func = quantus_requires_explain_func(name)
 
     def evaluate(
         self,
@@ -372,15 +378,35 @@ class QuantusEvaluator(EvaluatorBase):
         )
         user_params = _resolve_string_callables(user_params, class_name)
 
-        merged = {**auto_params, **user_params}
+        # Quantus aggregates with np.mean when return_aggregate is on, so a single
+        # NaN sample poisons the whole score.
+        merged = {"aggregate_func": np.nanmean, **auto_params, **user_params}
+
+        # 3. Metrics that re-explain need a callable, and one needs the class count.
+        extra_call: dict[str, object] = {}
+        if self._requires_explain_func:
+            merged = {**self._model_dependent_params(class_name, model, data), **merged}
+            extra_call["explain_func"] = self._make_explain_func(explanation, device)
+
         init_params = dict_to_args(merged, self._metric_class.__init__)
         metric = self._metric_class(**(init_params or {}))
+
+        # Quantus keeps a non-empty explain_func_kwargs by reference and writes
+        # `device` into it, and only the outer call_params dict was copied on the
+        # way in — so a nested one is still the caller's config object. Copy it
+        # to mitigate changes to the config object.
+        if isinstance(call_params.get("explain_func_kwargs"), dict):
+            call_params = {
+                **call_params,
+                "explain_func_kwargs": dict(call_params["explain_func_kwargs"]),
+            }
 
         # The axis order is stated rather than left to Quantus, which infers it from
         # the shape and gets it wrong for an input with more channels than timesteps.
         filtered_call = (
             dict_to_args(
-                {"channel_first": channel_first, **call_params}, metric.__call__
+                {"channel_first": channel_first, **extra_call, **call_params},
+                metric.__call__,
             )
             or {}
         )
@@ -396,6 +422,102 @@ class QuantusEvaluator(EvaluatorBase):
             device=device,
             **filtered_call,
         )
+
+    @staticmethod
+    def _make_explain_func(
+        explanation: Explanation, device: str
+    ) -> Callable[..., np.ndarray]:
+        """
+        Build the re-explain callable a ``RE_EXPLAIN`` metric needs.
+
+        Robustness and randomisation metrics re-explain perturbed or randomised
+        inputs, so they need to run the same explainer again on a model that is not
+        the one the explanation was made with. The explainer is rebuilt from the
+        explanation's own record rather than reused, so each evaluation starts from
+        a clean instance.
+
+        Parameters
+        ----------
+        explanation : Explanation
+            Supplies the explainer's registry key and its parameters.
+        device : str
+            Compute device for the re-explanations.
+
+        Returns
+        -------
+        callable
+            ``explain_func(model, inputs, targets, **kwargs) -> np.ndarray``.
+
+        Raises
+        ------
+        ValueError
+            If the explanation names an explainer that is not registered.
+        """
+        from ..xai.explain import build_explainer
+
+        try:
+            explainer = build_explainer(
+                explanation.explainer, explanation.explainer_params
+            )
+        except NotImplementedError as exc:
+            raise ValueError(
+                f"Cannot re-explain with '{explanation.explainer}': it is not a "
+                "registered explainer. Metrics that re-explain need to rebuild the "
+                "explainer that produced the attribution."
+            ) from exc
+
+        def explain_func(
+            model: nn.Module,
+            inputs: np.ndarray,
+            targets: np.ndarray | list | None = None,
+            **kwargs: object,
+        ) -> np.ndarray:
+            """Re-run the explainer on *inputs*; see :meth:`_make_explain_func`."""
+            # A copy, not the original: an explainer may write to the explanation it
+            # is handed (FreqRISE sets explanation_domain), which would otherwise
+            # rewrite the explanation being scored, mid-evaluation.
+            probe = dataclasses.replace(
+                explanation, data=np.asarray(inputs), exp_values=None
+            )
+            class_targets = (
+                None
+                if targets is None
+                else [int(t) for t in np.asarray(targets).ravel()]
+            )
+            values = explainer.explain(model, probe, device, class_targets)
+            return QuantusEvaluator.real_attribution(values)
+
+        return explain_func
+
+    @staticmethod
+    def _model_dependent_params(
+        class_name: str, model: nn.Module, data: np.ndarray
+    ) -> dict:
+        """
+        Return init params that can only be derived from the model.
+
+        ``eval_metric_defaults`` entries are resolved from the data alone, so a
+        value that depends on the model's output width has no home there.
+
+        Parameters
+        ----------
+        class_name : str
+            The Quantus metric's class name.
+        model : torch.nn.Module
+            The model being explained.
+        data : np.ndarray
+            Input samples, used to infer the class count if needed.
+
+        Returns
+        -------
+        dict
+            Params to merge *under* the user's own, so an explicit value wins.
+        """
+        if class_name != "RandomLogit":
+            return {}
+        # Quantus defaults num_classes to 1000 (ImageNet) and samples an off-class
+        # index from it, derive from the model instead.
+        return {"num_classes": int(predict_probs(model, data[:1]).shape[1])}
 
     @staticmethod
     def _domain_inputs(explanation: Explanation, data: np.ndarray) -> np.ndarray:

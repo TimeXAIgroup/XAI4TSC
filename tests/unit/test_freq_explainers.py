@@ -48,6 +48,7 @@ def _make_exp(data: np.ndarray) -> Explanation:
     n = data.shape[0]
     return Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=data,

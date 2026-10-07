@@ -41,6 +41,7 @@ def _exp(exp_values: np.ndarray, domain: Domain) -> Explanation:
     """Build a minimal Explanation carrying only what the detectors read."""
     return Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=np.zeros(1),
@@ -174,6 +175,7 @@ def test_plot_exp_time_writes_flat_files(tmp_path, multi):
         exp_values = np.zeros((2, 1, 8), dtype=np.float32)  # (n, C, T)
     exp = Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=data,
@@ -206,6 +208,7 @@ def test_plot_exp_timefrequency_writes_flat_files(tmp_path, multi):
     exp_values = np.abs(np.stack([coeffs, coeffs], axis=0)) if multi else np.abs(coeffs)
     exp = Explanation(
         explainer="x",
+        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=data,

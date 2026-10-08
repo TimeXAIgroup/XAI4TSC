@@ -9,6 +9,9 @@ Submodules:
   :class:`QuantusEvaluator` wrappers.
 - :mod:`~xai4tsc.evaluation.quantus_groups` — what each Quantus metric consumes
   (``QUANTUS_GROUPS``) and the explanation domains that follow from it.
+- :mod:`~xai4tsc.evaluation._ground_truth` — the ground-truth region schema
+  (:class:`GroundTruthRegion`) and the masks the localization metrics score
+  against. Datasets store plain mappings; this is where they are parsed.
 - :mod:`~xai4tsc.evaluation.frequency_evaluate`,
   :mod:`~xai4tsc.evaluation.timefrequency_perturbation`,
   :mod:`~xai4tsc.evaluation.timefrequency_auc` — native frequency and
@@ -25,6 +28,7 @@ from .evaluate import (
     METRICS,
     QUANTUS_METRICS,
     evaluate,
+    ground_truth_missing,
     register_metric,
     required_domains_for,
 )
@@ -38,6 +42,7 @@ __all__ = [
     "QuantusEvaluator",
     "QuantusGroup",
     "evaluate",
+    "ground_truth_missing",
     "register_metric",
     "required_domains_for",
 ]

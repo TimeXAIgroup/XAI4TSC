@@ -261,10 +261,12 @@ def _get_explanation(
             )
         method_targets = label_arr.astype(int).tolist()
         exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
+        exp.explained_targets = np.asarray(method_targets, dtype=int)
     else:
         # Explain the model's predicted class for each sample.
         method_targets = predict_probs(model, exp.data).argmax(axis=1).tolist()
         exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
+        exp.explained_targets = np.asarray(method_targets, dtype=int)
 
     # Save results as specified
     if save_path is not None:

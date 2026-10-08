@@ -4,7 +4,7 @@ Time-frequency localization AUC metric.
 Scores how well a frequency / time-frequency attribution **localizes** onto the
 ground-truth discriminative regions of a sample. For each sample a boolean
 ground-truth mask is built in the explanation's coefficient grid from the dataset
-metadata (the ``{class: [regions]}`` produced by e.g. ``FreqShapesDataset``), and
+metadata (see :mod:`xai4tsc.evaluation._ground_truth`), and
 the ROC-AUC of the (real) attribution against that mask is computed: 1.0 means the
 attribution ranks every discriminative coefficient above every non-discriminative
 one, 0.5 is chance.
@@ -24,6 +24,11 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 
 from ..xai._types import DataType, Domain
+from ._ground_truth import (
+    coefficient_mask,
+    regions_for_class,
+    regions_for_sample,
+)
 from .base import EvaluatorBase
 
 if TYPE_CHECKING:
@@ -33,103 +38,6 @@ if TYPE_CHECKING:
     from ..xai._types import Explanation
 
 logger = logging.getLogger(__name__)
-
-
-def _sample_regions(sample_meta: object) -> list[dict]:
-    """
-    Return the discriminative regions for one sample (union across classes).
-
-    Parameters
-    ----------
-    sample_meta : object
-        A per-sample metadata mapping with a ``"ground_truth"`` key. Two shapes are
-        accepted: the per-class dict ``{class_key: [region, ...]}`` (class keys may
-        be ``int`` or ``str`` after a JSON round-trip) or a flat ``[region, ...]``
-        list (the regions of all classes already unioned, as shipped by the
-        pre-split ``freq_shapes`` dataset). Either way the regions are unioned, so
-        the two are equivalent here. Anything else yields no regions.
-
-    Returns
-    -------
-    list of dict
-        The flattened discriminative regions; each region is
-        ``{"channel", "pos", "len", "freq", "phase"}``.
-    """
-    if not isinstance(sample_meta, dict):
-        return []
-    gt = sample_meta.get("ground_truth", {})
-    if isinstance(gt, list):  # flat union of regions (per-class keying dropped)
-        return [r for r in gt if isinstance(r, dict)]
-    if not isinstance(gt, dict):
-        return []
-    regions: list[dict] = []
-    for region_list in gt.values():
-        if isinstance(region_list, list):
-            regions.extend(r for r in region_list if isinstance(r, dict))
-    return regions
-
-
-def _ground_truth_mask(
-    regions: list[dict],
-    grid_shape: tuple[int, ...],
-    signal_length: int,
-    transform: DomainTransform | None,
-) -> np.ndarray:
-    """
-    Build a boolean ground-truth mask in the explanation's coefficient grid.
-
-    Parameters
-    ----------
-    regions : list of dict
-        Discriminative regions for one sample (see :func:`_sample_regions`).
-    grid_shape : tuple of int
-        Shape of one sample's attribution: ``(C, n_freq)`` for a frequency
-        explanation or ``(C, n_freq, n_time)`` for a time-frequency one.
-    signal_length : int
-        Length ``T`` of the time-domain series (sets the frequency scale).
-    transform : DomainTransform or None
-        The explanation's transform; ``n_fft`` / ``hop_length`` are read from it
-        for the STFT grid geometry when present.
-
-    Returns
-    -------
-    np.ndarray
-        Boolean array of shape *grid_shape*; ``True`` at discriminative cells.
-    """
-    mask = np.zeros(grid_shape, dtype=bool)
-    if not regions:
-        return mask
-
-    n_channels = grid_shape[0]
-    n_freq = grid_shape[1]
-    is_tf = len(grid_shape) == 3
-    n_time = grid_shape[2] if is_tf else None
-    n_fft = getattr(transform, "n_fft", None)
-    hop = getattr(transform, "hop_length", None)
-
-    for region in regions:
-        channel = int(region.get("channel", 0))
-        if channel < 0 or channel >= n_channels:
-            continue
-        freq = float(region.get("freq", 0.0))
-        # STFT bin scales cycles/sample (freq/T) onto the n_fft grid; rFFT bin over
-        # the full series is just the cycles-per-series count == freq.
-        scale = n_fft / signal_length if (is_tf and n_fft) else 1.0
-        f_bin = min(max(round(freq * scale), 0), n_freq - 1)
-
-        if is_tf:
-            pos = int(region.get("pos", 0))
-            length = int(region.get("len", signal_length))
-            if hop:
-                # torch.stft uses center=True: frame f is centred at f*hop.
-                f0 = max(0, pos // hop)
-                f1 = min(n_time, (pos + length) // hop + 1)
-                mask[channel, f_bin, f0:f1] = True
-            else:
-                mask[channel, f_bin, :] = True
-        else:
-            mask[channel, f_bin] = True
-    return mask
 
 
 class TimeFrequencyAUCEvaluator(EvaluatorBase):
@@ -231,11 +139,16 @@ class TimeFrequencyAUCEvaluator(EvaluatorBase):
             a = np.abs(a)
         signal_length = int(np.asarray(data).shape[-1])
 
+        targets = explanation.explained_targets
         scores: list[float] = []
         for b in range(a.shape[0]):
             sample_meta = metadata[b] if b < len(metadata) else None
-            regions = _sample_regions(sample_meta)
-            mask = _ground_truth_mask(regions, a[b].shape, signal_length, transform)
+            regions = regions_for_sample(sample_meta)
+            # Score the attribution against the class it explains, not against
+            # every region of the sample (see regions_for_class).
+            target = None if targets is None else targets[b]
+            regions = regions_for_class(regions, target)
+            mask = coefficient_mask(regions, a[b].shape, signal_length, transform)
             if mask.any() and not mask.all():
                 scores.append(float(roc_auc_score(mask.ravel(), a[b].ravel())))
             else:

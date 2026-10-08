@@ -154,6 +154,26 @@ def quantus_requires_explain_func(name: str) -> bool:
     return QUANTUS_GROUPS.get(name) is QuantusGroup.RE_EXPLAIN
 
 
+def quantus_requires_s_batch(name: str) -> bool:
+    """
+    Return whether the named Quantus metric scores against ground-truth masks.
+
+    Parameters
+    ----------
+    name : str
+        A key of ``QUANTUS_METRICS`` (the metric's display name).
+
+    Returns
+    -------
+    bool
+        ``True`` for the ``LOCALISATION`` group only. These metrics compare the
+        attribution against the region a dataset declares as discriminative, so
+        they are unusable without one — unlike the other groups, which need
+        nothing but the model and the attribution.
+    """
+    return QUANTUS_GROUPS.get(name) is QuantusGroup.LOCALISATION
+
+
 BLOCKED_BY_BACKEND: dict[str, str] = {
     "Continuity Test": (
         "it reshapes a (B, C, T) batch to (B, C, 1, T) and feeds that to the model, "

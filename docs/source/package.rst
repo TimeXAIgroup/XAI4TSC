@@ -188,6 +188,63 @@ refusing them replaces an obscure ``IndexError`` with a stated reason. The seven
 calls the library's own explain function instead of the one it is given, so without
 the entry it would report a plausible score for an explainer it never ran.
 
+Ground-truth localization
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``LOCALISATION`` metrics compare attributions to a supplied ground truth (GT).
+That means the dataset has to supply the GT, as per-sample metadat. A localization 
+metric on a dataset without GT is reported as ``skipped-no-ground-truth`` with the
+reason, via :func:`~xai4tsc.evaluation.evaluate.ground_truth_missing`.
+
+A dataset that does know records a list of **regions** under ``ground_truth`` in 
+each sample's metadata. A region is **one interval**: ``pos`` and ``len`` define it,
+and every other field is a scope that broadcasts over the whole of it.
+
+====================  ================================================================
+Field                 Meaning
+====================  ================================================================
+``pos``, ``len``      The interval, in samples. All a time-domain dataset needs
+``channels``          Channels it applies to; omitted means all
+``classes``           Classes it discriminates; omitted means all
+``freqs``             Components in cycles per series - frequency / time-frequency only
+``phases``            Paired with ``freqs``; recorded only
+====================  ================================================================
+
+Every field is optional and an omitted one means all, so a time-domain dataset
+writes ``{"pos": ..., "len": ...}`` and the classes. A region must still localize
+something, and an unrecognized field is an error rather than ignored - a misspelled
+``len`` would otherwise read as *no* interval, which means "the whole series", and
+quietly widen the mask over the entire sample.
+
+Stored metadata is never rewritten to match this schema:
+:meth:`~xai4tsc.evaluation._ground_truth.GroundTruthRegion.from_mapping` is the one
+place that parses it, and it accepts the singular ``channel`` / ``freq`` / ``phase``
+spellings and the per-class ``{class: [region, ...]}`` mapping alongside the forms
+above.
+
+An attribution is always for a class, so it is scored against the evidence for
+that class. :attr:`xai4tsc.Explanation.explained_targets` records which class each
+attribution explains, and
+:func:`~xai4tsc.evaluation._ground_truth.regions_for_class` keeps only the regions
+scoped to it; a region that declares no ``classes`` still applies to every class,
+which is the right default for a single-label dataset whose sample label already
+says which class it is. This matters most for a multi-label dataset: without it
+every class would be scored against the union of the sample's regions, so each
+class would get an identical mask.
+
+Three consequences worth knowing when reading a score. Quantus requires its masks
+to have a single channel, so a region's ``channels`` scope is unioned away on that
+path and the score cannot say whether an attribution found the right channel, it
+**warns** when that collapse discards something, which needs multivariate ground
+truth. Samples with no region for the class in question are **dropped** rather 
+than scored: an all-``False`` mask passes Quantus' own guard, which counts array
+dimensions rather than elements, and would score 0 like a genuine result.
+
+That dropping has a consequence for ``targets: predicted``: a sample carrying no
+evidence for the class the model predicted is excluded, so the scored subset depends
+on model accuracy. Use ``targets: label`` when the sample set has to be fixed across
+models.
+
 :meth:`~xai4tsc.evaluation.base.QuantusEvaluator.evaluate` also takes
 ``channel_first``, the axis order of the inputs, which defaults to ``True`` for the
 framework's canonical ``(B, C, T)``. It is passed on to the Quantus metric; left

@@ -69,6 +69,13 @@ class Explanation:
         ``data_domain`` / ``explanation_domain``. ``None`` for pure time-domain
         explanations. Freq/TF views of ``data`` are *derived* on demand via
         ``transform.forward(data)`` rather than stored.
+    explained_targets : np.ndarray, optional
+        Class index each attribution explains, one per sample. An attribution is
+        always *for* a class, and a ground-truth localization metric has to know
+        which one to pick the right discriminative region. ``None`` when the
+        explanation holds one attribution per class (``targets="all"``), where the
+        consumer splits the stack and sets this per class, or when the producer did
+        not record it.
     metadata : list, optional
         Per-sample dataset metadata for the explained samples, aligned to
         ``exp_values`` / ``indices`` (one entry per row). Carries ground-truth
@@ -90,6 +97,7 @@ class Explanation:
     explanation_domain: Domain = Domain.TIME
     transform: DomainTransform | None = None
     metadata: list | None = None
+    explained_targets: np.ndarray | None = None
 
 
 # Rank of a *single-target* ``exp_values`` array per explanation domain. Frequency

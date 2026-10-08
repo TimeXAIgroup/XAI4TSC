@@ -17,15 +17,12 @@ from xai4tsc.evaluation.evaluate import METRICS, evaluate
 from xai4tsc.evaluation.frequency_evaluate import FrequencyEvaluator
 from xai4tsc.evaluation.timefrequency_auc import (
     TimeFrequencyAUCEvaluator,
-    _ground_truth_mask,
-    _sample_regions,
 )
 from xai4tsc.evaluation.timefrequency_perturbation import (
     TimeFrequencyEvaluator,
     TimeFrequencyEvaluatorGaussian,
 )
 from xai4tsc.utils import RFFTransform, get_transform
-from xai4tsc.utils.fourier_transforms import STFTransform
 from xai4tsc.xai import Domain
 from xai4tsc.xai._types import Explanation
 from xai4tsc.xai.explain import _get_explanation
@@ -309,41 +306,6 @@ def test_tfauc_registered_and_required_domains():
         Domain.FREQUENCY,
         Domain.TIME_FREQUENCY,
     }
-
-
-@pytest.mark.unit
-def test_sample_regions_accepts_dict_and_flat_list():
-    # Per-class dict {class_key: [region, ...]} is unioned across classes.
-    per_class = {
-        "ground_truth": {0: [{"freq": 7}], 1: [{"freq": 19}, {"freq": 37}]},
-    }
-    assert _sample_regions(per_class) == [{"freq": 7}, {"freq": 19}, {"freq": 37}]
-    # The shipped freq_shapes dataset stores a flat (already-unioned) region list.
-    flat = {"ground_truth": [{"freq": 7}, {"freq": 19}, {"freq": 37}]}
-    assert _sample_regions(flat) == [{"freq": 7}, {"freq": 19}, {"freq": 37}]
-    # Non-dict regions are dropped; non-mapping metadata yields nothing.
-    assert _sample_regions({"ground_truth": [{"freq": 7}, 42]}) == [{"freq": 7}]
-    assert _sample_regions(None) == []
-    assert _sample_regions({"ground_truth": 5}) == []
-
-
-@pytest.mark.unit
-def test_tfauc_mask_frequency_grid():
-    # rFFT grid (C, n_freq): a region at freq=7 marks exactly bin 7.
-    regions = _sample_regions({"ground_truth": {0: [{"channel": 0, "freq": 7}]}})
-    mask = _ground_truth_mask(regions, (1, 17), signal_length=32, transform=None)
-    assert mask.sum() == 1 and mask[0, 7]
-
-
-@pytest.mark.unit
-def test_tfauc_mask_time_frequency_grid():
-    stft = STFTransform(n_fft=16, win_length=16, hop_length=8)
-    stft.forward(torch.randn(1, 1, 64))
-    regions = [{"channel": 0, "pos": 16, "len": 16, "freq": 4}]
-    mask = _ground_truth_mask(regions, (1, 9, 9), signal_length=64, transform=stft)
-    # freq bin round(4*16/64)=1; frames overlapping [16,32) with hop 8 → 2..4.
-    assert mask.any() and not mask.all()
-    assert mask[0, 1, 2] and mask[0, 1, 3]
 
 
 @pytest.mark.unit

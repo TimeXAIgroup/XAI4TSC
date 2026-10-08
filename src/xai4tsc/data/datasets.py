@@ -596,11 +596,16 @@ class FreqShapesDataset(SyntheticDataset):
     sinusoids and shorter local packets, all at *other* frequencies — are added so
     the discriminative signal must be localized in both time and frequency.
 
-    The per-sample metadata records the ground-truth regions **per class**
-    (``ground_truth = {attr_index: [component, ...]}``) plus distractors
-    (``non_discriminative``); a component is
-    ``{"channel", "pos", "len", "freq", "phase"}``. This makes the dataset a
-    ground truth for time-frequency attribution metrics (e.g. TimeFrequencyAUC).
+    The per-sample metadata records the ground-truth regions under
+    ``ground_truth`` plus distractors under ``non_discriminative``, as the plain
+    mappings that survive the JSON round-trip of ``save_splits``. The evaluation
+    side parses them into
+    :class:`~xai4tsc.evaluation._ground_truth.GroundTruthRegion` when a metric
+    needs them, so the stored shape is free to differ: both a flat region list and
+    the per-class ``{class: [region, ...]}`` mapping are read, and the singular
+    ``channel`` / ``freq`` / ``phase`` keys this dataset writes are accepted
+    alongside their plural forms. This makes the dataset a ground truth for the
+    localization metrics (e.g. TimeFrequencyAUC).
 
     .. note::
 
@@ -657,6 +662,112 @@ class FreqShapesDataset(SyntheticDataset):
         self.n_global_distractors = n_global_distractors
         self.n_local_distractors = n_local_distractors
         self.max_freq = max_freq
+
+    def load_saved_splits(self, directory: Path | str, encode: str = "label") -> tuple:
+        """
+        Load the pre-split files and annotate each region with the classes it marks.
+
+        A label bit of this dataset means "the sample contains a packet at
+        ``class_freqs[bit]``", so a ground-truth region's frequency says
+        which bit it belongs to. Under the multi-hot encoding every combination is
+        its own class, so a region marks *every* class whose combination has that
+        bit set, and the evaluation side can score a per-class explanation against
+        the regions that actually belong to that class.
+
+        The annotation happens here rather than in the stored files: it depends on
+        the label encoding, which is resolved at load time, and the committed data
+        is deliberately left as produced.
+
+        Parameters
+        ----------
+        directory : Path or str
+            Directory containing the split files.
+        encode : str
+            Label encoding scheme.
+
+        Returns
+        -------
+        tuple[list, encoder]
+            As :meth:`~xai4tsc.data.base.DatasetBase.load_saved_splits`, with
+            ``classes`` added to every ground-truth region.
+        """
+        splits, encoder = super().load_saved_splits(directory, encode=encode)
+        classes_for = self._classes_per_frequency(encoder)
+        if not classes_for:
+            return splits, encoder
+        annotated = [
+            (x, y, self._annotate_regions(metadata, classes_for))
+            for x, y, metadata in splits
+        ]
+        return annotated, encoder
+
+    def _classes_per_frequency(self, encoder: object) -> dict[int, tuple[int, ...]]:
+        """
+        Map each discriminative frequency to the class indices it marks.
+
+        Parameters
+        ----------
+        encoder : object
+            The fitted label encoder; ``classes_`` must hold one multi-hot row per
+            class for the mapping to be derivable.
+
+        Returns
+        -------
+        dict
+            ``{frequency: (class_index, ...)}``, or empty when the encoding is not
+            multi-hot and a frequency therefore says nothing about a class.
+        """
+        classes = list(getattr(encoder, "classes_", []))
+        n_bits = len(self.class_freqs)
+        if not classes or any(np.ndim(c) != 1 or len(c) != n_bits for c in classes):
+            return {}
+        return {
+            freq: tuple(
+                index for index, combo in enumerate(classes) if int(combo[bit]) == 1
+            )
+            for bit, freq in enumerate(self.class_freqs)
+        }
+
+    @staticmethod
+    def _annotate_regions(
+        metadata: pd.DataFrame | None, classes_for: dict[int, tuple[int, ...]]
+    ) -> pd.DataFrame | None:
+        """
+        Return *metadata* with ``classes`` added to each ground-truth region.
+
+        Parameters
+        ----------
+        metadata : pd.DataFrame or None
+            One row per sample; the ``ground_truth`` column holds region mappings.
+        classes_for : dict
+            ``{frequency: (class_index, ...)}`` from
+            :meth:`_classes_per_frequency`.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            A copy with the annotation; regions are rebuilt rather than mutated so
+            the loaded JSON objects are left alone.
+        """
+        if metadata is None or "ground_truth" not in metadata:
+            return metadata
+
+        def annotate(regions: object) -> object:
+            """Add the class scope to every region of one sample."""
+            if not isinstance(regions, list):
+                return regions
+            out = []
+            for region in regions:
+                if not isinstance(region, dict):
+                    out.append(region)
+                    continue
+                classes = classes_for.get(region.get("freq"))
+                out.append({**region, "classes": list(classes)} if classes else region)
+            return out
+
+        annotated = metadata.copy()
+        annotated["ground_truth"] = annotated["ground_truth"].map(annotate)
+        return annotated
 
     def _cache_key(self) -> str:
         """

@@ -22,6 +22,21 @@ by `generate_explanation()` are unaffected.
   supplied an `explain_func`. `Explanation` now records `explainer_params`, so the
   evaluator rebuilds the explainer that produced the attribution and hands Quantus a
   callable for it.
+- **Ground-truth localization metrics now work**: the six Quantus `LOCALISATION`
+  metrics need per-sample masks marking where the class signal is, and nothing
+  supplied them. `GroundTruthRegion` is now the schema for a discriminative region -
+  one interval, with every other field a scope broadcasting over it - parsed from
+  whatever a dataset stored, so committed datasets are not rewritten. A region needs
+  only `pos` and `len`, which is all a time-domain dataset has; `freqs`/`phases` are
+  the optional augmentation the frequency metrics use. Samples with no region are
+  excluded from a score rather than counted as zero. A localization metric on a
+  dataset that declares no ground truth is reported as `skipped-no-ground-truth`.
+- **An attribution is scored against the class it explains.** `Explanation` records
+  `explained_targets`, the class each attribution is for, and only the ground-truth
+  regions scoped to that class are used. This matters for multi-label data, where a
+  sample carries evidence for several classes: previously every class was scored
+  against the union, so each got an identical mask. `freq_shapes` derives each
+  region's class scope from its frequency, which is what its labels mean.
 - **Unsupported metrics are refused with a reason** instead of raising from inside
   the library, and are reported as `skipped-unsupported`. Six index a second spatial
   axis a `(B, C, T)` series does not have (`Continuity Test`, `InputInvariance`,

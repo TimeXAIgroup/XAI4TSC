@@ -341,6 +341,7 @@ class QuantusEvaluator(EvaluatorBase):
         from .quantus_groups import (
             quantus_requires_explain_func,
             quantus_requires_native_domain,
+            quantus_requires_s_batch,
         )
 
         if name not in QUANTUS_METRICS:
@@ -353,6 +354,7 @@ class QuantusEvaluator(EvaluatorBase):
         self.metric_name = name
         self.requires_native_domain = quantus_requires_native_domain(name)
         self._requires_explain_func = quantus_requires_explain_func(name)
+        self._requires_ground_truth = quantus_requires_s_batch(name)
 
     def evaluate(
         self,
@@ -423,6 +425,13 @@ class QuantusEvaluator(EvaluatorBase):
             merged = {**self._model_dependent_params(class_name, model, data), **merged}
             extra_call["explain_func"] = self._make_explain_func(explanation, device)
 
+        # 4. Localisation metrics score against the dataset's ground truth, and
+        #    only samples that have one can be scored at all.
+        keep: np.ndarray | None = None
+        if self._requires_ground_truth:
+            s_batch, keep = self._ground_truth_batch(explanation, data)
+            extra_call["s_batch"] = s_batch
+
         init_params = dict_to_args(merged, self._metric_class.__init__)
         metric = self._metric_class(**(init_params or {}))
 
@@ -449,14 +458,115 @@ class QuantusEvaluator(EvaluatorBase):
         # Metric backends operate on real attributions; reduce complex (freq/TF)
         # explanations to magnitude, leaving real ones untouched.
         a_batch = self.real_attribution(explanation.exp_values)
+        x_batch = self._domain_inputs(explanation, data)
+        y_batch = np.asarray(labels)
+
+        if keep is not None:
+            # Samples without a ground-truth region cannot be localised against
+            # anything, so they are dropped rather than scored. An all-False mask
+            # would not be caught by Quantus — its own guard counts dimensions, not
+            # elements — and would score 0, pulling the mean down like a result.
+            x_batch, y_batch, a_batch = x_batch[keep], y_batch[keep], a_batch[keep]
+
         return metric(
             model=model,
-            x_batch=self._domain_inputs(explanation, data),
-            y_batch=labels,
+            x_batch=x_batch,
+            y_batch=y_batch,
             a_batch=a_batch,
             device=device,
             **filtered_call,
         )
+
+    def _ground_truth_batch(
+        self, explanation: Explanation, data: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Build the ground-truth masks a localisation metric scores against.
+
+        The masks come from the per-sample regions a dataset declares in its
+        metadata (see :mod:`~xai4tsc.evaluation._ground_truth`). Quantus requires
+        ``s_batch`` to have a single channel, so a region scoped to particular
+        channels is unioned across them on the way out and the metric cannot tell
+        which channel carried the signal. That is a lossy step, so it warns when it
+        actually discards something.
+
+        Parameters
+        ----------
+        explanation : Explanation
+            Supplies ``metadata``, the per-sample regions for the explained samples.
+        data : np.ndarray
+            Input samples in ``(B, C, T)`` order; sets the mask grid.
+
+        Returns
+        -------
+        tuple of np.ndarray
+            ``(s_batch, keep)`` — masks of shape ``(n_keep, 1, T)`` and the boolean
+            index of samples that have a region, in batch order.
+
+        Raises
+        ------
+        ValueError
+            If the explanation carries no metadata, or no sample has a region for
+            the class its attribution explains. Either way there is nothing to
+            localise against, and scoring the attribution anyway would produce a
+            number with no meaning.
+        """
+        from ._ground_truth import (
+            regions_for_class,
+            regions_for_sample,
+            time_mask,
+        )
+
+        arr = np.asarray(data)
+        n_samples, n_channels, signal_length = arr.shape
+        metadata = explanation.metadata
+
+        if not metadata:
+            raise ValueError(
+                "this metric scores the attribution against the dataset's "
+                "ground-truth regions, and the explanation carries no metadata. "
+                "Only datasets that declare discriminative regions can be used "
+                "with it."
+            )
+
+        targets = explanation.explained_targets
+        masks = []
+        collapsed_channels = False
+        for index in range(n_samples):
+            sample_meta = metadata[index] if index < len(metadata) else None
+            regions = regions_for_sample(sample_meta)
+            # An attribution explains one class; score it against that class's
+            # evidence, not against every region the sample happens to carry.
+            target = None if targets is None else targets[index]
+            regions = regions_for_class(regions, target)
+            # Quantus metrics support only one channel of ground truth:
+            # Build the real channel count and then collapse.
+            mask = time_mask(regions, n_channels, signal_length)
+            flat = mask.any(axis=0)
+            collapsed_channels |= n_channels > 1 and not bool((mask == flat).all())
+            masks.append(flat)
+
+        if collapsed_channels:
+            logger.warning(
+                "Metric %s scores one mask per sample, so the ground truth was "
+                "unioned across the %d channels and the per-channel distinction "
+                "is lost: a region on one channel now counts as ground truth on "
+                "all of them. The score is still comparable across explainers, "
+                "but it does not test whether an attribution found the right "
+                "channel.",
+                self.metric_name,
+                n_channels,
+            )
+
+        stacked = np.asarray(masks, dtype=bool)
+        keep = stacked.any(axis=1)
+        if not keep.any():
+            raise ValueError(
+                f"none of the {n_samples} explained sample(s) has a ground-truth "
+                "region, so there is nothing to localise against. The dataset may "
+                "declare regions only for some classes."
+            )
+        return stacked[keep][:, np.newaxis, :], keep
 
     @staticmethod
     def _make_explain_func(

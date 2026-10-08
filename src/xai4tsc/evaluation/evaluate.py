@@ -85,6 +85,16 @@ def evaluate(
         )
         return None
 
+    # Localisation metrics require datasets with ground truth.
+    missing = ground_truth_missing(metric, explanation)
+    if missing:
+        logger.warning(
+            "Metric %s cannot score this explanation: %s. It will be skipped!",
+            metric,
+            missing,
+        )
+        return None
+
     # A handful of Quantus metrics assume 2-D image input deep in their own code,
     # so no setting on this side makes them work on a time series.
     if metric in BLOCKED_BY_BACKEND:
@@ -114,6 +124,49 @@ def evaluate(
     )
     logger.info("%s: %s", metric, result)
     return result
+
+
+def ground_truth_missing(metric: str, explanation: Explanation) -> str | None:
+    """
+    Return why *metric* cannot score *explanation*, or ``None`` if it can.
+
+    The localisation metrics compare an attribution against the regions a dataset
+    declares as discriminative. Most datasets declare none — the discriminative
+    region of a real recording is not known — so this is an ordinary unmet
+    requirement rather than a failure, and the caller is expected to skip and say
+    so.
+
+    Parameters
+    ----------
+    metric : str
+        A key of the ``METRICS`` registry.
+    explanation : Explanation
+        The explanation to score; its ``metadata`` carries the regions.
+
+    Returns
+    -------
+    str or None
+        A reason the metric cannot be scored, or ``None`` when it can — including
+        for every metric that does not need ground truth at all.
+    """
+    from ._ground_truth import regions_for_sample
+    from .quantus_groups import quantus_requires_s_batch
+
+    if not quantus_requires_s_batch(metric):
+        return None
+    if not explanation.metadata:
+        return (
+            "it scores the attribution against the dataset's ground-truth "
+            "regions, and this dataset declares none"
+        )
+    # A ValueError from here is deliberately left to propagate: malformed metadata
+    # is a defect, not an unmet requirement, and reporting it as a skip would hide it.
+    if any(regions_for_sample(sample) for sample in explanation.metadata):
+        return None
+    return (
+        "the dataset declares ground-truth regions, but none of the explained "
+        "samples has one"
+    )
 
 
 def required_domains_for(metric: str, data_domain: Domain = Domain.TIME) -> set[Domain]:

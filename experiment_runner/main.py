@@ -31,7 +31,7 @@ from xai4tsc.data import (
     SyntheticDataset,
     load_dataset,
 )
-from xai4tsc.evaluation.evaluate import required_domains_for
+from xai4tsc.evaluation.evaluate import ground_truth_missing, required_domains_for
 from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
@@ -580,6 +580,29 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                         )
                                     )
                                     continue
+
+                                # Localisation metrics need require ground truth,
+                                # which most datasets do not supply.
+                                no_gt = ground_truth_missing(
+                                    metric_config["metric"], explanation
+                                )
+                                if no_gt:
+                                    logger.info(
+                                        "Skipping %s: %s.",
+                                        metric_config["metric"],
+                                        no_gt,
+                                    )
+                                    metric_rows.append(
+                                        _result_row(
+                                            dataset_id,
+                                            model_id,
+                                            explainer,
+                                            metric_ids[metric_ind],
+                                            "skipped-no-ground-truth",
+                                            detail=no_gt,
+                                        )
+                                    )
+                                    continue
                                 try:
                                     # Update settings
                                     metric_config = merge_dicts(
@@ -605,6 +628,11 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 exp_values=explanation.exp_values[
                                                     class_idx
                                                 ],
+                                                explained_targets=np.full(
+                                                    len(explanation.indices),
+                                                    class_idx,
+                                                    dtype=int,
+                                                ),
                                             )
                                             class_labels = np.full(
                                                 len(explanation.indices), class_idx

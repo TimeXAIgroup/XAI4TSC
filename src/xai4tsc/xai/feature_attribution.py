@@ -21,6 +21,7 @@ from captum.attr import (
     Occlusion,
 )
 
+from .._random import DEFAULT_SEED, resolve_rng
 from ..models.base import predict_probs
 from ..utils.perturbation import baseline_replacement, resolve_perturb_func
 from ._types import DataType
@@ -243,8 +244,13 @@ class TSHAPExplainer(PerturbationExplainer):
         ``background_data.mean(axis=0)`` is used as the ``"centroid"`` reference.
         The runner resolves the YAML ``background_data`` selector to this array;
         passing a non-array raises (selectors are a runner-only concept).
-    seed : int, optional
-        Seed for the random baseline, for reproducible draws.
+    seed : int or None
+        Seed for the ``"random"`` baseline, :data:`~xai4tsc.DEFAULT_SEED` by
+        default. A local generator is built from it on every :meth:`explain`
+        call, so an attribution is a pure function of
+        ``(model, data, params, seed)``. ``None`` draws from OS entropy and is
+        not reproducible. Unused by the default ``"centroid"`` baseline, which
+        draws nothing.
     """
 
     explanation_type = "feature_attribution"
@@ -261,7 +267,7 @@ class TSHAPExplainer(PerturbationExplainer):
         channel_mode: str = "shared",
         roi: bool = False,
         background_data: np.ndarray | None = None,
-        seed: int | None = None,
+        seed: int | None = DEFAULT_SEED,
     ) -> None:
         if channel_mode not in ("shared", "per_channel"):
             raise ValueError(
@@ -279,7 +285,7 @@ class TSHAPExplainer(PerturbationExplainer):
         self.channel_mode = channel_mode
         self.roi = bool(roi)
         self.n_perturb_samples = max(1, int(n_perturb_samples))
-        self.prng = np.random.default_rng(seed)
+        self.seed = seed
 
         self.perturb_baseline = perturb_baseline
         self.centroid: np.ndarray | None = None
@@ -323,9 +329,13 @@ class TSHAPExplainer(PerturbationExplainer):
             targets = predict_probs(model, data).argmax(axis=1).tolist()
         w_l = self._window_len(n_timesteps)
 
+        # Rebuilt per call so repeated explanations of one input agree; a
+        # generator held on the instance would advance between calls.
+        prng = resolve_rng(self.seed)
+
         out = np.zeros_like(data, dtype=np.float32)
         for i in range(n_samples):
-            out[i] = self._explain_sample(model, data[i], int(targets[i]), w_l)
+            out[i] = self._explain_sample(model, data[i], int(targets[i]), w_l, prng)
         return out
 
     # ── per-sample driver ────────────────────────────────────────────────────
@@ -336,6 +346,7 @@ class TSHAPExplainer(PerturbationExplainer):
         x: np.ndarray,
         target: int,
         w_l: int,
+        prng: np.random.Generator,
     ) -> np.ndarray:
         n_channels, n_timesteps = x.shape
         all_starts = list(range(max(1, n_timesteps - w_l + 1)))
@@ -345,7 +356,7 @@ class TSHAPExplainer(PerturbationExplainer):
 
         draws = []
         for _ in range(self.n_perturb_samples):
-            x_bar = self._full_background(x)
+            x_bar = self._full_background(x, prng)
             f_x_bar = self._target_probs(model, x_bar[None], target)[0]
             draws.append((x_bar, f_x_bar))
         f_x = self._target_probs(model, x[None], target)[0]
@@ -414,7 +425,7 @@ class TSHAPExplainer(PerturbationExplainer):
         batch = np.ascontiguousarray(batch, dtype=np.float32)
         return predict_probs(model, batch)[:, target]
 
-    def _full_background(self, x: np.ndarray) -> np.ndarray:
+    def _full_background(self, x: np.ndarray, prng: np.random.Generator) -> np.ndarray:
         """Replace every timestep of *x* with the chosen baseline → ``x̄``."""
         all_idx = np.arange(x.shape[1])
         if self._is_baseline_func:
@@ -423,7 +434,7 @@ class TSHAPExplainer(PerturbationExplainer):
                 all_idx,
                 baseline=self.perturb_baseline,
                 reference=self.centroid,
-                prng=self.prng,
+                prng=prng,
             )
         return self._perturb_func(x, all_idx)
 

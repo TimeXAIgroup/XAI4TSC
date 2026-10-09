@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
+from .._random import DEFAULT_SEED, resolve_rng
 from ..data.base import class_names, decode_labels
 from ..models.base import ModelBase, predict_probs
 from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
@@ -67,7 +68,10 @@ def generate_explanation(
     samples : int, optional
         Number of random samples to explain if no indices supplied, by default 5
     prng : np.random.Generator, optional
-        Random number generator to sample random indices, by default None
+        Generator used to pick random sample indices. When ``None`` a generator
+        seeded with :data:`~xai4tsc.DEFAULT_SEED` is used, so the selection is
+        reproducible; the runner passes a per-dataset generator so every
+        explainer scores the same samples.
     device : str, optional
         Device to calculate on, by default ``"cpu"``.
     save_path : Path | str, optional
@@ -87,8 +91,7 @@ def generate_explanation(
     """
     if visualization_type is None:
         visualization_type = ["bubbles"]
-    if prng is None:
-        prng = np.random.default_rng()
+    prng = resolve_rng(DEFAULT_SEED, prng)
 
     model.eval()
     # Samples to explain are in list form

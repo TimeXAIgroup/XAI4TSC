@@ -12,7 +12,7 @@ from experiment_runner.config import (
     _normalize_train_switch,
     config_resolve,
     config_sanity_check,
-    disambiguate,
+    result_identities,
     validate_user_config,
 )
 
@@ -330,36 +330,37 @@ def test_sanity_check_external_wrong_base_raises(ext_source, clean_registries):
         config_sanity_check(cfg)
 
 
-# ── disambiguate ──────────────────────────────────────────────────────────────
+# ── result_identities ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_disambiguate_empty():
-    assert disambiguate([]) == []
+def test_result_identities_empty():
+    assert result_identities([])[0] == []
 
 
 @pytest.mark.unit
-def test_disambiguate_all_unique_names_pass_through_unchanged():
+def test_result_identities_all_unique_names_pass_through_unchanged():
     # The common case must be byte-identical to pre-identity behaviour, so that
     # existing configs keep writing to exactly the same paths.
     names = ["Complexity", "Pixel-Flipping", "Sparseness"]
-    assert disambiguate(names) == names
+    assert result_identities(names)[0] == names
 
 
 @pytest.mark.unit
-def test_disambiguate_suffixes_only_the_duplicates():
-    assert disambiguate(["TSHAP", "TSHAP", "SIGN"]) == ["TSHAP_1", "TSHAP_2", "SIGN"]
+def test_result_identities_suffixes_only_the_duplicates():
+    identities, _ = result_identities(["TSHAP", "TSHAP", "SIGN"])
+    assert identities == ["TSHAP_1", "TSHAP_2", "SIGN"]
 
 
 @pytest.mark.unit
-def test_disambiguate_three_way_duplicate():
-    assert disambiguate(["X", "X", "X"]) == ["X_1", "X_2", "X_3"]
+def test_result_identities_three_way_duplicate():
+    assert result_identities(["X", "X", "X"])[0] == ["X_1", "X_2", "X_3"]
 
 
 @pytest.mark.unit
-def test_disambiguate_interleaved_groups_count_independently():
+def test_result_identities_interleaved_groups_count_independently():
     # Each name's counter is its own, and positions are preserved.
-    assert disambiguate(["A", "B", "A", "C", "B"]) == [
+    assert result_identities(["A", "B", "A", "C", "B"])[0] == [
         "A_1",
         "B_1",
         "A_2",
@@ -369,29 +370,36 @@ def test_disambiguate_interleaved_groups_count_independently():
 
 
 @pytest.mark.unit
-def test_disambiguate_preserves_input_length_and_order():
+def test_result_identities_preserves_input_length_and_order():
     names = ["m", "n", "m", "m", "o"]
-    out = disambiguate(names)
+    out = result_identities(names)[0]
     assert len(out) == len(names)
     # Every identity still starts with the name it came from.
     assert all(ident.startswith(name) for ident, name in zip(out, names, strict=True))
 
 
 @pytest.mark.unit
-def test_disambiguate_warns_when_a_generated_suffix_hits_a_literal_name(caplog):
+def test_result_identities_warns_when_a_generated_suffix_hits_a_literal_name(caplog):
     # Two "X" entries generate X_1/X_2; a literal "X_1" then collides with the
     # generated one. The run stays usable, but the user is told.
     with caplog.at_level("WARNING", logger="xai4tsc.runner.config"):
-        out = disambiguate(["X", "X", "X_1"])
+        out = result_identities(["X", "X", "X_1"])[0]
     assert out == ["X_1", "X_2", "X_1"]
     assert "not unique after disambiguation" in caplog.text
     assert "X_1" in caplog.text
 
 
 @pytest.mark.unit
-def test_disambiguate_does_not_warn_for_a_clean_result(caplog):
+def test_result_identities_occurrences_are_stable_when_a_duplicate_is_added():
+    """The half the derived seeds key on; the identity half is not stable here."""
+    assert result_identities(["A"]) == (["A"], [1])
+    assert result_identities(["A", "A"]) == (["A_1", "A_2"], [1, 2])
+
+
+@pytest.mark.unit
+def test_result_identities_does_not_warn_for_a_clean_result(caplog):
     with caplog.at_level("WARNING", logger="xai4tsc.runner.config"):
-        disambiguate(["A", "A", "B"])
+        result_identities(["A", "A", "B"])[0]
     assert "not unique" not in caplog.text
 
 
@@ -948,3 +956,45 @@ def test_channel_first_is_a_settable_call_param():
         "default_settings"
     ]["metric_call_params"]
     assert overridden["channel_first"] is False
+
+
+# ── general.seed / general.reproducible types ─────────────────────────────────
+
+
+@pytest.mark.unit
+def test_non_integer_general_seed_is_an_error():
+    """A quoted seed would otherwise raise deep inside numpy instead of here."""
+    cfg = _valid_config()
+    cfg["general"] = {"seed": "2025"}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    with pytest.raises(ValueError, match=r"general\.seed"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_boolean_general_seed_is_an_error():
+    """`seed: true` is a mistake, not seed 1 - bool is an int subclass."""
+    cfg = _valid_config()
+    cfg["general"] = {"seed": True}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    with pytest.raises(ValueError, match=r"general\.seed"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_non_boolean_reproducible_is_an_error():
+    """A quoted "false" is a non-empty string, so it would be read as true."""
+    cfg = _valid_config()
+    cfg["general"] = {"reproducible": "false"}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    with pytest.raises(ValueError, match=r"general\.reproducible"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_null_general_seed_is_accepted():
+    """`None` is the documented way to ask for an unseeded run."""
+    cfg = _valid_config()
+    cfg["general"] = {"seed": None}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    assert config_sanity_check(cfg) is True

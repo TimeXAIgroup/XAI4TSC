@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
 from .._domains import Domain
+from .._random import DEFAULT_SEED, resolve_rng
 from .data_loaders import load_json, load_metadata
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,7 @@ def _split_dataset(
     metadata: pd.DataFrame | None = None,
     train_split: float = 0.8,
     val_split: float = 0.0,
-    random_state: int = 42,
+    random_state: int | None = DEFAULT_SEED,
     encode: str = "label",
     stratify: bool = True,
     class_order: list | None = None,
@@ -592,7 +593,7 @@ class DatasetBase(ABC):
         self,
         train_split: float = 0.8,
         val_split: float = 0.0,
-        random_state: int = 42,
+        random_state: int | None = DEFAULT_SEED,
         encode: str = "label",
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
@@ -608,8 +609,10 @@ class DatasetBase(ABC):
             Fraction of samples for training.
         val_split : float
             Fraction of samples for validation (0 disables validation set).
-        random_state : int
-            Seed for reproducible splits.  Ignored when *rng* is provided.
+        random_state : int or None
+            Seed for reproducible splits, :data:`~xai4tsc.DEFAULT_SEED` by
+            default.  ``None`` draws from OS entropy and is not reproducible.
+            Ignored when *rng* is provided.
         encode : str
             Label encoding scheme: ``"label"`` (default), ``"onehot"``, or
             ``"ordinal"``.
@@ -638,8 +641,7 @@ class DatasetBase(ABC):
             ``(splits, fitted_encoder)`` where *splits* is a list of
             ``(X, y, metadata)`` tuples in order ``[train, test, val]``.
         """
-        if rng is None:
-            rng = np.random.default_rng(random_state)
+        rng = resolve_rng(random_state, rng)
         sklearn_seed = int(rng.integers(2**31))
 
         # Store rng so load() implementations can use it for pre-pad restriction.

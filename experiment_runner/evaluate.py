@@ -32,6 +32,7 @@ def _evaluate(
     data: np.ndarray | None = None,
     labels: np.ndarray | None = None,
     device: str = "cpu",
+    seed: int | None = None,
 ) -> float | np.ndarray | None:
     """
     Runner wrapper: unpack metric_conf dict and delegate to evaluate().
@@ -51,6 +52,11 @@ def _evaluate(
         Ground-truth labels.
     device : str
         Compute device.
+    seed : int or None
+        Seed derived for this result, handed to :func:`~xai4tsc.evaluate`, which
+        offers it only to a backend that declares a ``seed`` - the randomisation
+        metrics (the MPRT family, Random Logit). The rest ignore it, and a seed
+        the config states wins over this one.
 
     Returns
     -------
@@ -66,6 +72,7 @@ def _evaluate(
         metric_class_params=metric_conf["metric_class_params"],
         metric_call_params=metric_conf["metric_call_params"],
         device=device,
+        seed=seed,
     )
 
 

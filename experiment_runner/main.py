@@ -35,6 +35,7 @@ from xai4tsc.evaluation.evaluate import ground_truth_missing, required_domains_f
 from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
+from xai4tsc.utils import resolve_rng
 from xai4tsc.utils.utils import merge_dicts
 from xai4tsc.xai import is_multi_target
 
@@ -43,13 +44,14 @@ from .config import (
     ConfigIssues,
     config_resolve,
     config_sanity_check,
-    disambiguate,
+    result_identities,
     validate_user_config,
 )
 from .download_datasets import ensure_datasets_cached
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
 from .log_setup import _add_file_logging, _setup_console_logging
+from .seeding import boundary_seed, seed_globals
 from .utils import (
     _METRICS_COLUMNS,
     _aggregate_metric,
@@ -144,30 +146,32 @@ def _run(config: dict, issues: ConfigIssues) -> int:
 
     # Construct identifiers for each dataset/model/explainer/metric, allows
     # running same instances multiple times
-    dataset_ids = disambiguate([d["dataset"] for d in d_con["datasets"]])
-    model_ids = disambiguate([m["model"] for m in t_con["models"]])
-    explainer_ids = disambiguate(
-        [_explainer_display_name(e) for e in e_con["explainers"]]
-    )
-    metric_ids = disambiguate([m["metric"] for m in eval_con["metrics"]])
+    dataset_names = [d["dataset"] for d in d_con["datasets"]]
+    model_names = [m["model"] for m in t_con["models"]]
+    explainer_names = [_explainer_display_name(e) for e in e_con["explainers"]]
+    metric_names = [m["metric"] for m in eval_con["metrics"]]
+    # Display identities name the output paths and result rows; the occurrence
+    # numbers key the derived seeds.
+    dataset_ids, dataset_occurrences = result_identities(dataset_names)
+    model_ids, model_occurrences = result_identities(model_names)
+    explainer_ids, explainer_occurrences = result_identities(explainer_names)
+    metric_ids, metric_occurrences = result_identities(metric_names)
     logger.info("Running experiment on %d dataset(s).", len(d_con["datasets"]))
 
-    # Make results reproducible
-    seed = config["general"]["seed"]
+    # Make results reproducible. Each dataset, model, explainer and metric
+    # derives its own seed from this one plus its position in the config.
     reproducible = config["general"]["reproducible"]
+    run_seed = config["general"]["seed"] if reproducible else None
     if reproducible:
-        np.random.seed(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        torch.manual_seed(seed)
-        logger.info("Setting seed to: %s", seed)
+        seed_globals(run_seed)
+        logger.info("Run seed: %s (per-result seeds derive from it)", run_seed)
     else:
         logger.info(
-            "reproducible: false - splits are drawn unseeded and are neither "
+            "reproducible: false - draws are unseeded and splits are neither "
             "read from nor written to the split cache."
         )
-    prng = np.random.default_rng(seed if reproducible else None)
-    legacy_prng = int(prng.integers(2**31))
 
     # check for computational devices
     if g_con["device"] == "use_available":
@@ -217,6 +221,16 @@ def _run(config: dict, issues: ConfigIssues) -> int:
         ds = splits = encoder = None
         train_data = train_labels = test_data = test_labels = None
         dataset_id = dataset_ids[d_ind]
+        dataset_seed = boundary_seed(
+            run_seed, "dataset", dataset["dataset"], dataset_occurrences[d_ind]
+        )
+        seed_globals(dataset_seed)
+        # The split and the explained-sample selection each get their own
+        # stream, so neither depends on how much the other drew first.
+        split_seed = boundary_seed(dataset_seed, "split", dataset["dataset"], log=False)
+        sample_seed = boundary_seed(
+            dataset_seed, "samples", dataset["dataset"], log=False
+        )
         try:
             # Log dataset preparation
             logger.info(
@@ -299,7 +313,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         dataset["dataset"],
                         dataset["train_split"],
                         dataset["val_split"],
-                        legacy_prng,
+                        split_seed,
                         dataset["encode"],
                         allow_padding=dataset.get("allow_padding", False),
                         allow_imputation=dataset.get("allow_imputation", False),
@@ -324,7 +338,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             val_split=dataset["val_split"],
                             encode=dataset["encode"],
                             impute_missing=dataset.get("allow_imputation", False),
-                            rng=prng,
+                            rng=resolve_rng(split_seed),
                             stratify=dataset.get("stratify", True),
                             class_order=dataset.get("classes") or None,
                         )
@@ -399,6 +413,17 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         model_path / f"{dataset_id}_{model_id}.log"
                     )
 
+                    # Derived after the log handler is attached, so the seed
+                    # lands in this model's own log, and before load_model,
+                    # because weight init draws from the global torch stream.
+                    model_seed = boundary_seed(
+                        dataset_seed,
+                        "model",
+                        model_config["model"],
+                        model_occurrences[m_ind],
+                    )
+                    seed_globals(model_seed)
+
                     # Load the model
                     model_wrapper = load_model(
                         model_config, device, save_path=model_path
@@ -456,6 +481,13 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             # Log explanation generation. For wrapper methods
                             # show "WRAPPER-BASE" (e.g. SIGN-Integrated_Gradients).
                             explainer = explainer_ids[e_ind]
+                            explainer_seed = boundary_seed(
+                                model_seed,
+                                "explainer",
+                                explainer_names[e_ind],
+                                explainer_occurrences[e_ind],
+                            )
+                            seed_globals(explainer_seed)
                             explanation_dir = (
                                 model_path
                                 / "explanations"
@@ -478,7 +510,10 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 data=test_data,
                                 labels=test_labels,
                                 encoder=encoder,
-                                prng=prng,
+                                # Derived from the dataset, not the explainer,
+                                # so every explainer scores the same samples.
+                                prng=resolve_rng(sample_seed),
+                                seed=explainer_seed,
                                 device=device,
                                 config=config,
                                 explainer_config=explainer_config,
@@ -518,6 +553,14 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 )
                                 metric_name = metric_config["metric"]
                                 metric_id = metric_ids[metric_ind]
+                                # Before the skip checks below, so a skipped
+                                # row still records the seed it would have used.
+                                metric_seed = boundary_seed(
+                                    explainer_seed,
+                                    "metric",
+                                    metric_name,
+                                    metric_occurrences[metric_ind],
+                                )
                                 metric_label = (
                                     f"{dataset_id}/{model_id}/{explainer}/{metric_id}"
                                 )
@@ -549,6 +592,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             explainer,
                                             metric_ids[metric_ind],
                                             "skipped-domain",
+                                            seed=metric_seed,
                                             detail=(
                                                 f"requires {sorted(domains)}, "
                                                 "explanation is "
@@ -576,6 +620,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             explainer,
                                             metric_ids[metric_ind],
                                             "skipped-unsupported",
+                                            seed=metric_seed,
                                             detail=blocked,
                                         )
                                     )
@@ -599,6 +644,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             explainer,
                                             metric_ids[metric_ind],
                                             "skipped-no-ground-truth",
+                                            seed=metric_seed,
                                             detail=no_gt,
                                         )
                                     )
@@ -637,6 +683,15 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             class_labels = np.full(
                                                 len(explanation.indices), class_idx
                                             )
+                                            # One row per class, so one seed
+                                            # per class rather than per metric.
+                                            class_seed = boundary_seed(
+                                                metric_seed,
+                                                "class",
+                                                str(class_idx),
+                                                log=False,
+                                            )
+                                            seed_globals(class_seed)
                                             result = _evaluate(
                                                 model=model_wrapper,
                                                 metric_conf=metric_config,
@@ -644,6 +699,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 data=exp_data,
                                                 labels=class_labels,
                                                 device=device,
+                                                seed=class_seed,
                                             )
                                             agg = _aggregate_metric(result)
                                             if agg is not None:
@@ -654,6 +710,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             else None
                                         )
                                     else:
+                                        seed_globals(metric_seed)
                                         evaluation = _evaluate(
                                             model=model_wrapper,
                                             metric_conf=metric_config,
@@ -661,6 +718,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             data=exp_data,
                                             labels=test_labels[explanation.indices],
                                             device=device,
+                                            seed=metric_seed,
                                         )
                                         score = _aggregate_metric(evaluation)
 
@@ -672,6 +730,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 explainer,
                                                 metric_id,
                                                 "nan",
+                                                seed=metric_seed,
                                                 detail=(
                                                     "metric returned an empty or "
                                                     "all-NaN result"
@@ -686,6 +745,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 explainer,
                                                 metric_id,
                                                 "ok",
+                                                seed=metric_seed,
                                                 score=score,
                                             )
                                         )
@@ -713,6 +773,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             explainer,
                                             metric_id,
                                             "error",
+                                            seed=metric_seed,
                                             detail=f"{type(exc).__name__}: {exc}",
                                         )
                                     )

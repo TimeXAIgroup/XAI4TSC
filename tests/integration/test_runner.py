@@ -81,7 +81,16 @@ def test_runner_end_to_end(ucr_dataset_path, tmp_path, monkeypatch):
 
     df = pd.read_csv(metrics_csv)
     assert not df.empty
-    for col in ("dataset", "model", "explainer", "metric", "status", "score", "detail"):
+    for col in (
+        "dataset",
+        "model",
+        "explainer",
+        "metric",
+        "seed",
+        "status",
+        "score",
+        "detail",
+    ):
         assert col in df.columns
     # Non-"ok" rows carry an empty score by design, so only successes are checked.
     assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
@@ -651,6 +660,7 @@ def test_header_only_metrics_csv_when_nothing_succeeds(
         "model",
         "explainer",
         "metric",
+        "seed",
         "status",
         "score",
         "detail",
@@ -1135,3 +1145,155 @@ def test_empty_list_warning_reaches_the_log_file(
 
     log = (_experiment_dir(results_rel) / "experiment.log").read_text()
     assert "evaluation_config.metrics: this list is empty" in log
+
+
+# ── per-result reproducibility (R31) ──────────────────────────────────────────
+
+
+def _make_local_dataset(directory: Path, seed: int, n: int = 40) -> Path:
+    """Write a small self-contained ``(B, C, T)`` dataset and its labels."""
+    directory.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    labels = rng.integers(0, 2, n)
+    arr = rng.normal(size=(n, 1, 48)) + labels[:, None, None]
+    np.save(directory / "data.npy", arr.astype(np.float32))
+    (directory / "label.json").write_text(
+        json.dumps([{"label": str(int(y))} for y in labels])
+    )
+    return directory
+
+
+def _score_of(results_rel: str, **keys: str) -> float:
+    """Return the single metrics.csv score matching *keys*."""
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    for column, value in keys.items():
+        df = df[df[column] == value]
+    assert len(df) == 1, f"expected one row for {keys}, got {len(df)}"
+    assert df.iloc[0]["status"] == "ok", df.iloc[0]["detail"]
+    return float(df.iloc[0]["score"])
+
+
+@pytest.mark.integration
+def test_a_result_is_identical_alone_and_in_a_multi_entry_run(tmp_path, monkeypatch):
+    """
+    The end-to-end regression test for R31.
+
+    A single run seed used to be applied once, after which the RNG advanced through
+    every split, model and explanation - so a result's numbers depended on which
+    entries ran before it, and re-running one dataset to check a number gave a
+    different number. The same (dataset, model, explainer, metric) row must now
+    score the same whether it runs alone or surrounded by other entries.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    data_dir = _make_local_dataset(tmp_path / "local_data", seed=0)
+    target = {
+        "dataset": "local_ds",
+        "model": "FCN",
+        "explainer": "Integrated_Gradients",
+        "metric": "Complexity",
+    }
+
+    def run(results_rel: str, crowded: bool) -> float:
+        config = _resolve_config(tmp_path / f"cache_{results_rel[-5:]}", results_rel)
+        config["data_config"]["datasets"] = [
+            {"dataset": "local_ds", "path": str(data_dir)}
+        ]
+        models = [{"model": "FCN", "init_params": {"in_channels": 1, "num_classes": 2}}]
+        explainers = [{"method": "Integrated_Gradients"}]
+        metrics = [{"metric": "Complexity"}]
+        if crowded:
+            # Extra entries *before* the target ones, which is what used to move it.
+            models = [
+                {
+                    "model": "LeNet",
+                    "init_params": {"in_channels": 1, "num_classes": 2},
+                },
+                *models,
+            ]
+            explainers = [{"method": "DeepLift"}, *explainers]
+            metrics = [{"metric": "Sparseness"}, *metrics]
+        config["train_config"]["models"] = models
+        config["explanation_config"]["explainers"] = explainers
+        config["evaluation_config"]["metrics"] = metrics
+        assert main(str(_write_config(config, tmp_path / results_rel[-5:]))) == 0
+        return _score_of(results_rel, **target)
+
+    (tmp_path / "alone").mkdir()
+    (tmp_path / "crowd").mkdir()
+    alone = run("tests/_runner_seed_alone", crowded=False)
+    crowded = run("tests/_runner_seed_crowd", crowded=True)
+    assert alone == crowded, (
+        f"the same result scored {alone} alone and {crowded} beside other entries"
+    )
+
+
+@pytest.mark.integration
+def test_split_cache_key_matches_the_split_it_contains(tmp_path, monkeypatch):
+    """
+    A dataset's cache folder must describe the split stored under it.
+
+    The folder name used to carry a value drawn once per run while the split seed
+    was drawn per dataset from the shared stream, so the same dataset in two
+    positions wrote different splits under one key - and a later run could be
+    served a split its own config would never have produced.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    first = _make_local_dataset(tmp_path / "ds_a", seed=1)
+    second = _make_local_dataset(tmp_path / "ds_b", seed=2)
+    entries = {
+        "ds_a": {"dataset": "ds_a", "path": str(first)},
+        "ds_b": {"dataset": "ds_b", "path": str(second)},
+    }
+
+    def run(results_rel: str, order: list[str]) -> set[str]:
+        cache = tmp_path / f"cache_{order[0]}"
+        config = _resolve_config(cache, results_rel)
+        config["data_config"]["datasets"] = [entries[name] for name in order]
+        config["train_config"]["models"] = [
+            {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
+        ]
+        assert main(str(_write_config(config, cache.parent / order[0]))) == 0
+        return {p.name for p in (cache / "splits").glob("ds_b_*")}
+
+    (tmp_path / "ds_b_first").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "ds_a_first").mkdir(parents=True, exist_ok=True)
+    as_first = run("tests/_runner_key_first", ["ds_b", "ds_a"])
+    as_second = run("tests/_runner_key_second", ["ds_a", "ds_b"])
+
+    assert as_first and as_second
+    assert as_first == as_second, (
+        "the same dataset landed in different cache folders depending on its "
+        f"position: {as_first} vs {as_second}"
+    )
+
+
+@pytest.mark.integration
+def test_metrics_csv_records_the_derived_seed(tmp_path, monkeypatch, ucr_dataset_path):
+    """Every row carries the seed that produced it, so it can be re-run."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_seed_column"
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    config = _resolve_config(cache_root, results_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert not df.empty
+    assert df["seed"].notna().all(), "a seeded run must record a seed on every row"
+    assert (df["seed"].astype("int64") >= 0).all()
+
+
+@pytest.mark.integration
+def test_reproducible_false_leaves_the_seed_column_empty(
+    tmp_path, monkeypatch, ucr_dataset_path
+):
+    """An unseeded run must not claim a seed it never applied."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_seed_column_unseeded"
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    config = _resolve_config(cache_root, results_rel)
+    config["general"]["reproducible"] = False
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    assert not df.empty
+    assert df["seed"].isna().all()

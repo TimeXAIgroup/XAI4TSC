@@ -338,3 +338,97 @@ def test_freqrise_infers_targets_from_a_bare_nn_module():
 
     assert out.shape[0] == 1
     assert np.all(np.isfinite(out))
+
+
+# ── seeding: a local generator, and a pure explain() ──────────────────────────
+
+
+@pytest.mark.unit
+def test_freqrise_does_not_touch_the_global_torch_rng():
+    """
+    Regression test: FreqRISE used to call torch.manual_seed inside explain().
+
+    That rewound the process-wide stream, so every later explainer, metric
+    perturbation and model weight init inherited FreqRISE's seed.
+    """
+    model = _TinyNet(1, 32, 2)
+    data = np.random.default_rng(0).standard_normal((2, 1, 32)).astype(np.float32)
+    explainer = FreqRISEExplainer(
+        domain="fft", num_batches=2, batch_size=2, num_cells=4, seed=0
+    )
+
+    torch.manual_seed(7)
+    before = torch.rand(3)
+
+    explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+
+    torch.manual_seed(7)
+    assert torch.equal(before, torch.rand(3))
+
+
+@pytest.mark.unit
+def test_freqrise_repeated_calls_on_one_instance_are_identical():
+    """The metrics that re-explain reuse one instance, so the draw must not advance."""
+    model = _TinyNet(1, 32, 2)
+    data = np.random.default_rng(1).standard_normal((2, 1, 32)).astype(np.float32)
+    explainer = FreqRISEExplainer(
+        domain="fft", num_batches=2, batch_size=2, num_cells=4
+    )
+
+    first = explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    second = explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    assert np.array_equal(first, second)
+
+
+@pytest.mark.unit
+def test_freqrise_unseeded_follows_the_ambient_global_stream():
+    """
+    `seed=None` must stay non-reproducible.
+
+    A bare ``torch.Generator()`` carries a fixed default seed, so mapping ``None``
+    onto one would make an unseeded run constant - the opposite of what
+    ``reproducible: false`` asks for.
+    """
+    model = _TinyNet(1, 32, 2)
+    data = np.random.default_rng(2).standard_normal((2, 1, 32)).astype(np.float32)
+    explainer = FreqRISEExplainer(
+        domain="fft", num_batches=2, batch_size=2, num_cells=4, seed=None
+    )
+
+    torch.manual_seed(5)
+    first = explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    second = explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    assert not np.array_equal(first, second)
+
+    torch.manual_seed(5)
+    assert np.array_equal(
+        first, explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("cls", "kwargs"),
+    [
+        (RandomFrequencyExplainer, {}),
+        (RandomTimeFreqExplainer, {"transform": _stft_cfg()}),
+    ],
+)
+def test_random_baselines_are_pure_and_input_independent(cls, kwargs):
+    """These read only the shape of the data, so a stability metric scores them 0."""
+    model = _TinyNet(1, 32, 2)
+    rng = np.random.default_rng(3)
+    data = rng.standard_normal((2, 1, 32)).astype(np.float32)
+    perturbed = data + 0.01 * rng.standard_normal(data.shape).astype(np.float32)
+    explainer = cls(**kwargs)
+
+    first = explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    assert np.array_equal(
+        first, explainer.explain(model, _make_exp(data), "cpu", [0, 1])
+    )
+    assert np.array_equal(
+        first, explainer.explain(model, _make_exp(perturbed), "cpu", [0, 1])
+    )
+    assert not np.array_equal(
+        first, cls(**kwargs, seed=123).explain(model, _make_exp(data), "cpu", [0, 1])
+    )

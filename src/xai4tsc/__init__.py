@@ -4,7 +4,9 @@ Top-level namespace for the xai4tsc package.
 Exports the public API: registries (``MODELS``, ``EXPLAINERS``, ``METRICS``),
 registration functions, and the main entry points
 :func:`generate_explanation`, :func:`evaluate`, :func:`load_dataset`, and
-:func:`plot_relevance`.
+:func:`plot_relevance`, plus the seeding helpers (:data:`DEFAULT_SEED`,
+:func:`derive_seed`, :func:`resolve_rng`) that make a result reproducible on
+its own.
 """
 
 import logging
@@ -54,10 +56,13 @@ from .models import (
     register_model,
 )
 from .utils import (
+    DEFAULT_SEED,
+    derive_seed,
     plot_perturbation_curve,
     plot_relevance,
     plot_relevance_f,
     plot_relevance_tf,
+    resolve_rng,
 )
 from .xai import (
     EXPLAINERS,
@@ -105,6 +110,10 @@ __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
     "Explanation",
     "DataType",
     "Domain",
+    # Randomness
+    "DEFAULT_SEED",
+    "derive_seed",
+    "resolve_rng",
     # Entry points
     "generate_explanation",
     "evaluate",

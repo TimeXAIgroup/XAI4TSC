@@ -17,6 +17,8 @@ from collections.abc import Callable
 
 import numpy as np
 
+from .._random import DEFAULT_SEED, resolve_rng
+
 logger = logging.getLogger(__name__)
 
 #: Baseline strategies understood by :func:`baseline_replacement`.
@@ -55,8 +57,9 @@ def baseline_replacement(
     reference : np.ndarray, optional
         Background waveform of shape ``(C, T)`` used by ``"centroid"``.
     prng : np.random.Generator, optional
-        Random generator for ``"random"``; a default generator is used when
-        ``None``.
+        Random generator for ``"random"``; when ``None`` a generator seeded
+        with :data:`~xai4tsc.DEFAULT_SEED` is used, so the draw is reproducible
+        unless a caller shares its own stream.
     **kwargs : object
         Ignored; accepted so callers can pass through extra perturbation
         options uniformly.
@@ -95,7 +98,7 @@ def baseline_replacement(
     elif baseline == "mean":
         out[:, idx] = arr.mean(axis=1, keepdims=True)
     elif baseline == "random":
-        rng = prng if prng is not None else np.random.default_rng()
+        rng = resolve_rng(DEFAULT_SEED, prng)
         mean = arr.mean(axis=1, keepdims=True)
         std = arr.std(axis=1, keepdims=True)
         noise = rng.standard_normal(size=(arr.shape[0], idx.size))

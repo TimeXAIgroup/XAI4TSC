@@ -15,15 +15,30 @@ import yaml
 logger = logging.getLogger("xai4tsc.runner.config")
 
 
-def disambiguate(names: list[str]) -> list[str]:
+def result_identities(names: list[str]) -> tuple[list[str], list[int]]:
     """
-    Make a list of display names unique by suffixing only the duplicates.
+    Derive the display identity and the occurrence number of every entry.
 
-    Output paths and ``metrics.csv`` rows are keyed on an entry's display name,
-    so two config entries sharing a name overwrite each other's artifacts and
-    produce indistinguishable result rows. Suffixing ``_1.._N`` onto just the
-    repeated names keeps every unique name - the overwhelmingly common case -
-    byte-identical to what earlier versions wrote.
+    One pass over the names serves both, because both answer the same question -
+    which config entry is this - for two consumers that need different trade-offs:
+
+    * the **display identity** names output paths and ``metrics.csv`` rows, so two
+      entries sharing a name would otherwise overwrite each other's artifacts and
+      produce indistinguishable rows. Only the repeated names are suffixed
+      ``_1.._N``, which keeps every unique name - the overwhelmingly common case -
+      byte-identical to what earlier versions wrote.
+    * the **occurrence number** keys a result's derived seed
+      (:func:`~experiment_runner.seeding.boundary_seed`), and is always present for
+      exactly that reason. The identity is not usable there: it suffixes only
+      duplicates, so ``["A"]`` yields ``["A"]`` while ``["A", "A"]`` yields
+      ``["A_1", "A_2"]``, and adding a second copy of an entry would silently change
+      the first copy's seed. A running count leaves the first entry's number alone
+      while still separating the copies, so duplicating an entry to observe variance
+      still shows variance.
+
+    A name's total count is its highest occurrence number, which is what decides
+    whether it needs a suffix - so the identity is derived from the occurrences
+    rather than counted separately.
 
     Parameters
     ----------
@@ -33,28 +48,28 @@ def disambiguate(names: list[str]) -> list[str]:
 
     Returns
     -------
-    list of str
-        One identity per input name, positionally aligned. Names occurring once
-        are returned unchanged; names occurring more than once gain a ``_1``,
-        ``_2``, ... suffix in config order.
+    tuple[list[str], list[int]]
+        ``(identities, occurrences)``, both positionally aligned with *names*.
 
     Examples
     --------
-    >>> disambiguate(["TSHAP", "TSHAP", "SIGN"])
-    ['TSHAP_1', 'TSHAP_2', 'SIGN']
+    >>> result_identities(["TSHAP", "TSHAP", "SIGN"])
+    (['TSHAP_1', 'TSHAP_2', 'SIGN'], [1, 2, 1])
+    >>> result_identities(["TSHAP"])[1] == result_identities(["TSHAP", "TSHAP"])[1][:1]
+    True
     """
-    counts: dict[str, int] = {}
-    for name in names:
-        counts[name] = counts.get(name, 0) + 1
-
+    occurrences: list[int] = []
     seen: dict[str, int] = {}
-    identities: list[str] = []
     for name in names:
-        if counts[name] == 1:
-            identities.append(name)
-            continue
         seen[name] = seen.get(name, 0) + 1
-        identities.append(f"{name}_{seen[name]}")
+        occurrences.append(seen[name])
+
+    # The last occurrence number recorded for a name is its total count, so no
+    # second counting pass is needed to tell a duplicate from a unique name.
+    identities = [
+        name if seen[name] == 1 else f"{name}_{occurrence}"
+        for name, occurrence in zip(names, occurrences, strict=True)
+    ]
 
     # A generated suffix can collide with a name that was already spelled that
     # way (e.g. entries "X", "X" and a literal "X_1"). Warn rather than raise:
@@ -66,7 +81,7 @@ def disambiguate(names: list[str]) -> list[str]:
             "or remove the conflicting entries to keep their outputs separate.",
             ", ".join(sorted(duplicates)),
         )
-    return identities
+    return identities, occurrences
 
 
 def register_external_components(config: dict) -> None:
@@ -310,7 +325,8 @@ def _normalize_train_switch(
     """
     Normalise every ``train`` value in *train_config* to a bool or ``None``.
 
-    ``train`` is a switch: truthy trains, ``false`` or absent does not.  The
+    ``train`` is a switch: any value read as true trains, ``false`` or absent does
+    not.  The
     legacy values ``"till_epoch"`` and ``"for_epochs"`` never differed in
     behaviour - neither was ever read - so both normalise to ``True`` with one
     deprecation warning per run.  Rewriting here means the runner only ever sees
@@ -623,6 +639,40 @@ def _configured_data_domains(config: dict) -> set:
     return domains or {Domain.TIME}
 
 
+def _validate_general_seeding(general: dict, issues: ConfigIssues) -> None:
+    """
+    Check that ``general.seed`` and ``general.reproducible`` have usable types.
+
+    Both reach the RNG unchecked otherwise: a quoted ``seed: "2025"`` raises deep
+    inside numpy rather than at config time, and ``reproducible: "false"`` is a
+    non-empty string, so it is read as true and silently turns seeding back on.
+
+    Parameters
+    ----------
+    general : dict
+        The resolved ``general`` section.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    seed = general.get("seed")
+    # bool is an int subclass, and `seed: true` is a mistake rather than seed 1.
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        issues.error(
+            "general.seed",
+            f"must be an integer or null, got {type(seed).__name__} ({seed!r}). "
+            "Every result's seed is derived from this value.",
+        )
+
+    reproducible = general.get("reproducible")
+    if reproducible is not None and not isinstance(reproducible, bool):
+        issues.error(
+            "general.reproducible",
+            f"must be true or false, got {type(reproducible).__name__} "
+            f'({reproducible!r}). A quoted "false" is a non-empty string and '
+            "would be read as true.",
+        )
+
+
 def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> bool:
     """
     Check whether the supplied config contains errors.
@@ -673,6 +723,7 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     issues = ConfigIssues() if issues is None else issues
 
     _normalize_train_switch(config["train_config"], issues)
+    _validate_general_seeding(config.get("general", {}), issues)
 
     # Lazy imports to avoid circular dependencies at module level
     from xai4tsc.xai.explain import EXPLAINERS

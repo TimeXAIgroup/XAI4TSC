@@ -314,3 +314,117 @@ def test_every_unblocked_metric_actually_calls_our_explainer(setup, monkeypatch)
             metric_call_params={"softmax": True},
         )
         assert calls, f"{metric} never called the supplied explain_func"
+
+
+# ── the closure stays pure for a stochastic explainer ─────────────────────────
+
+
+def _stochastic_exp(method: str, params: dict):
+    """Build a real explanation from a stochastic explainer."""
+    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
+    data = rng.standard_normal((4, 1, 24)).astype(np.float32)
+    labels = np.array([0, 1, 0, 1])
+    model = _Tiny().eval()
+    exp = _get_explanation(
+        method=method,
+        model=model,
+        data=data,
+        labels=labels,
+        encoder=LabelEncoder().fit(labels),
+        params=params,
+        targets="label",
+        orig_indices=np.arange(4),
+        device="cpu",
+    )
+    return model, exp
+
+
+_STOCHASTIC = [
+    ("FreqRISE", {"domain": "fft", "num_batches": 2, "batch_size": 2, "num_cells": 4}),
+    ("Random_Frequency", {}),
+    ("TSHAP", {"perturb_baseline": "random", "stride": 8, "window_length": 8}),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method", "params"), _STOCHASTIC, ids=[m for m, _ in _STOCHASTIC]
+)
+def test_closure_is_pure_for_a_stochastic_explainer(method, params):
+    """
+    A re-explanation must match the attribution it is compared against.
+
+    The closure builds one explainer and calls it repeatedly, so an explainer that
+    advanced its generator between calls would make every RE_EXPLAIN metric a
+    function of how many times that metric happens to re-explain.
+    """
+    model, exp = _stochastic_exp(method, params)
+    f = QuantusEvaluator._make_explain_func(exp, "cpu")
+    targets = np.array([0, 1, 0, 1])
+
+    first = f(model, exp.data, targets)
+    assert np.allclose(first, f(model, exp.data, targets))
+    assert np.allclose(first, QuantusEvaluator.real_attribution(exp.exp_values))
+
+
+@pytest.mark.unit
+def test_max_sensitivity_is_nonzero_for_a_stochastic_explainer():
+    """
+    TSHAP with the "random" baseline is stochastic *and* input-dependent.
+
+    It has to be a time-domain explainer: Max-Sensitivity requires the
+    model-native domain, so a frequency attribution is skipped rather than scored.
+    """
+    model, exp = _stochastic_exp(
+        "TSHAP",
+        {"perturb_baseline": "random", "stride": 8, "window_length": 8},
+    )
+    score = evaluate(
+        model,
+        "Max-Sensitivity",
+        explanation=exp,
+        data=exp.data,
+        labels=exp.labels,
+        metric_class_params=_cheap_params("Max-Sensitivity"),
+        device="cpu",
+    )
+    assert score is not None and float(np.nanmean(score)) > 0
+
+
+# ── the derived seed reaches only the metrics that declare one ────────────────
+
+
+@pytest.mark.unit
+def test_seed_is_offered_only_to_metrics_that_declare_it(setup):
+    """
+    Quantus metrics declare **kwargs and then reject what they do not name.
+
+    So a seed cannot be passed blindly: `Complexity` would raise on it, while the
+    randomisation metrics need it.
+    """
+    model, exp = setup
+
+    score = evaluate(
+        model,
+        "Complexity",
+        explanation=exp,
+        data=exp.data,
+        labels=exp.labels,
+        metric_class_params={"disable_warnings": True},
+        device="cpu",
+        seed=12345,
+    )
+    assert score is not None
+
+    accepting = evaluate(
+        model,
+        "Random Logit",
+        explanation=exp,
+        data=exp.data,
+        labels=exp.labels,
+        metric_class_params=_cheap_params("Random Logit"),
+        device="cpu",
+        seed=12345,
+    )
+    assert accepting is not None

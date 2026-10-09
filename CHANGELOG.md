@@ -11,12 +11,33 @@ Experiment-runner reliability release. The `metrics.csv` schema changes and
 `xai4tsc.Explanation` gains a required field, so this is a minor version bump with
 one breaking change to the importable API.
 
+**Results from earlier versions will not reproduce exactly.** Randomness is now
+derived per result rather than once per run, so model weight init, the split and
+the explained-sample selection all draw differently. Statuses and row sets are
+unchanged; scores move once. Split-cache folder names change once with them.
+
 **Migration**: code that constructs an `Explanation` by hand must pass
 `explainer_params` (use `{}` if there is nothing to record). Explanations produced
 by `generate_explanation()` are unaffected.
 
 ### Added
 
+- **Every result is now reproducible on its own.** `general.reproducible: true`
+  used to seed numpy and torch once per run, after which the RNG advanced through
+  every split, model and explanation - so a result depended on which entries ran
+  before it, and re-running one dataset to check a number gave a different number.
+  Each dataset, model, explainer and metric now derives its own seed from the run
+  seed and its position in the config, logs it, and `metrics.csv` carries it in a
+  new `seed` column so a row can be re-run from the row alone. Explained-sample
+  selection derives from the dataset rather than the explainer, so every explainer
+  in one run now scores the same samples and their rows are comparable.
+  `reproducible: false` is unchanged: unseeded, split cache bypassed, seed column
+  empty. `general.seed` and `general.reproducible` are now type-checked - a quoted
+  `reproducible: "false"` is a non-empty string and was read as true.
+- **`DEFAULT_SEED`, `derive_seed()` and `resolve_rng()`** are exported from the
+  package, replacing three inconsistent conventions for an unspecified seed
+  (`None`, `random_state=42`, `seed=0`) and four unseeded `default_rng()`
+  fallbacks. `None` still means OS entropy.
 - **Robustness and randomisation metrics now work**: the twelve Quantus metrics that
   re-explain perturbed or randomised inputs failed because the framework never
   supplied an `explain_func`. `Explanation` now records `explainer_params`, so the
@@ -112,6 +133,16 @@ by `generate_explanation()` are unaffected.
 
 ### Changed
 
+- **An explanation is now a pure function of `(model, data, params, seed)`.** Every
+  stochastic explainer rebuilds its generator inside `explain()` instead of holding
+  one on the instance, so explaining the same input twice gives the same
+  attribution. This is what the re-explaining metrics need, since they build one
+  explainer and call it repeatedly. Vary the seed, or raise the sample count, to
+  measure a method's own spread.
+- **`TSHAP` and the two random baselines are reproducible at all for the first
+  time.** They built `np.random.default_rng(seed)` with `seed=None`, which draws
+  from OS entropy and cannot be pinned from outside - not even by
+  `np.random.seed`, so the run seed never reached them.
 - **Parameter defaults now live in the code, not in `master.yaml`.** The master
   config documents each model's, explainer's and metric's parameters in comments
   but no longer supplies them, and `config_resolve` no longer backfills per-entry
@@ -157,6 +188,17 @@ by `generate_explanation()` are unaffected.
   attached, so every later run also wrote into the earlier runs' `experiment.log`.
 
 ### Fixed
+
+- **`FreqRISE` no longer reseeds the global torch stream.** It called
+  `torch.manual_seed` inside `explain()`, which rewound the process-wide generator
+  for every later explainer, metric perturbation and the next dataset's weight
+  init; `example_frequency.yaml` ships `seed: 0`, so one entry pinned the rest of
+  the run. It now uses a local `torch.Generator`, and its own output for a given
+  seed is unchanged.
+- **A split-cache folder now describes the split stored under it.** The key
+  carried a value drawn once per run while the split seed was drawn per dataset,
+  so the same dataset in two positions wrote different splits under one key - and
+  a later run could be served a split its own config would never have produced.
 
 - **One configuration report, repeated at the end.** Every config check now feeds a
   single collector, so unknown settings-block keys, deprecated values, unknown entry

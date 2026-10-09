@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import torch
 
+from .._random import DEFAULT_SEED, resolve_rng
 from ..utils.fourier_transforms import (
     DomainTransform,
     FourierTransform,
@@ -34,8 +35,11 @@ class RandomFrequencyExplainer(PerturbationExplainer):
     transform : DomainTransform or dict, optional
         Transform from time to frequency domain. Defaults to a full
         :class:`~xai4tsc.utils.fourier_transforms.FourierTransform`.
-    seed : int, optional
-        Seed for the random relevance, for reproducible draws.
+    seed : int or None
+        Seed for the relevance draw, :data:`~xai4tsc.DEFAULT_SEED` by default.
+        A local generator is built from it on every :meth:`explain` call, so
+        repeated explanations of one input agree. ``None`` draws from OS
+        entropy and is not reproducible.
     """
 
     data_applicability: ClassVar[set[DataType]] = {DataType.TIME_SERIES}
@@ -46,10 +50,10 @@ class RandomFrequencyExplainer(PerturbationExplainer):
     def __init__(
         self,
         transform: DomainTransform | dict | None = None,
-        seed: int | None = None,
+        seed: int | None = DEFAULT_SEED,
     ) -> None:
         self.transform = resolve_transform(transform) or FourierTransform()
-        self.prng = np.random.default_rng(seed)
+        self.seed = seed
 
     def explain(
         self,
@@ -63,7 +67,8 @@ class RandomFrequencyExplainer(PerturbationExplainer):
         frequencies = self.transform.forward(
             torch.as_tensor(exp.data, dtype=torch.float32)
         )
-        return self.prng.uniform(size=tuple(frequencies.shape)).astype(np.float32)
+        prng = resolve_rng(self.seed)
+        return prng.uniform(size=tuple(frequencies.shape)).astype(np.float32)
 
 
 class RandomTimeFreqExplainer(PerturbationExplainer):
@@ -76,8 +81,11 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
         Transform from time to time-frequency domain (e.g. an
         :class:`~xai4tsc.utils.fourier_transforms.STFTransform`). Required — there
         is no sensible default window configuration.
-    seed : int, optional
-        Seed for the random relevance, for reproducible draws.
+    seed : int or None
+        Seed for the relevance draw, :data:`~xai4tsc.DEFAULT_SEED` by default.
+        A local generator is built from it on every :meth:`explain` call, so
+        repeated explanations of one input agree. ``None`` draws from OS
+        entropy and is not reproducible.
     """
 
     data_applicability: ClassVar[set[DataType]] = {DataType.TIME_SERIES}
@@ -88,7 +96,7 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
     def __init__(
         self,
         transform: DomainTransform | dict | None = None,
-        seed: int | None = None,
+        seed: int | None = DEFAULT_SEED,
     ) -> None:
         self.transform = resolve_transform(transform)
         if self.transform is None:
@@ -96,7 +104,7 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
                 "RandomTimeFreqExplainer requires a time-frequency transform "
                 "(e.g. an STFTransform); none was supplied."
             )
-        self.prng = np.random.default_rng(seed)
+        self.seed = seed
 
     def explain(
         self,
@@ -110,4 +118,5 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
         spectrograms = self.transform.forward(
             torch.as_tensor(exp.data, dtype=torch.float32)
         )
-        return self.prng.uniform(size=tuple(spectrograms.shape)).astype(np.float32)
+        prng = resolve_rng(self.seed)
+        return prng.uniform(size=tuple(spectrograms.shape)).astype(np.float32)

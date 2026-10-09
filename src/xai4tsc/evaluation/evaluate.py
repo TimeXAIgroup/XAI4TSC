@@ -39,6 +39,7 @@ def evaluate(
     metric_class_params: dict | None = None,
     metric_call_params: dict | None = None,
     device: str = "cpu",
+    seed: int | None = None,
 ) -> float | np.ndarray | None:
     """
     Evaluate an explanation using the named metric from the METRICS registry.
@@ -62,6 +63,11 @@ def evaluate(
         Keyword arguments for the metric ``__call__``.
     device : str
         Compute device.
+    seed : int or None
+        Seed for a metric that randomises something of its own, such as the MPRT
+        family's weight randomisation. Forwarded to the evaluator, which offers it
+        only to a backend that declares a ``seed``; the rest ignore it. A seed in
+        *metric_class_params* takes precedence.
 
     Returns
     -------
@@ -114,13 +120,16 @@ def evaluate(
     factory = METRICS[metric]
     init_params = dict_to_args(metric_class_params or {}, factory)
     evaluator = factory(**(init_params or {}))
+    # The seed goes in below the user's call params, so a configured one wins and
+    # no duplicate keyword can be raised. Evaluators that cannot use it ignore it.
+    call_params = {"seed": seed, **(metric_call_params or {})}
     result = evaluator.evaluate(
         model=model,
         explanation=explanation,
         data=data,
         labels=labels,
         device=device,
-        **(metric_call_params or {}),
+        **call_params,
     )
     logger.info("%s: %s", metric, result)
     return result

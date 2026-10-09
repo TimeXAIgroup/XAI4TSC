@@ -10,6 +10,7 @@ from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_UCR_UEA_dataset
 
 from .._domains import Domain, resolve_data_domain
+from .._random import DEFAULT_SEED, resolve_rng
 from .base import (
     DatasetBase,
     _class_index_view,
@@ -192,7 +193,7 @@ class UcrUeaDataset(DatasetBase):
         (``split()``) saves the processed train / val / test arrays to the
         split cache.
         """
-        rng = self._split_rng or np.random.default_rng()
+        rng = resolve_rng(DEFAULT_SEED, self._split_rng)
         ucr_name = self.name
         extract_path = Path(self.cache_dir) if self.cache_dir else None
         if extract_path is not None:
@@ -257,7 +258,7 @@ class UcrUeaDataset(DatasetBase):
         self,
         train_split: float = 0.8,
         val_split: float = 0.0,
-        random_state: int = 42,
+        random_state: int | None = DEFAULT_SEED,
         encode: str = "label",
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
@@ -287,7 +288,7 @@ class UcrUeaDataset(DatasetBase):
                 class_order=class_order,
             )
 
-        rng = rng or np.random.default_rng(random_state)
+        rng = resolve_rng(random_state, rng)
         data_train, labels_train = self._load_one_split("TRAIN", rng)
         data_test, labels_test = self._load_one_split("TEST", rng)
 
@@ -460,7 +461,7 @@ class SyntheticDataset(DatasetBase, ABC):
         self,
         name: str,
         cache_dir: str | Path | None = None,
-        seed: int = 0,
+        seed: int = DEFAULT_SEED,
         max_samples: int | None = None,
         sample_strategy: str = "random",
         max_series_length: int | None = None,
@@ -628,7 +629,7 @@ class FreqShapesDataset(SyntheticDataset):
         self,
         name: str = "freq_shapes",
         cache_dir: str | Path | None = None,
-        seed: int = 0,
+        seed: int = DEFAULT_SEED,
         n_samples: int = 600,
         length: int = 500,
         class_freqs: tuple[int, ...] = (7, 19, 37),

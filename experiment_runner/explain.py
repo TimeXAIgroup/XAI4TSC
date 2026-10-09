@@ -90,6 +90,41 @@ def _resolve_background_data(
     return None
 
 
+def _inject_seed(params: dict, seed: int | None) -> dict:
+    """
+    Fill in a derived seed wherever the config did not state one.
+
+    Applied to the explainer entry and, recursively, to the ``base`` of a wrapper,
+    because :class:`~xai4tsc.xai.base.WrapperExplainer` builds its wrapped method
+    from that sub-dict alone - a seed left at the top level would never reach a
+    stochastic base. A bare string base is promoted to a dict so it can carry one.
+
+    The test is key *presence*, not truthiness: ``seed: null`` is the documented way
+    to opt a component out of seeding, so it has to survive. An explicitly
+    configured seed always wins over the derived one.
+
+    Parameters
+    ----------
+    params : dict
+        Explainer params to fill in; mutated and returned.
+    seed : int or None
+        The derived seed, or ``None`` under ``reproducible: false``.
+
+    Returns
+    -------
+    dict
+        *params*, with a ``seed`` at every level that lacked one.
+    """
+    if "seed" not in params:
+        params["seed"] = seed
+    base = params.get("base")
+    if isinstance(base, str):
+        base = {"method": base}
+    if isinstance(base, dict):
+        params["base"] = _inject_seed(dict(base), seed)
+    return params
+
+
 def _generate_explanation(
     model: ModelBase,
     data: np.ndarray,
@@ -105,6 +140,7 @@ def _generate_explanation(
     metadata: list | None = None,
     explanation_dir: Path | None = None,
     data_domain: str | Domain = "time",
+    seed: int | None = None,
 ) -> Explanation:
     """
     Runner wrapper: unpacks config dicts and delegates to generate_explanation().
@@ -146,9 +182,14 @@ def _generate_explanation(
     explanation_dir : Path, optional
         Directory to write this explainer's artifacts into. The caller supplies it
         so that repeated entries for one method can be kept apart (see
-        :func:`~experiment_runner.config.disambiguate`); when ``None`` it falls
+        :func:`~experiment_runner.config.result_identities`); when ``None`` it falls
         back to ``<save_path>/explanations/explanations_<display name>``, which
         keeps direct callers working but cannot disambiguate duplicates.
+    seed : int or None
+        Seed derived for this explainer, filled into the explainer's params (and
+        its wrapped base's) when the config did not state one. It is recorded on
+        the returned ``Explanation.explainer_params``, so the metrics that rebuild
+        the explainer to re-explain get the same draws.
 
     Returns
     -------
@@ -156,7 +197,7 @@ def _generate_explanation(
         An object of the Explanation dataclass.
     """
     # Resolve runtime-only params into a copy; never mutate explainer_config.
-    params = dict(explainer_config)
+    params = _inject_seed(dict(explainer_config), seed)
     if "background_data" in explainer_config:
         params["background_data"] = _resolve_background_data(
             explainer_config["background_data"], splits

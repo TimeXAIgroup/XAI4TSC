@@ -3,8 +3,10 @@
 import numpy as np
 import pytest
 from experiment_runner.utils import (
+    _METRICS_COLUMNS,
     _aggregate_metric,
     _format_label_list,
+    _result_row,
     expand_datasets,
 )
 
@@ -136,3 +138,25 @@ def test_format_label_list_truncates_beyond_limit():
 @pytest.mark.unit
 def test_format_label_list_truncation_counts_remainder_exactly():
     assert _format_label_list(["a", "b", "c"], limit=2) == "a, b, ... and 1 more"
+
+
+# ── the seed column makes a result row self-describing ────────────────────────
+
+
+@pytest.mark.unit
+def test_metrics_columns_include_the_seed():
+    """A row has to carry the seed that produced it, or it cannot be re-run."""
+    assert "seed" in _METRICS_COLUMNS
+
+
+@pytest.mark.unit
+def test_result_row_carries_the_seed():
+    row = _result_row("ds", "m", "e", "k", "ok", score=1.0, seed=12345)
+    assert row["seed"] == 12345
+    assert set(row) == set(_METRICS_COLUMNS)
+
+
+@pytest.mark.unit
+def test_result_row_seed_is_empty_when_unseeded():
+    """`reproducible: false` applies no seed, so the cell stays empty."""
+    assert _result_row("ds", "m", "e", "k", "ok", score=1.0)["seed"] is None

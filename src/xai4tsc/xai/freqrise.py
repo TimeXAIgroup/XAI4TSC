@@ -43,6 +43,7 @@ import torch
 from torch.fft import irfft, rfft
 from torch.nn.functional import interpolate
 
+from .._random import DEFAULT_SEED
 from ..models.base import predict_probs
 from ..utils.fourier_transforms import (
     DomainTransform,
@@ -83,8 +84,17 @@ class FreqRISEExplainer(PerturbationExplainer):
     probability_of_drop : float
         Bernoulli probability that a coarse cell is kept; equals ``E[M]`` in the
         relevance normalisation (default 0.5, as in the paper).
-    seed : int, optional
-        Seed for reproducible mask sampling.
+    seed : int or None
+        Seed for the mask draw, :data:`~xai4tsc.DEFAULT_SEED` by default. A
+        local generator is built from it on every :meth:`explain` call, so an
+        attribution is a pure function of ``(model, data, params, seed)`` and
+        the process-global ``torch`` stream is never touched. ``None`` draws
+        from the ambient global stream instead, which is not reproducible.
+
+        Masks are aligned by a sample's position within one call. A metric that
+        re-explains in chunks (Quantus batches at 64) therefore aligns with the
+        attribution it scores only while the explained samples fit in one
+        chunk; beyond that, later chunks restart the mask sequence.
     """
 
     data_applicability: ClassVar[set[DataType]] = {DataType.TIME_SERIES}
@@ -103,7 +113,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         transform: DomainTransform | dict | None = None,
         num_cells: int = 8,
         probability_of_drop: float = 0.5,
-        seed: int | None = None,
+        seed: int | None = DEFAULT_SEED,
     ) -> None:
         if domain not in ("fft", "stft"):
             raise ValueError(f"domain must be 'fft' or 'stft', got {domain!r}.")
@@ -135,8 +145,12 @@ class FreqRISEExplainer(PerturbationExplainer):
         **kwargs: object,
     ) -> np.ndarray:
         """Compute FreqRISE relevance for the samples in *exp*."""
-        if self.seed is not None:
-            torch.manual_seed(self.seed)
+        # A local RNG generator to ensure same results.
+        generator = (
+            torch.Generator().manual_seed(int(self.seed))
+            if self.seed is not None
+            else None
+        )
         data = torch.as_tensor(exp.data, dtype=torch.float32)
         timesteps = data.shape[-1]
         if isinstance(self.transform, RFFTransform):
@@ -152,7 +166,12 @@ class FreqRISEExplainer(PerturbationExplainer):
             logger.info("FreqRISE: explaining sample %d / %d", idx + 1, len(data))
             with torch.no_grad():
                 relevance = self._relevance(
-                    model, sample.to(device), int(target), device, spatial_dims
+                    model,
+                    sample.to(device),
+                    int(target),
+                    device,
+                    spatial_dims,
+                    generator,
                 )
             relevances.append(self._rescale(relevance.cpu()))
 
@@ -170,6 +189,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         target: int,
         device: str | torch.device,
         spatial_dims: int,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Accumulate Eq. 3 relevance over all masks for a single ``(C, T)`` sample."""
         timesteps = sample.shape[-1]
@@ -185,7 +205,9 @@ class FreqRISEExplainer(PerturbationExplainer):
         # Eq. 3 numerator: Σ_n ŷ_c(x̂(M_n)) · M_n, accumulated over mask batches.
         importance = torch.zeros(grid, device=device)
         for _ in range(self.num_batches):
-            masks = self._sample_masks(self.batch_size, grid, device)  # (B, *grid)
+            masks = self._sample_masks(
+                self.batch_size, grid, device, generator
+            )  # (B, *grid)
             masked = coeffs * masks.unsqueeze(1)  # broadcast over channels
             recon = self._from_spectral(masked, timesteps)  # (B, C, T)
             logits = model(recon.float())
@@ -212,17 +234,19 @@ class FreqRISEExplainer(PerturbationExplainer):
         batch: int,
         grid: tuple[int, ...],
         device: str | torch.device,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """
         Sample a batch of smooth random masks over the coefficient *grid*.
 
         Bernoulli cells on a coarse ``num_cells`` grid are interpolated up to the
-        full coefficient grid. Masks are drawn on CPU so a fixed seed gives the
-        same masks on any device (and to avoid backend gaps in ``interpolate``).
+        full coefficient grid. Masks are drawn on CPU, from *generator* when one
+        is supplied, so a fixed seed gives the same masks on any device (and to
+        avoid backend gaps in ``interpolate``).
         """
         spatial = len(grid)
         coarse = (
-            torch.rand(batch, 1, *((self.num_cells,) * spatial))
+            torch.rand(batch, 1, *((self.num_cells,) * spatial), generator=generator)
             < self.probability_of_drop
         ).float()
         if spatial == 1:

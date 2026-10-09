@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
@@ -159,6 +160,38 @@ def _resolve_string_callables(params: dict, class_name: str) -> dict:
         else:
             result[k] = v
     return result
+
+
+def _accepts_named(func: object, name: str) -> bool:
+    """
+    Check whether *func* declares *name* as a real parameter.
+
+    A ``**kwargs`` catch-all does not count. Quantus metrics declare one and then
+    reject anything they do not name, so :func:`~xai4tsc.utils.utils.dict_to_args`
+    cannot be used to decide what is safe to pass them - it keeps every key when the
+    target has ``**kwargs``. This distinguishes "takes it" from "will raise on it".
+
+    Parameters
+    ----------
+    func : object
+        Callable to inspect.
+    name : str
+        Parameter name to look for.
+
+    Returns
+    -------
+    bool
+        ``True`` if *func* names *name* as a positional-or-keyword or keyword-only
+        parameter.
+    """
+    try:
+        param = inspect.signature(func).parameters.get(name)
+    except (TypeError, ValueError):
+        return False
+    return param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
 
 
 class EvaluatorBase(ABC):
@@ -364,6 +397,7 @@ class QuantusEvaluator(EvaluatorBase):
         labels: np.ndarray,
         device: str = "cpu",
         channel_first: bool = True,
+        seed: int | None = None,
         **call_params: object,
     ) -> float | np.ndarray:
         """
@@ -389,6 +423,13 @@ class QuantusEvaluator(EvaluatorBase):
             matches the framework's canonical ``(B, C, T)``; set it to ``False`` for
             channel-last inputs. Left to Quantus it is guessed from the shape, and
             the guess is wrong for an input with more channels than timesteps.
+        seed : int or None
+            Seed for the metrics that randomise something of their own (the MPRT
+            family's weight randomisation, Random Logit's class draw). Offered
+            only to the metrics that declare a ``seed``, since the others raise on
+            an argument they do not name. A seed in ``metric_class_params`` wins.
+            Named explicitly rather than left to ``**call_params`` so it reaches
+            the metric's constructor instead of its ``__call__``.
         **call_params
             Further keyword arguments for the Quantus metric's ``__call__``,
             filtered to its signature.
@@ -417,7 +458,19 @@ class QuantusEvaluator(EvaluatorBase):
 
         # Quantus aggregates with np.mean when return_aggregate is on, so a single
         # NaN sample poisons the whole score.
-        merged = {"aggregate_func": np.nanmean, **auto_params, **user_params}
+        # Only the metrics that declare a seed may be given one; the rest reject
+        # unknown keyword arguments outright.
+        seed_param = (
+            {"seed": seed}
+            if seed is not None and _accepts_named(self._metric_class.__init__, "seed")
+            else {}
+        )
+        merged = {
+            "aggregate_func": np.nanmean,
+            **seed_param,
+            **auto_params,
+            **user_params,
+        }
 
         # 3. Metrics that re-explain need a callable, and one needs the class count.
         extra_call: dict[str, object] = {}

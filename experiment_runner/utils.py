@@ -100,6 +100,7 @@ _METRICS_COLUMNS = (
     "model",
     "explainer",
     "metric",
+    "seed",
     "status",
     "score",
     "detail",
@@ -114,6 +115,7 @@ def _result_row(
     status: str,
     score: float | None = None,
     detail: str = "",
+    seed: int | None = None,
 ) -> dict:
     """
     Build one ``metrics.csv`` row.
@@ -125,7 +127,8 @@ def _result_row(
     Parameters
     ----------
     dataset_id, model_id, explainer_id, metric_id : str
-        Result identities (see :func:`~experiment_runner.config.disambiguate`),
+        Result identities (see
+        :func:`~experiment_runner.config.result_identities`),
         not raw registry names.
     status : str
         One of ``"ok"`` (a score was produced), ``"nan"`` (the metric ran but
@@ -138,6 +141,10 @@ def _result_row(
     detail : str
         Why, for a non-``ok`` status. Flattened to a single line so one result
         stays one CSV row.
+    seed : int or None
+        The derived seed this result was computed with, so a row can be
+        reproduced from the row alone. Empty under ``reproducible: false``,
+        where no seed was applied.
 
     Returns
     -------
@@ -150,6 +157,7 @@ def _result_row(
         "model": model_id,
         "explainer": explainer_id,
         "metric": metric_id,
+        "seed": seed,
         "status": status,
         "score": score,
         "detail": flat[:300],

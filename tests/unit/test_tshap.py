@@ -133,7 +133,7 @@ def test_window_shapley_efficiency():
     x = rng.standard_normal((1, 10)).astype(np.float32)
     target = 1
 
-    x_bar = expl._full_background(x)
+    x_bar = expl._full_background(x, rng)
     f_x = expl._target_probs(model, x[None], target)[0]
     f_x_bar = expl._target_probs(model, x_bar[None], target)[0]
 

@@ -35,7 +35,13 @@ general:
                             #   (neither read nor written), since a random draw cannot be
                             #   described by a cache key. The dataset download cache is
                             #   unaffected.
-  seed: 2025
+  seed: 2025                # Run seed. Every result derives its own seed from this one
+                            #   and its position in the config (dataset -> model -> explainer ->
+                            #   metric), so a single result reproduces on its own and does not
+                            #   depend on which entries ran before it. The derived seed is logged
+                            #   at each level and recorded in the metrics.csv 'seed' column. An
+                            #   explicit seed on an entry always wins over the derived one; seed:
+                            #   null on an entry opts that component out of seeding entirely.
   device: "use_available"   # "use_available", "cpu", "cuda", "mps"
   allow_external_code: false  # allow loading model/explainer/metric classes from
                             #   user-supplied source files (class_name + class_path
@@ -272,7 +278,8 @@ explanation_config:
                             #     "per_channel" (C x cost)
                             #   roi: false                 true = TSHAP-ROI region attribution
                             #     (Algorithm 2; sharper, higher precision)
-                            #   seed: null                 seed for the "random" baseline
+                            #   seed: 0xDEADBEEF           seed for the "random" baseline; a local
+                            #     generator is rebuilt per call, so repeated explanations agree
     - method: SIGN          # wrapper: extends a gradient method with the SIGN rule
                             #   (Gumpfer et al. 2023)
       base:                 # REQUIRED: the gradient method SIGN wraps, with its own params
@@ -297,7 +304,12 @@ explanation_config:
                             #     (n_freq, and n_time for stft)
                             #   probability_of_drop: 0.5   Bernoulli keep probability, = E[M]
                             #     in the relevance normalisation
-                            #   seed: null                 seed for reproducible masks
+                            #   seed: 0xDEADBEEF           seed for the mask draw, rebuilt per call
+                            #     from a local generator; the global torch stream is never touched.
+                            #     Masks align by a sample's position within one call, so a metric
+                            #     that re-explains in chunks (Quantus batches at 64) matches the
+                            #     attribution it scores only while the explained samples fit one
+                            #     chunk. Vary the seed or raise num_batches to see estimator spread
     - method: Frequency     # explanation-space wrapper: lifts a base method's relevance into
                             #   the frequency domain (Rezaei & Liu 2024)
       base:                 # REQUIRED: the time-domain attributor to lift, with its own params
@@ -319,7 +331,11 @@ explanation_config:
       transform:
         name: fft
         params: {}
-                            # params: seed: null
+                            # params (defaults from RandomFrequencyExplainer):
+                            #   seed: 0xDEADBEEF           seed for the relevance draw, rebuilt per
+                            #     call, so the same seed always gives the same map. The draw reads
+                            #     only the shape of the data, never its values, so vary the seed to
+                            #     get a different baseline
     - method: Random_TimeFrequency  # uniform-random baseline in the time-frequency domain
       transform:            # REQUIRED time-frequency transform
         name: stft
@@ -327,7 +343,11 @@ explanation_config:
           n_fft: 64
           win_length: 64
           hop_length: 32
-                            # params: seed: null
+                            # params (defaults from RandomTimeFreqExplainer):
+                            #   seed: 0xDEADBEEF           seed for the relevance draw, rebuilt per
+                            #     call, so the same seed always gives the same map. The draw reads
+                            #     only the shape of the data, never its values, so vary the seed to
+                            #     get a different baseline
 
 evaluation_config:
   default_settings:

@@ -1297,3 +1297,205 @@ def test_reproducible_false_leaves_the_seed_column_empty(
     df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
     assert not df.empty
     assert df["seed"].isna().all()
+
+
+# ── reproducing a logged result (R31's promise, end to end) ───────────────────
+
+_SEED_LINE = re.compile(r"Seed for (\w+) '(.+?)' \(#(\d+)\): (\d+)")
+
+
+def _logged_seeds(log_path: Path) -> dict:
+    """
+    Return ``{(kind, name): seed}`` for every seed a run recorded.
+
+    The log is the only place a user can read these from, which is the point of
+    the tests below: whatever is missing here cannot be reproduced.
+    """
+    seeds = {}
+    for kind, name, _occurrence, seed in _SEED_LINE.findall(log_path.read_text()):
+        seeds[(kind, name)] = int(seed)
+    return seeds
+
+
+@pytest.mark.integration
+def test_logfile_records_every_seed_a_result_depends_on(
+    tmp_path, monkeypatch, ucr_dataset_path
+):
+    """
+    A result's randomness comes from five boundaries; the log must name all five.
+
+    `split` and `samples` used to be derived with ``log=False``, which left the
+    log unable to answer the one question it is kept for. `samples` is the
+    load-bearing one: it decides which test samples are explained, and metrics
+    are computed only on those, so a logged score could not be reproduced from
+    the log no matter how many other seeds were in it.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_seed_logged"
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    config = _resolve_config(cache_root, results_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    log = _experiment_dir(results_rel) / "experiment.log"
+    seeds = _logged_seeds(log)
+    recorded = {kind for kind, _ in seeds}
+
+    assert recorded >= {
+        "dataset",
+        "split",
+        "samples",
+        "model",
+        "explainer",
+        "metric",
+    }, (
+        f"the log is missing boundaries: {{'dataset', 'split', 'samples', 'model', "
+        f"'explainer', 'metric'}} - {recorded}"
+    )
+    assert "Run seed:" in log.read_text()
+    # Each boundary is a distinct stream; two sharing a value would mean the
+    # derivation collapsed.
+    assert len(set(seeds.values())) == len(seeds)
+
+
+@pytest.mark.integration
+def test_logged_metric_seed_matches_the_metrics_csv_column(
+    tmp_path, monkeypatch, ucr_dataset_path
+):
+    """
+    The two records of a result's seed must agree, or neither can be trusted.
+
+    `metrics.csv` carries the seed per row and the log carries it per boundary.
+    They are written by different code paths, so nothing but a test stops them
+    drifting apart.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    results_rel = "tests/_runner_seed_agreement"
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    config = _resolve_config(cache_root, results_rel)
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    experiment = _experiment_dir(results_rel)
+    seeds = _logged_seeds(experiment / "experiment.log")
+    df = pd.read_csv(experiment / "metrics.csv")
+
+    assert not df.empty
+    for _, row in df.iterrows():
+        logged = seeds.get(("metric", row["metric"]))
+        assert logged is not None, f"metric {row['metric']!r} logged no seed"
+        assert int(row["seed"]) == logged, (
+            f"{row['metric']}: metrics.csv says {row['seed']}, log says {logged}"
+        )
+
+
+@pytest.mark.integration
+def test_a_logged_result_is_reproducible_through_the_package(
+    tmp_path, monkeypatch, ucr_dataset_path
+):
+    """
+    Read the seeds a run logged, reproduce its score with the package alone.
+
+    This is the claim the `seed` column exists to support, and the only test that
+    closes the loop: everything here comes either from the logfile or from the
+    public API, never from runner internals. The explained subset is drawn at
+    random, so the `samples` seed is load-bearing - which is what makes this a
+    test of the logging change rather than of the explainer.
+
+    The checkpoint is reloaded rather than retrained, so a mismatch points at the
+    seeding rather than at training determinism.
+    """
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    from xai4tsc import evaluate, generate_explanation, resolve_rng
+    from xai4tsc.data import load_dataset
+    from xai4tsc.models import load_model
+
+    results_rel = "tests/_runner_seed_replay"
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    config = _resolve_config(cache_root, results_rel)
+    # A random subset, so which samples get explained depends on the samples seed.
+    config["explanation_config"]["default_settings"]["samples"] = {
+        "type": "random",
+        "count": 3,
+    }
+    assert main(str(_write_config(config, tmp_path))) == 0
+
+    experiment = _experiment_dir(results_rel)
+    seeds = _logged_seeds(experiment / "experiment.log")
+    expected = pd.read_csv(experiment / "metrics.csv")
+    assert len(expected) == 1, "this fixture configures exactly one metric row"
+    expected_score = float(expected.loc[0, "score"])
+
+    # Everything below uses only the package and the seeds read from the log.
+    ds = load_dataset("GunPoint", cache_dir=cache_root / "datasets")
+    splits, encoder = ds.split(
+        train_split=0.8,
+        val_split=0.1,
+        encode="label",
+        rng=resolve_rng(seeds[("split", "GunPoint")]),
+    )
+    test_data, test_labels = splits[1][0], splits[1][1]
+
+    checkpoints = sorted((experiment / "GunPoint" / "FCN").glob("FCN_epoch_*.pt"))
+    assert checkpoints, "the run wrote no checkpoint to replay"
+    model = load_model(
+        {"model": "FCN", "model_ckpt_path": str(checkpoints[-1])}, device="cpu"
+    )
+
+    explanation = generate_explanation(
+        method="Integrated_Gradients",
+        model=model,
+        data=test_data,
+        labels=test_labels,
+        targets="predicted",
+        params={"seed": seeds[("explainer", "Integrated_Gradients")]},
+        encoder=encoder,
+        indices=None,
+        samples=3,
+        prng=resolve_rng(seeds[("samples", "GunPoint")]),
+        device="cpu",
+        save_path=tmp_path / "replayed",
+    )
+    # Metrics score only the explained samples, so the arrays are subset to
+    # `explanation.indices` exactly as the runner does.
+    score = evaluate(
+        model=model,
+        metric="Complexity",
+        explanation=explanation,
+        data=test_data[explanation.indices],
+        labels=test_labels[explanation.indices],
+        metric_class_params={
+            "normalise": True,
+            "abs": True,
+            "disable_warnings": True,
+            "display_progressbar": False,
+            "return_aggregate": True,
+        },
+        metric_call_params={"softmax": False},
+        device="cpu",
+        seed=seeds[("metric", "Complexity")],
+    )
+    score = float(np.asarray(score).ravel()[0])
+
+    assert score == pytest.approx(expected_score, rel=1e-9, abs=1e-9), (
+        f"replaying the logged seeds gave {score}, the run recorded {expected_score}"
+    )
+
+    # And the samples seed is load-bearing: a different one picks a different
+    # subset, so the assertion above is not passing for free.
+    other = generate_explanation(
+        method="Integrated_Gradients",
+        model=model,
+        data=test_data,
+        labels=test_labels,
+        targets="predicted",
+        params={"seed": seeds[("explainer", "Integrated_Gradients")]},
+        encoder=encoder,
+        indices=None,
+        samples=3,
+        prng=resolve_rng(seeds[("samples", "GunPoint")] + 1),
+        device="cpu",
+        save_path=tmp_path / "other",
+    )
+    assert list(other.indices) != list(explanation.indices), (
+        "a different samples seed selected the same subset, so this test would "
+        "pass even if the seed were ignored"
+    )

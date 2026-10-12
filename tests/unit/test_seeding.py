@@ -1,5 +1,7 @@
 """Unit tests for seed derivation - the package helpers and the runner boundaries."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from experiment_runner.config import result_identities
@@ -121,6 +123,35 @@ def test_boundary_seed_logs_the_derived_value(caplog):
     with caplog.at_level("INFO", logger="xai4tsc.runner.seeding"):
         seed = boundary_seed(2025, "model", "FCN", 1)
     assert str(seed) in caplog.text
+
+
+@pytest.mark.unit
+def test_the_runner_logs_the_split_and_samples_boundaries(caplog):
+    """
+    The two boundaries the log used to omit, and why that mattered.
+
+    `samples` decides which test samples are explained, and metrics score only
+    those, so a logged result could not be reproduced from the log without it -
+    whatever other seeds were recorded. Both were derived with ``log=False``
+    until this was fixed. The runner-level counterpart is
+    ``test_logfile_records_every_seed_a_result_depends_on``.
+    """
+    source = (Path(__file__).parents[2] / "experiment_runner" / "main.py").read_text()
+    for kind in ("split", "samples"):
+        call = f'boundary_seed(dataset_seed, "{kind}"'
+        assert call in source, f"the {kind} boundary is no longer derived by name"
+        line = next(ln for ln in source.splitlines() if call in ln)
+        assert "log=False" not in line, (
+            f"the {kind} seed is derived without logging again, so a logged "
+            "result cannot be reproduced from the log alone"
+        )
+
+    with caplog.at_level("INFO", logger="xai4tsc.runner.seeding"):
+        split = boundary_seed(2025, "split", "GunPoint", 1)
+        samples = boundary_seed(2025, "samples", "GunPoint", 1)
+    assert f"Seed for split 'GunPoint' (#1): {split}" in caplog.text
+    assert f"Seed for samples 'GunPoint' (#1): {samples}" in caplog.text
+    assert split != samples, "the two streams must not collapse onto one value"
 
 
 # ── resolve_rng / seed_globals ────────────────────────────────────────────────

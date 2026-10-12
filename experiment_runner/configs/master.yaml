@@ -36,12 +36,15 @@ general:
                             #   described by a cache key. The dataset download cache is
                             #   unaffected.
   seed: 2025                # Run seed. Every result derives its own seed from this one
-                            #   and its position in the config (dataset -> model -> explainer ->
-                            #   metric), so a single result reproduces on its own and does not
-                            #   depend on which entries ran before it. The derived seed is logged
-                            #   at each level and recorded in the metrics.csv 'seed' column. An
-                            #   explicit seed on an entry always wins over the derived one; seed:
-                            #   null on an entry opts that component out of seeding entirely.
+                            #   and its position in the config (dataset -> split / samples /
+                            #   model -> explainer -> metric), so a single result reproduces on
+                            #   its own and does not depend on which entries ran before it.
+                            #   Every derived seed is logged, and the metric seed is also
+                            #   recorded in the metrics.csv 'seed' column. The log is therefore
+                            #   enough on its own to replay one result through the package API
+                            #   rest. An explicit seed on an entry always wins over the derived
+                            #   one; seed: null on an entry opts that component out of seeding
+                            #   entirely.
   device: "use_available"   # "use_available", "cpu", "cuda", "mps"
   allow_external_code: false  # allow loading model/explainer/metric classes from
                             #   user-supplied source files (class_name + class_path

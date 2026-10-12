@@ -227,10 +227,8 @@ def _run(config: dict, issues: ConfigIssues) -> int:
         seed_globals(dataset_seed)
         # The split and the explained-sample selection each get their own
         # stream, so neither depends on how much the other drew first.
-        split_seed = boundary_seed(dataset_seed, "split", dataset["dataset"], log=False)
-        sample_seed = boundary_seed(
-            dataset_seed, "samples", dataset["dataset"], log=False
-        )
+        split_seed = boundary_seed(dataset_seed, "split", dataset["dataset"])
+        sample_seed = boundary_seed(dataset_seed, "samples", dataset["dataset"])
         try:
             # Log dataset preparation
             logger.info(

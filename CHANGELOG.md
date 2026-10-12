@@ -37,7 +37,8 @@ by `generate_explanation()` are unaffected.
 - **`DEFAULT_SEED`, `derive_seed()` and `resolve_rng()`** are exported from the
   package, replacing three inconsistent conventions for an unspecified seed
   (`None`, `random_state=42`, `seed=0`) and four unseeded `default_rng()`
-  fallbacks. `None` still means OS entropy.
+  fallbacks. `None` still means OS entropy. Each seed used can be found in the
+	log files.
 - **Robustness and randomisation metrics now work**: the twelve Quantus metrics that
   re-explain perturbed or randomised inputs failed because the framework never
   supplied an `explain_func`. `Explanation` now records `explainer_params`, so the

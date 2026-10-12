@@ -105,23 +105,12 @@ def load_ext_model(
     )
     model = user_model_class(**(filtered_params or {}))
     model.name = model_name
-    model._init_params = filtered_params
+    # An external class is not obliged to call _record_init_params, so fall back
+    # to what the config asked for.  A class that does record its own arguments
+    # captured them more completely, so that record wins.
+    if not model._init_params:
+        model._init_params = filtered_params
     return model
-
-
-def _set_model_attrs(
-    model: ModelBase,
-    name: str,
-    device: str | torch.device,
-    save_path: str | Path | None,
-    init_params: dict,
-) -> None:
-    """Set operational attributes on a freshly constructed ModelBase instance."""
-    model.name = name
-    model._init_params = init_params or {}
-    model.device = torch.device(device) if isinstance(device, str) else device
-    model.save_path = Path(save_path) if save_path is not None else None
-    model.to(model.device)
 
 
 def _drop_none(cfg: dict) -> dict:
@@ -244,8 +233,7 @@ def _build_from_class(
     filtered_params = dict_to_args(model_params, model_class) if model_params else {}
     model = model_class(**(filtered_params or {}))
     model.load_state_dict(state_dict)
-    _set_model_attrs(model, name, device, save_path, filtered_params)
-    return model
+    return model.configure(device=device, save_path=save_path, name=name)
 
 
 def load_model(
@@ -386,7 +374,9 @@ def load_model(
                     model_params=model_params,
                 )
                 model.load_state_dict(state_dict)
-                _set_model_attrs(model, model_config["model"], device, save_path, {})
+                model.configure(
+                    device=device, save_path=save_path, name=model_config["model"]
+                )
                 origin = f"class from {model_config['class_path']}"
 
             if model is not None:
@@ -425,9 +415,7 @@ def load_model(
             dict_to_args(model_params, model_class) if model_params else {}
         )
         model = model_class(**(filtered_params or {}))
-        _set_model_attrs(
-            model, model_config["model"], device, save_path, filtered_params
-        )
+        model.configure(device=device, save_path=save_path, name=model_config["model"])
         logger.info(
             "Built %s from the MODELS registry (no checkpoint supplied).", model.name
         )
@@ -472,6 +460,7 @@ class FCN(ModelBase):
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         channels = [in_channels, *filters]
         blocks = []
         for i in range(3):
@@ -542,6 +531,7 @@ class LeNet(ModelBase):
         head_hidden: int = 128,
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         channels = [in_channels, 32, 64, 128]
         pools = [nn.MaxPool1d(2), nn.MaxPool1d(2), nn.AdaptiveAvgPool1d(1)]
         blocks = []
@@ -661,6 +651,7 @@ class ResNet(ModelBase):
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         self.blocks = nn.Sequential(
             _ResidualBlock(in_channels, n_feature_maps, kernel_sizes),
             _ResidualBlock(n_feature_maps, n_feature_maps * 2, kernel_sizes),
@@ -743,6 +734,7 @@ class LSTM(ModelBase):
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         self.lstm = nn.LSTM(
             input_size=in_channels,
             hidden_size=hidden_size,
@@ -832,6 +824,7 @@ class PatchTST(ModelBase):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         if d_model % nhead != 0:
             msg = f"d_model ({d_model}) must be divisible by nhead ({nhead})."
             raise ValueError(msg)
@@ -1041,6 +1034,7 @@ class XLSTM(ModelBase):
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
+        self._record_init_params(locals())
         if embed_dim % num_heads != 0:
             msg = (
                 f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})."

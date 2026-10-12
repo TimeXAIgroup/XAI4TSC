@@ -53,6 +53,22 @@ Function                                                     Purpose
 :func:`~xai4tsc.evaluation.evaluate.evaluate`               Score an explanation with a metric from the registry.
 ==========================================================  ===============================================================
 
+A model built with its own constructor rather than through ``load_model`` needs
+to be told where it runs and where it writes, which is what
+:meth:`~xai4tsc.models.base.ModelBase.configure` is for:
+
+.. code-block:: python
+
+   model = xai4tsc.FCN(in_channels=1, num_classes=2).configure(
+       device="cpu", save_path="results/run_1"
+   )
+
+``device`` and ``save_path`` are properties of the machine and the run, not of
+the architecture, so they are not constructor arguments. The methods that write
+(:meth:`~xai4tsc.models.base.ModelBase.train_model`,
+:meth:`~xai4tsc.models.base.ModelBase.evaluate_model`) raise rather than guess a
+destination, so nothing lands in the working directory by accident.
+
 Built-in components
 ~~~~~~~~~~~~~~~~~~~~~
 

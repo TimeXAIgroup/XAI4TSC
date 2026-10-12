@@ -18,7 +18,10 @@ unchanged; scores move once. Split-cache folder names change once with them.
 
 **Migration**: code that constructs an `Explanation` by hand must pass
 `explainer_params` (use `{}` if there is nothing to record). Explanations produced
-by `generate_explanation()` are unaffected.
+by `generate_explanation()` are unaffected. `train_model()` and `evaluate_model()`
+now require a destination: pass `save_path=`, or build the model through
+`load_model(..., save_path=...)`. Code that relied on the old fall-back to the
+working directory has to name a directory.
 
 ### Added
 
@@ -39,9 +42,51 @@ by `generate_explanation()` are unaffected.
   physical frequencies now states the `sampling_rate` they are relative to, on the
   region or once on the sample row, and `GroundTruthRegion.cycles()` converts.
   Omitting it keeps the previous meaning, so existing metadata is unaffected.
+- **`ModelBase.configure()` sets a model's device and output directory.** These
+  describe the machine and the run rather than the architecture, so they are not
+  constructor arguments; until now the only thing that set them was a private
+  helper reached through `load_model`, which left a model built with its own
+  constructor no supported way to say where it should write.
+  `FCN(...).configure(device="cpu", save_path=out)` returns the model, so it
+  chains onto the constructor. `load_model` calls it on the caller's behalf, and
+  an omitted argument leaves the current value alone.
 
 ### Fixed
 
+- **A checkpoint written by a directly built model could not be reloaded.** Only
+  `load_model` recorded the constructor arguments, so a model built with its own
+  constructor had nothing to write into the `_config.json` beside its weights, and
+  `load_model({"model_ckpt_path": ...})` could not rebuild it without the caller
+  restating `init_params`. Each built-in now records its own arguments, defaults
+  included, with `self._record_init_params(locals())` as the first statement of its
+  constructor - so the record is what the model was actually built with, and an old
+  checkpoint still rebuilds the same architecture if a default changes later. The
+  constructor is the only writer of that record now; `configure()` does not touch
+  it. A custom model that omits the call still trains and saves weights, but gets
+  no sidecar.
+- **An unencodable constructor argument created a truncated checkpoint config.**
+  The config was streamed straight to the open file, so a value `json`
+  could not encode failed mid-write and left a partial file that reloads worse than
+  no file at all. The config is now serialised in full before the file is opened,
+  and the warning names the offending argument instead of reporting a bare
+  `TypeError`.
+- **A model built with its own constructor wrote its files into the working**
+  **directory, under the name `None`.** `name` was set only by `load_model()`, so
+  `FCN(in_channels=1, num_classes=2)` kept the class default of `None`, and
+  `train_model()` fell back to the current directory when given no `save_path`.
+  `name` now defaults to the class name for every model, including one reloaded 
+	through `load_from_checkpoint()`, and the two methods that write raise a
+	`ValueError` naming both ways to supply a destination rather than choosing one.
+	The checkpoint sidecar is keyed on the recorded constructor arguments rather
+	than on `name`, since an empty `init_params` would send `load_model` to a
+	constructor call that raises. `load_model` is also exported at the top level
+	now, next to `load_dataset`: the public namespace offered the model classes 
+	but hid the factory that configures them.
+- **An external model class lost the arguments needed to rebuild it.** The
+  `class_path` branch of `load_model` overwrote the record `load_ext_model` had
+  just made, so a checkpoint written from an externally loaded class carried no
+  usable config. Setting the operational attributes no longer touches that record
+  at all, so there is nothing left to overwrite.
 - **`Time-Frequency AUC` scored against the wrong frequency bins, and so reported
   chance for every explainer.** The shipped ground truth records its frequencies in
   Hz (7/19/37 at 100 Hz over 500 samples) while the mask builder read them as

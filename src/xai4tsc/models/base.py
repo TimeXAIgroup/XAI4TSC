@@ -40,6 +40,27 @@ the two in step; it does not supply them.
 """
 
 
+def _json_safe(value: object) -> bool:
+    """
+    Return whether *value* can be stored in a checkpoint config file.
+
+    Parameters
+    ----------
+    value : object
+        A single constructor argument.
+
+    Returns
+    -------
+    bool
+        ``True`` when :mod:`json` can encode it.
+    """
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True
+
+
 def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarray:
     """
     Return softmax class probabilities for *data* from any :class:`~torch.nn.Module`.
@@ -79,14 +100,24 @@ class ModelBase(nn.Module, ABC):
     Subclasses must implement :meth:`forward`.  All training, prediction,
     evaluation, and persistence logic is provided here and inherited.
 
-    The following instance attributes are set by the model factory
-    (:func:`~xai4tsc.models.models.load_model`) after construction:
+    :attr:`name` defaults to the subclass name, so a model constructed directly
+    still names its own files.  :attr:`device` and :attr:`save_path` describe
+    the machine and the run rather than the model, so they are not constructor
+    arguments; set them with :meth:`configure`, which
+    :func:`~xai4tsc.models.models.load_model` calls on the caller's behalf.
+    Until then :attr:`save_path` is ``None`` and the methods that write refuse
+    to guess a destination.
+
+    A subclass records its own constructor arguments by calling
+    :meth:`_record_init_params` with ``locals()`` as its first statement, which
+    is what lets a checkpoint describe how to rebuild the model.
 
     Example::
 
         class MyCNN(ModelBase):
             def __init__(self, in_channels: int, num_classes: int):
                 super().__init__()
+                self._record_init_params(locals())
                 self.conv = nn.Conv1d(in_channels, 32, kernel_size=3, padding=1)
                 self.fc = nn.Linear(32, num_classes)
 
@@ -96,23 +127,131 @@ class ModelBase(nn.Module, ABC):
         xai4tsc.register_model("my_cnn", MyCNN)
     """
 
-    name: str = None
-    """Identifier used in file names and logs."""
-    device: torch.device = None
+    name: str
+    """Identifier used in file names and logs.  Defaults to the class name."""
+    device: torch.device | None = None
     """Compute device the model lives on."""
-    save_path: Path = None
+    save_path: Path | None = None
     """Directory for checkpoints and diagnostic plots."""
-    model_path: Path = None
+    model_path: Path | None = None
     """Path to the best saved checkpoint (set after training)."""
-    best_epoch: int = None
+    best_epoch: int | None = None
     """Total epochs of training the best checkpoint represents (``None`` if unknown)."""
-    _init_params: dict = None
+    _init_params: dict | None = None
     """Constructor kwargs stored for checkpoint reloading."""
-    _loaded_from: Path = None
+    _loaded_from: Path | None = None
     """Checkpoint this model's weights were loaded from, if any."""
 
     def __init__(self) -> None:
         super().__init__()
+        self.name = type(self).__name__
+
+    def _record_init_params(self, init_locals: dict) -> None:
+        """
+        Record the constructor arguments this model was built with.
+
+        What is recorded is what the model was actually built with, defaults
+        included, so :meth:`save_model` can write a checkpoint that rebuilds
+        the same architecture even if a default changes in a later version.
+
+        Parameters
+        ----------
+        init_locals : dict
+            ``locals()`` from the top of the subclass ``__init__``.  ``self``
+            and the ``__class__`` cell that a zero-argument ``super()`` call
+            puts in scope are dropped; any ``kwargs`` mapping is flattened into
+            the result.
+        """
+        params = {
+            key: value
+            for key, value in init_locals.items()
+            if key != "self" and not key.startswith("__")
+        }
+        # A subclass taking **kwargs would otherwise record the mapping itself
+        # under the key "kwargs", which no constructor accepts back.
+        extra = params.pop("kwargs", None)
+        if isinstance(extra, dict):
+            params.update(extra)
+        self._init_params = params
+
+    def configure(
+        self,
+        device: str | torch.device | None = None,
+        save_path: Path | str | None = None,
+        name: str | None = None,
+    ) -> "ModelBase":
+        """
+        Set where this model runs and where it writes, and return it.
+
+        These are properties of the machine and the run, not of the
+        architecture, which is why they are set here rather than passed to the
+        constructor.  :func:`~xai4tsc.models.models.load_model` calls this after
+        building a model; call it yourself when constructing one directly::
+
+            model = FCN(in_channels=1, num_classes=2).configure(
+                device="cpu", save_path="results/run_1"
+            )
+
+        Parameters
+        ----------
+        device : str or torch.device, optional
+            Compute device.  The model is moved onto it.
+        save_path : Path or str, optional
+            Directory for checkpoints and diagnostic plots.
+        name : str, optional
+            Identifier used in file names and logs.  Overrides the default
+            class name, which is how one class registered under two keys writes
+            distinguishable files.
+
+        Returns
+        -------
+        ModelBase
+            ``self``, so the call can be chained onto the constructor.
+
+        Notes
+        -----
+        An omitted argument leaves the current value alone, so a later call
+        that sets only one attribute does not clear the others.
+        """
+        if name is not None:
+            self.name = name
+        if device is not None:
+            self.device = torch.device(device) if isinstance(device, str) else device
+            self.to(self.device)
+        if save_path is not None:
+            self.save_path = Path(save_path)
+        return self
+
+    def _resolve_save_path(self, save_path: Path | str | None, caller: str) -> Path:
+        """
+        Settle where this call writes, and remember it for later ones.
+
+        Parameters
+        ----------
+        save_path : str or Path or None
+            The destination passed to this call, if any.
+        caller : str
+            Name of the calling method, used in the error message.
+
+        Returns
+        -------
+        Path
+            The resolved directory, also stored on :attr:`save_path`.
+
+        Raises
+        ------
+        ValueError
+            If neither *save_path* nor :attr:`save_path` is set.  Defaulting to
+            the working directory instead would scatter checkpoints and plots
+            wherever the caller happened to be.
+        """
+        if save_path is None and self.save_path is None:
+            raise ValueError(
+                f"{caller} needs a save_path: pass save_path=... or construct "
+                "via load_model(..., save_path=...)."
+            )
+        self.save_path = Path(save_path if save_path is not None else self.save_path)
+        return self.save_path
 
     # ── Abstract ────────────────────────────────────────────────────────────
 
@@ -201,8 +340,9 @@ class ModelBase(nn.Module, ABC):
             Integer class labels for *data_val*.
         save_path : str or Path, optional
             Directory for the best checkpoint and training plots.  Takes priority
-            over the destination set at construction time; falls back to that
-            value and finally to the current working directory.
+            over the destination given to
+            :func:`~xai4tsc.models.models.load_model`, and falls back to it.
+            Raises if neither is set.
         start_epoch : int, optional
             Epochs of training the weights have already had, used to continue
             epoch numbering when resuming from a checkpoint.  Defaults to
@@ -215,9 +355,7 @@ class ModelBase(nn.Module, ABC):
         ModelBase
             ``self`` after training (best checkpoint restored).
         """
-        self.save_path = Path(
-            save_path if save_path is not None else (self.save_path or Path.cwd())
-        )
+        self._resolve_save_path(save_path, "train_model")
         self.save_path.mkdir(parents=True, exist_ok=True)
 
         data_tensor = torch.from_numpy(
@@ -347,8 +485,7 @@ class ModelBase(nn.Module, ABC):
                     )
                     break
 
-        if self.save_path is not None:
-            self._plot_training_curve(epoch_losses, epoch_accs, start_epoch)
+        self._plot_training_curve(epoch_losses, epoch_accs, start_epoch)
 
         if best_path is None:
             # No epoch improved on the initial loss, so nothing was checkpointed
@@ -416,9 +553,8 @@ class ModelBase(nn.Module, ABC):
         The checkpoints this class writes are bare state dicts, which carry no
         record of the class or the constructor arguments they belong to.  This
         file supplies both, so :func:`~xai4tsc.models.models.load_model` can
-        reload a checkpoint given only its path.  Skipped when :attr:`name` is
-        unset, since a model built directly rather than through ``load_model``
-        has nothing useful to record.
+        reload a checkpoint given only its path.  Every built-in records its
+        arguments in its constructor.
 
         Parameters
         ----------
@@ -428,11 +564,11 @@ class ModelBase(nn.Module, ABC):
             Total epochs of training the checkpoint represents; ``None`` when
             that is unknown, which is recorded rather than guessed as ``0``.
         """
-        if self.name is None:
+        if not self._init_params:
             return
         cfg = {
             "model": self.name,
-            "init_params": self._init_params or {},
+            "init_params": self._init_params,
             "epoch": epoch,
         }
         # Only recorded when there actually was a resume, so the file never
@@ -440,10 +576,27 @@ class ModelBase(nn.Module, ABC):
         if self._loaded_from is not None:
             cfg["resumed_from"] = str(self._loaded_from)
         cfg_path = self.config_path_for(checkpoint_path)
+        # Serialised in full before the file is opened: json.dump writes as it
+        # goes, so a value it cannot encode would leave a truncated config
+        # behind, which reloads worse than no config at all.
+        try:
+            payload = json.dumps(cfg, indent=2)
+        except TypeError:
+            unencodable = [
+                key for key, value in self._init_params.items() if not _json_safe(value)
+            ]
+            logger.warning(
+                "Not writing %s: init_params %s cannot be stored as JSON, so this "
+                "checkpoint cannot record how to rebuild itself. Pass plain values "
+                "(numbers, strings, lists) as constructor arguments to fix this.",
+                cfg_path,
+                unencodable or sorted(self._init_params),
+            )
+            return
         try:
             with open(cfg_path, "w") as f:
-                json.dump(cfg, f, indent=2)
-        except (OSError, TypeError) as exc:  # pragma: no cover - diagnostics only
+                f.write(payload)
+        except OSError as exc:  # pragma: no cover - diagnostics only
             logger.warning("Could not write %s: %s", cfg_path, exc)
 
     def save_model(self, save_path: Path | str, epoch: int | None = None) -> None:
@@ -529,17 +682,16 @@ class ModelBase(nn.Module, ABC):
             Decision threshold for binary classification.
         save_path : Path or str, optional
             Directory for the ROC and confusion-matrix plots.  Takes priority over
-            the destination set at construction time; falls back to that value and
-            finally to the current working directory.
+            the destination given to
+            :func:`~xai4tsc.models.models.load_model`, and falls back to it.
+            Raises if neither is set.
 
         Returns
         -------
         dict
             Metric values keyed by name.
         """
-        self.save_path = Path(
-            save_path if save_path is not None else (self.save_path or Path.cwd())
-        )
+        self._resolve_save_path(save_path, "evaluate_model")
         self.eval()
 
         y_true, y_probs_list = [], []
@@ -654,27 +806,26 @@ class ModelBase(nn.Module, ABC):
                 auc_label = f"{auc:.4f}"
             results["auc"] = auc_label
 
-        if self.save_path is not None:
-            self.save_path.mkdir(parents=True, exist_ok=True)
-            if fpr_tpr_per_class is not None:
-                self._plot_roc_multiclass(
-                    fpr_tpr_per_class,
-                    auc,
-                    self.best_epoch,
-                    class_labels=unique_classes,
-                    n_model_classes=n_model_classes,
-                )
-            else:
-                fpr, tpr, _ = roc_curve(y_true, y_prob)
-                self._plot_roc(fpr, tpr, auc, self.best_epoch)
-            self._plot_confusion_matrix(y_true, y_pred, self.best_epoch)
-
-            df = pd.DataFrame([results])
-            results_path = (
-                self.save_path / f"{self.name}_e{self.best_epoch}_test_results.csv"
+        self.save_path.mkdir(parents=True, exist_ok=True)
+        if fpr_tpr_per_class is not None:
+            self._plot_roc_multiclass(
+                fpr_tpr_per_class,
+                auc,
+                self.best_epoch,
+                class_labels=unique_classes,
+                n_model_classes=n_model_classes,
             )
-            df.to_csv(results_path, index=False)
-            logger.info("Test set results saved to %s", results_path)
+        else:
+            fpr, tpr, _ = roc_curve(y_true, y_prob)
+            self._plot_roc(fpr, tpr, auc, self.best_epoch)
+        self._plot_confusion_matrix(y_true, y_pred, self.best_epoch)
+
+        df = pd.DataFrame([results])
+        results_path = (
+            self.save_path / f"{self.name}_e{self.best_epoch}_test_results.csv"
+        )
+        df.to_csv(results_path, index=False)
+        logger.info("Test set results saved to %s", results_path)
 
         if is_binary:
             logger.info(

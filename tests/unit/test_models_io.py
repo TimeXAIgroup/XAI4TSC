@@ -10,6 +10,7 @@ from torch import nn
 
 from xai4tsc.models.base import ModelBase, predict_probs
 from xai4tsc.models.models import (
+    FCN,
     LSTM,
     MODELS,
     XLSTM,
@@ -18,6 +19,7 @@ from xai4tsc.models.models import (
     ResNet,
     _parallel_mlstm,
     _ResidualBlock,
+    load_ext_model,
     load_model,
     register_model,
     save_model,
@@ -114,6 +116,68 @@ def test_load_model_registry_sets_operational_attrs(tmp_path):
     # init_params are filtered against the constructor signature and stored.
     assert model._init_params["in_channels"] == 1
     assert model._init_params["num_classes"] == 2
+
+
+_EXT_MODEL_SOURCE = """
+from torch import nn
+
+from xai4tsc.models.base import ModelBase
+
+
+class ExtModel(ModelBase):
+    def __init__(self, in_channels: int = 1, num_classes: int = 2):
+        super().__init__()
+        self.fc = nn.Linear(in_channels, num_classes)
+
+    def forward(self, x):
+        return self.fc(x.mean(-1))
+"""
+
+
+@pytest.mark.unit
+def test_external_class_checkpoint_keeps_its_init_params(tmp_path):
+    # The external branch used to overwrite _init_params with {} right after
+    # load_ext_model had recorded them, which left the checkpoint sidecar
+    # unable to say how to rebuild the model.
+    source = tmp_path / "ext_model.py"
+    source.write_text(_EXT_MODEL_SOURCE)
+    config = {
+        "model": "ExtModelName",
+        "class_name": "ExtModel",
+        "class_path": str(source),
+        "init_params": {"in_channels": 1, "num_classes": 3},
+    }
+
+    built = load_ext_model(
+        model_name="ExtModelName",
+        class_name="ExtModel",
+        model_path=source,
+        model_params=config["init_params"],
+    )
+    ckpt = tmp_path / "ExtModelName_epoch_1.pt"
+    torch.save(built.state_dict(), ckpt)
+
+    reloaded = load_model(
+        {**config, "model_ckpt_path": str(ckpt)}, device="cpu", save_path=tmp_path
+    )
+
+    assert reloaded._init_params == {"in_channels": 1, "num_classes": 3}
+    # With the arguments recorded, the sidecar can now be written and reloaded.
+    reloaded.save_model(tmp_path / "ExtModelName_epoch_2.pt", epoch=2)
+    cfg = json.loads((tmp_path / "ExtModelName_epoch_2_config.json").read_text())
+    assert cfg["init_params"] == {"in_channels": 1, "num_classes": 3}
+
+
+@pytest.mark.unit
+def test_direct_construction_names_the_model_after_its_class():
+    # A model built with its constructor never reaches load_model, so it used to
+    # keep name=None and write its files as "None_epoch_2.pt".  The class name is
+    # always available and is what load_model would have set anyway.
+    model = FCN(in_channels=1, num_classes=2)
+    assert model.name == "FCN"
+    assert _TinyModel().name == "_TinyModel"
+    # Only the name is defaulted: a destination is still the caller's to supply.
+    assert model.save_path is None
 
 
 @pytest.mark.unit
@@ -956,6 +1020,115 @@ def test_explicit_start_epoch_overrides_the_checkpoint(tmp_path):
 
     assert model.best_epoch in (101, 102)
     assert list(tmp_path.glob("FCN_epoch_10*.pt"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model_class", list(MODELS.values()))
+def test_every_builtin_records_json_safe_init_params(model_class):
+    # The sidecar is JSON, and a value it cannot encode means no sidecar at all.
+    # locals() also carries the __class__ cell that a zero-arg super() puts in
+    # scope, which is not encodable - hence the check rather than a spot test.
+    model = model_class(in_channels=1, num_classes=2)
+
+    assert model._init_params, f"{model_class.__name__} records nothing"
+    assert "self" not in model._init_params
+    assert not [k for k in model._init_params if k.startswith("__")]
+    json.dumps(model._init_params)
+
+
+@pytest.mark.unit
+def test_recorded_params_include_defaults_not_only_what_was_passed():
+    # Recording the defaults too is what lets an old checkpoint rebuild the same
+    # architecture after a default changes in a later version.
+    model = FCN(in_channels=1, num_classes=2)
+
+    assert model._init_params == {
+        "in_channels": 1,
+        "num_classes": 2,
+        "filters": (128, 256, 128),
+        "kernel_sizes": (8, 5, 3),
+    }
+
+
+@pytest.mark.unit
+def test_configure_sets_operational_attrs_and_chains():
+    model = FCN(in_channels=1, num_classes=2).configure(
+        device="cpu", save_path="/tmp/does-not-need-to-exist", name="Renamed"
+    )
+
+    assert model.name == "Renamed"
+    assert model.device == torch.device("cpu")
+    assert model.save_path == Path("/tmp/does-not-need-to-exist")
+    # Architecture record is the constructor's business, untouched by configure.
+    assert model._init_params["in_channels"] == 1
+
+
+@pytest.mark.unit
+def test_configure_leaves_omitted_attrs_alone():
+    # Otherwise a later call that sets one attribute silently clears the others.
+    model = FCN(in_channels=1, num_classes=2).configure(
+        device="cpu", save_path="/tmp/first"
+    )
+
+    model.configure(name="Second")
+
+    assert model.name == "Second"
+    assert model.save_path == Path("/tmp/first")
+    assert model.device == torch.device("cpu")
+
+
+@pytest.mark.unit
+def test_unencodable_init_params_skip_the_sidecar_and_name_the_key(tmp_path, caplog):
+    # A directly built model can be handed anything, unlike a YAML config. Say
+    # which argument is the problem instead of writing a truncated config.
+    class _Unencodable(ModelBase):
+        def __init__(self, in_channels: int = 1, transform=None):
+            super().__init__()
+            self._record_init_params(locals())
+            self.fc = nn.Linear(in_channels, 2)
+
+        def forward(self, x):
+            return self.fc(x.mean(-1))
+
+    model = _Unencodable(transform=lambda v: v)
+
+    with caplog.at_level("WARNING", logger="xai4tsc.models.base"):
+        model.save_model(tmp_path / "_Unencodable_epoch_1.pt", epoch=1)
+
+    assert not list(tmp_path.glob("*_config.json"))
+    assert "transform" in caplog.text
+    assert (tmp_path / "_Unencodable_epoch_1.pt").exists(), "weights still saved"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["train_model", "evaluate_model"])
+def test_writing_without_a_destination_raises(method):
+    # Falling back to the working directory used to scatter checkpoints and
+    # plots wherever the caller happened to be standing.
+    model = FCN(in_channels=1, num_classes=2)
+    data, labels = _tiny_batch()
+
+    with pytest.raises(ValueError, match="needs a save_path"):
+        getattr(model, method)(data, labels, _TRAIN_HP)
+
+
+@pytest.mark.unit
+def test_directly_built_model_writes_files_named_after_its_class(tmp_path):
+    # The regression guard for the "None_*" litter: a model that never went
+    # through load_model still names every artifact it writes.
+    model = FCN(in_channels=1, num_classes=2)
+    data, labels = _tiny_batch()
+
+    model.train_model(data, labels, _TRAIN_HP, save_path=tmp_path)
+    model.evaluate_model(data, labels, _TRAIN_HP)
+
+    written = sorted(f.name for f in tmp_path.iterdir())
+    assert not [f for f in written if f.startswith("None")], written
+    assert f"FCN_epoch_{model.best_epoch}.pt" in written
+    assert "FCN_training_curve.png" in written
+    # The constructor records its own arguments, so a directly built model does
+    # get a sidecar and its checkpoint reloads from the path alone.
+    assert len(list(tmp_path.glob("*_config.json"))) == 1
 
 
 # ── predict_probs ─────────────────────────────────────────────────────────────

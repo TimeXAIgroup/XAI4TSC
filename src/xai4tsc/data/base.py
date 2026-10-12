@@ -305,6 +305,91 @@ def _class_index_view(encoded: np.ndarray) -> np.ndarray:
     return arr.ravel()  # ordinal (n, 1)
 
 
+def _fit_label_encoder(
+    labels: np.ndarray,
+    encode: str = "label",
+    class_order: list | None = None,
+) -> tuple:
+    """
+    Fit the encoder for *encode* and return it with the encoded class indices.
+
+    Shared by :func:`_split_dataset` and by datasets that compute their own
+    partition (see :meth:`~xai4tsc.data.base.DatasetBase.split` overrides), so the
+    encoder choice, the 1-D ``int64`` target contract and the class-name log line
+    are written once.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Raw labels: scalars, or multi-hot rows for ``encode="multihot"``.
+    encode : str
+        Label encoding scheme.
+    class_order : list or None
+        Explicit class order for the ordinal encoder.
+
+    Returns
+    -------
+    tuple[object, np.ndarray]
+        The fitted encoder and the labels as 1-D ``int64`` class indices.
+    """
+    encoder = _make_encoder(encode, class_order=class_order)
+    # OneHot/Ordinal need a 2-D column; LabelEncoder (1-D) and MultiHotLabelEncoder
+    # (already 2-D multi-hot rows) consume their input shape directly.
+    if isinstance(encoder, (OneHotEncoder, OrdinalEncoder)):
+        labels = np.array(labels).reshape(-1, 1)
+    encoder.fit(labels)
+    indices = _class_index_view(encoder.transform(labels)).astype(np.int64)
+    _warn_unordered_ordinal(encode, class_order, encoder)
+    logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
+    return encoder, indices
+
+
+def _assemble_splits(
+    data: np.ndarray,
+    labels: np.ndarray,
+    metadata: pd.DataFrame | None,
+    index_sets: list[np.ndarray],
+) -> list[tuple]:
+    """
+    Build ``[(x, y, metadata), ...]`` from precomputed per-split index arrays.
+
+    The counterpart to :func:`_split_dataset` for a dataset that owns its own
+    partition: that function chooses the rows itself, this one is handed them. Both
+    produce the same shapes and the same metadata form (one list of per-sample
+    dicts per split), so the rest of the pipeline cannot tell which produced a
+    split.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Full ``(B, C, T)`` array.
+    labels : np.ndarray
+        Full label array, already encoded to 1-D ``int64`` class indices.
+    metadata : pd.DataFrame or None
+        Per-sample metadata, one row per sample, index-aligned with *data*.
+    index_sets : list of np.ndarray
+        Row indices per split, in the project's ``[train, test, val]`` order.
+
+    Returns
+    -------
+    list of tuple
+        One ``(x, y, metadata)`` tuple per entry in *index_sets*.
+    """
+    records = metadata.to_dict("records") if metadata is not None else None
+    splits = []
+    for indices in index_sets:
+        idx = np.asarray(indices, dtype=int)
+        meta = [records[i] for i in idx] if records is not None else None
+        splits.append(
+            (
+                np.asarray(data[idx], dtype=np.float32),
+                np.asarray(labels)[idx].astype(np.int64),
+                meta,
+            )
+        )
+    return splits
+
+
 def _split_dataset(
     data: np.ndarray,
     labels: np.ndarray,
@@ -317,15 +402,7 @@ def _split_dataset(
     class_order: list | None = None,
 ) -> tuple:
     """Split data into train / test / (optional) val with label encoding."""
-    encoder = _make_encoder(encode, class_order=class_order)
-    # OneHot/Ordinal need a 2-D column; LabelEncoder (1-D) and MultiHotLabelEncoder
-    # (already 2-D multi-hot rows) consume their input shape directly.
-    if isinstance(encoder, (OneHotEncoder, OrdinalEncoder)):
-        labels = np.array(labels).reshape(-1, 1)
-    encoder.fit(labels)
-    labels = _class_index_view(encoder.transform(labels)).astype(np.int64)
-    _warn_unordered_ordinal(encode, class_order, encoder)
-    logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
+    encoder, labels = _fit_label_encoder(labels, encode, class_order)
 
     val_set = not math.isclose(val_split, 0.0)
     # Fraction held out of training (validation + test combined).

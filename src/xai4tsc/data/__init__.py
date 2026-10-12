@@ -20,9 +20,9 @@ from .base import DatasetBase, class_names, decode_labels
 from .data_loaders import FORMAT_LOADERS, load_json, load_metadata
 from .datasets import (
     SYNTHETIC_DATASETS,
-    FreqShapesDataset,
     LocalDataset,
     SyntheticDataset,
+    SynthMultilabelFreqDataset,
     UcrUeaDataset,
     load_dataset,
     register_synthetic_dataset,
@@ -32,8 +32,8 @@ __all__ = [
     "FORMAT_LOADERS",
     "SYNTHETIC_DATASETS",
     "DatasetBase",
-    "FreqShapesDataset",
     "LocalDataset",
+    "SynthMultilabelFreqDataset",
     "SyntheticDataset",
     "UcrUeaDataset",
     "class_names",

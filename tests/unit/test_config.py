@@ -633,7 +633,7 @@ def test_master_is_not_runnable():
     assert master["results_rel_path"] is None
 
 
-_ENTRY_LINE = re.compile(r"^\s*- (method|model): (\S.*?)\s*(?:#.*)?$")
+_ENTRY_LINE = re.compile(r"^\s*- (method|model|dataset): (\S.*?)\s*(?:#.*)?$")
 _LIST_ITEM = re.compile(r"^\s*- \w+:")
 # "#   key: value   description" - three or more spaces separate value from prose,
 # which a YAML scalar like "[1, 5]" never contains.
@@ -647,13 +647,18 @@ def test_master_documented_defaults_match_the_code():
 
     master.yaml no longer *supplies* parameter defaults, which removes the risk of
     it overriding the code - but a stale comment would still misinform. This walks
-    every ``#   key: value`` line under a model or explainer entry and compares it
-    to that class's constructor default.
+    every ``#   key: value`` line under a model, explainer or dataset entry and
+    compares it to that class's constructor default.
     """
+    from xai4tsc.data.datasets import SYNTHETIC_DATASETS
     from xai4tsc.models.models import MODELS
     from xai4tsc.xai.explain import EXPLAINERS
 
-    registries = {"method": EXPLAINERS, "model": MODELS}
+    registries = {
+        "method": EXPLAINERS,
+        "model": MODELS,
+        "dataset": SYNTHETIC_DATASETS,
+    }
     current: tuple[str, dict] | None = None
     problems = []
 
@@ -664,7 +669,13 @@ def test_master_documented_defaults_match_the_code():
             continue
         if entry:
             kind, name = entry.group(1), entry.group(2).strip().strip('"')
-            cls = registries[kind].get(name.lower())
+            registry = registries[kind]
+            # Synthetic dataset keys are case-sensitive; model/explainer keys are
+            # lowercased. A non-synthetic dataset (UCR/UEA, local) has no class to
+            # introspect and falls through to `current = None`.
+            cls = (
+                registry.get(name) if kind == "dataset" else registry.get(name.lower())
+            )
             current = (
                 (name, inspect.signature(cls.__init__).parameters) if cls else None
             )

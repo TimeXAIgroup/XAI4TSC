@@ -13,7 +13,7 @@ from torch import nn
 
 from xai4tsc.data import load_dataset
 from xai4tsc.data.base import DatasetBase
-from xai4tsc.data.datasets import FreqShapesDataset, LocalDataset
+from xai4tsc.data.datasets import LocalDataset, SynthMultilabelFreqDataset
 from xai4tsc.xai import Domain
 from xai4tsc.xai._types import DATA_DOMAINS, resolve_data_domain
 from xai4tsc.xai.explain import _get_explanation
@@ -90,16 +90,16 @@ def test_local_dataset_takes_its_domain_from_the_caller():
 
 
 @pytest.mark.unit
-def test_freq_shapes_is_time_domain_despite_its_name():
-    # The *discriminative features* are frequencies localized in time; the arrays
+def test_multilabel_freq_is_time_domain_despite_its_name():
+    # The discriminative features are frequencies localized in time; the arrays
     # themselves are raw series, so a frequency explainer still applies to it.
-    assert FreqShapesDataset.data_domain is Domain.TIME
+    assert SynthMultilabelFreqDataset.data_domain is Domain.TIME
 
 
 @pytest.mark.unit
 def test_load_dataset_ignores_the_setting_for_a_synthetic_dataset(caplog):
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
-        ds = load_dataset("freq_shapes", data_domain="frequency")
+        ds = load_dataset("Synth_Multilabel_Freq", data_domain="frequency")
     assert ds.data_domain is Domain.TIME
     assert "is ignored" in caplog.text
 
@@ -211,7 +211,7 @@ def test_configured_data_domains_reads_each_dataset_kind():
         "data_config": {
             "datasets": [
                 {"dataset": "ECG200"},  # UCR: always raw series
-                {"dataset": "freq_shapes"},  # synthetic: declares its own
+                {"dataset": "Synth_Multilabel_Freq"},  # synthetic: declares its own
                 {"dataset": "spectra", "path": "/tmp/x", "data_domain": "frequency"},
             ]
         }

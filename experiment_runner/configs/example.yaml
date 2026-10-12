@@ -4,8 +4,8 @@
 # This is the config the runner uses by default:
 #     python -m experiment_runner.main
 #
-# It needs no download: the synthetic `freq_shapes` dataset is generated locally
-# (and cached). It trains TWO model architectures, explains them with THREE
+# It needs no download: the synthetic `Synth_Multilabel_Freq` dataset is generated
+# locally (and cached). It trains two model architectures, explains them with three
 # time-domain XAI methods, and scores those explanations with time-domain
 # metrics.
 #
@@ -23,18 +23,17 @@ general:
   device: "use_available"
 
 # --- Data: synthetic localized wave-packet dataset (no download) ---
-# `freq_shapes` ships a fixed, paper-faithful pre-split dataset committed under the
-# synthetic cache dir (cache/datasets/synthetic/freq_shapes/). With `cache_path` set
-# the runner loads that pre-split layout directly, preserving the original
-# train/val/test split — so `train_split`/`val_split` and any generation
-# `init_params` below are inert for this dataset (the generator is disabled for now).
+# `Synth_Multilabel_Freq` is generated on first use and cached under the synthetic
+# cache dir; it supplies its own stratified train/test/val partition (0.7/0.15/0.15,
+# seeded by the dataset), so the `train_split`/`val_split` below only have to agree
+# with it. Change the partition through `init_params: {train_ratio, test_ratio}`.
 data_config:
   default_settings:
-    train_split: 0.8
-    val_split: 0.1
+    train_split: 0.7
+    val_split: 0.15
   datasets:
-    - dataset: "freq_shapes"        # SyntheticDataset registry key
-      encode: "multihot"            # collapse multi-hot combos to class indices
+    - dataset: "Synth_Multilabel_Freq"   # SyntheticDataset registry key
+      encode: "multihot"                 # collapse multi-hot combos to class indices
 
 # --- Models: two different architectures, both trained ---
 train_config:

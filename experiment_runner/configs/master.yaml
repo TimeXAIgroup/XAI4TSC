@@ -124,27 +124,44 @@ data_config:
           sample_strategy: "stratified"
           max_series_length: 1000
 
-    - dataset: "freq_shapes"    # synthetic: localized wave-packet dataset, ships with
+    - dataset: "Synth_Multilabel_Freq"
+                                # synthetic: multi-label bursts localized in time and
+                                #   frequency, generated on first use and cached, with
                                 #   per-sample ground truth for the localization metrics
       encode: "multihot"        # its labels are multi-hot rows
-      init_params:              # generation params (defaults from FreqShapesDataset):
-                                #   n_samples: 600
-                                #   length: 500              series length T
-                                #   class_freqs: [7, 19, 37] one freq per attribute
-                                #   packet_len: 150          discriminative packet length
-                                #   n_global_distractors: 3
-                                #   n_local_distractors: 3
-                                #   seed: 0
-                                # NOTE - inert for freq_shapes today. It ships a fixed,
-                                # publication-faithful pre-split dataset committed under
-                                # cache/datasets/synthetic/freq_shapes/ (ground_truth in the
-                                # flat-list form). With 'cache_path' set the runner loads that
-                                # layout directly and preserves the original split; the
-                                # programmatic generator is disabled. Kept as the template for
-                                # other synthetic datasets. This is a temporary arrangement.
+      init_params:              # generation params (defaults from the dataset class,
+                                #   which are the source repository's and reproduce its
+                                #   published dataset exactly):
+                                #   sample_length: 500            series length T
+                                #   sampling_rate: 100            Hz; sets the time axis
+                                #                                 and the Nyquist bound
+                                #   discriminative_frequencies: [7, 19, 37]
+                                #                                 Hz, one per label bit;
+                                #                                 classes are their powerset
+                                #   frequency_window_length: 150
+                                #                                 burst length in samples
+                                #   num_samples_per_pattern: 500
+                                #                                 total = this x 2^n_freqs
+                                #   overlap_min: 0.25             overlap bounds between
+                                #   overlap_max: 0.5              consecutive bursts
+                                #   noise_std: 0.1
+                                #   sin_amplitude: 1.0
+                                #   num_full_distractions: 3      full-length distractors
+                                #   num_window_distractions: 3    windowed distractors
+                                #   train_ratio: 0.7              this dataset owns its
+                                #   test_ratio: 0.15              partition, so these
+                                #                                 replace train_split and
+                                #                                 val_split, which are
+                                #                                 ignored (a mismatch is
+                                #                                 warned about)
+                                #   seed: 42                      drives generation and the
+                                #                                 partition, as upstream
                                 # Ground truth lives in a separate metadata.json, one row per
                                 # sample: ground_truth = {class_index: [regions]} or a flat
-                                # [regions] list, plus non_discriminative.
+                                # [regions] list, plus non_discriminative. Region frequencies
+                                # are in Hz and the row records the sampling_rate they are
+                                # relative to; without one, a frequency is read as cycles per
+                                # series.
 
 train_config:
   default_settings:

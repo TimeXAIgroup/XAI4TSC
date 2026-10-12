@@ -110,8 +110,9 @@ python -m experiment_runner.main --conf experiment_runner/configs/example.yaml -
 Four ready-to-run configs ship under `experiment_runner/configs/`:
 
 - `example.yaml` — the go-to demo (and the default when `--conf` is omitted):
-  the synthetic `freq_shapes` dataset, two models, and time-domain explainers
-  and metrics. Needs no download.
+  the synthetic `Synth_Multilabel_Freq` dataset, two models, and time-domain
+  explainers and metrics. Needs no download, and nothing to generate by hand -
+  the dataset is generated on first use and cached.
 - `example_frequency.yaml` — the same dataset explained with FreqRISE in the
   frequency and time-frequency domains, scored with the frequency metrics.
 - `ucr_benchmark.yaml` / `uea_benchmark.yaml` — full-archive sweeps with a
@@ -134,7 +135,8 @@ Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
 development setup, code style and quality gate, testing conventions, and the
 pattern for adding a new model, explainer, or metric. By participating you agree
 to the [Code of Conduct](CODE_OF_CONDUCT.md). The project is released under the
-[MIT License](LICENSE).
+[MIT License](LICENSE); third-party code adapted into it is listed in
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 ---
 

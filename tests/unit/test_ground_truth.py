@@ -1,8 +1,5 @@
 """Unit tests for the ground-truth region schema and its masks."""
 
-import json
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
@@ -16,14 +13,22 @@ from xai4tsc.evaluation._ground_truth import (
 )
 from xai4tsc.utils import STFTransform
 
-_SHIPPED = (
-    Path(__file__).parents[2]
-    / "cache"
-    / "datasets"
-    / "synthetic"
-    / "freq_shapes"
-    / "test_metadata.json"
-)
+
+@pytest.fixture(scope="module")
+def published_test_split():
+    """
+    Generate the shipped dataset's test split, with its ground truth scoped.
+
+    These assertions used to read a committed copy of the dataset. The dataset is
+    generated now, so they generate it: the numbers below are properties of the
+    data itself (600 samples, 75 of them with no region, ~38 % coverage), not of a
+    file that happened to be in the checkout.
+    """
+    from xai4tsc.data.datasets import SynthMultilabelFreqDataset
+
+    ds = SynthMultilabelFreqDataset()
+    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    return ds, splits[1], encoder
 
 
 # ── the time-first case ───────────────────────────────────────────────────────
@@ -227,22 +232,98 @@ def test_multiple_freqs_mark_multiple_bins():
     assert mask[0, 3] and mask[0, 7]
 
 
+# ── frequency units: cycles per series, or Hz plus a sampling rate ────────────
+
+
+@pytest.mark.unit
+def test_a_frequency_without_a_sampling_rate_is_cycles_per_series():
+    """The unit a coefficient grid is indexed by, and the back-compatible default."""
+    region = GroundTruthRegion(freqs=(19.0,))
+
+    assert region.cycles(500) == (19.0,)
+    mask = coefficient_mask([region], (1, 251), signal_length=500, transform=None)
+    assert mask.sum() == 1
+    assert mask[0, 19]
+
+
+@pytest.mark.unit
+def test_a_frequency_in_hz_is_converted_against_the_series_duration():
+    """
+    With a sampling rate the frequency is Hz, so it scales by the duration.
+
+    500 samples at 100 Hz is a 5 s series, so 19 Hz completes 95 oscillations
+    across it and belongs in rFFT bin 95. Reading the stored 19 as a bin index
+    instead is the defect this guards: it masks 3.8 Hz, where no class signal is,
+    and the metric then reports chance for every explainer.
+    """
+    region = GroundTruthRegion(freqs=(19.0,), sampling_rate=100.0)
+
+    assert region.cycles(500) == (95.0,)
+    mask = coefficient_mask([region], (1, 251), signal_length=500, transform=None)
+    assert mask.sum() == 1
+    assert mask[0, 95]
+
+
+@pytest.mark.unit
+def test_a_sampling_rate_on_the_sample_row_reaches_every_region():
+    """Stating the rate once per sample must scope it over that sample's regions."""
+    regions = regions_for_sample(
+        {
+            "ground_truth": [
+                {"pos": 0, "len": 150, "freq": 7},
+                {"pos": 200, "len": 150, "freq": 37},
+            ],
+            "sampling_rate": 100,
+        }
+    )
+
+    assert [r.sampling_rate for r in regions] == [100.0, 100.0]
+    assert [r.cycles(500) for r in regions] == [(35.0,), (185.0,)]
+
+
+@pytest.mark.unit
+def test_a_regions_own_sampling_rate_wins_over_the_rows():
+    regions = regions_for_sample(
+        {
+            "ground_truth": [{"freq": 7, "sampling_rate": 50}, {"freq": 7}],
+            "sampling_rate": 100,
+        }
+    )
+
+    assert [r.cycles(500) for r in regions] == [(70.0,), (35.0,)]
+
+
+@pytest.mark.unit
+def test_hz_scales_onto_the_time_frequency_grid_too():
+    stft = STFTransform(n_fft=16, win_length=16, hop_length=8)
+    stft.forward(torch.randn(1, 1, 64))
+    regions = regions_for_sample(
+        {
+            "ground_truth": [{"channel": 0, "pos": 16, "len": 16, "freq": 8}],
+            "sampling_rate": 32,
+        }
+    )
+
+    mask = coefficient_mask(regions, (1, 9, 9), signal_length=64, transform=stft)
+
+    # 8 Hz over 64 samples at 32 Hz is 16 cycles/series -> STFT bin round(16*16/64)=4.
+    assert mask[0, 4, 2] and mask[0, 4, 3]
+    assert not mask[0, 1].any(), "the pre-conversion bin must no longer be marked"
+
+
 # ── the shipped dataset still parses and masks identically ────────────────────
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(not _SHIPPED.exists(), reason="shipped freq_shapes metadata absent")
-def test_every_shipped_region_parses():
+def test_every_generated_region_parses(published_test_split):
     """
-    The committed dataset is not rewritten, so it must parse as it stands.
+    The generator's own output must parse as it stands.
 
-    This is the guard on `from_mapping`: the regions on disk use the singular
+    This is the guard on `from_mapping`: the regions it writes use the singular
     field names, and a normalisation slip would change every mask silently.
     """
-    rows = json.loads(_SHIPPED.read_text())
-    rows = rows if isinstance(rows, list) else list(rows.values())
-
-    parsed = [regions_for_sample(row) for row in rows]
+    _ds, (_x, _y, metadata), _encoder = published_test_split
+    parsed = [regions_for_sample(row) for row in metadata]
 
     assert len(parsed) == 600
     assert sum(1 for r in parsed if not r) == 75, (
@@ -250,25 +331,26 @@ def test_every_shipped_region_parses():
     )
     flat = [region for regions in parsed for region in regions]
     assert flat, "the rest must yield regions"
-    assert all(r.channels == (0,) for r in flat), "the shipped dataset is univariate"
+    assert all(r.channels == (0,) for r in flat), "this dataset is univariate"
     assert all(len(r.freqs) == 1 for r in flat), "one frequency component per region"
     assert all(r.length == 150 for r in flat), "fixed-width bursts"
+    assert all(r.sampling_rate == 100 for r in flat), (
+        "the row's sampling rate must reach every region, or its frequency in Hz "
+        "is read as cycles per series and the mask lands on the wrong bins"
+    )
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(not _SHIPPED.exists(), reason="shipped freq_shapes metadata absent")
-def test_shipped_regions_mask_the_expected_time_fraction():
+def test_regions_mask_the_expected_time_fraction(published_test_split):
     """
     Coverage sets the chance level, so a score has to be read against it.
 
     A mean of ~38 % means a random attribution scores ~0.38 on Pointing Game, not
     0.5; pinning it here keeps that number discoverable.
     """
-    rows = json.loads(_SHIPPED.read_text())
-    rows = rows if isinstance(rows, list) else list(rows.values())
-
+    _ds, (_x, _y, metadata), _encoder = published_test_split
     coverage = np.array(
-        [time_mask(regions_for_sample(row), 1, 500).mean() for row in rows]
+        [time_mask(regions_for_sample(row), 1, 500).mean() for row in metadata]
     )
 
     assert coverage.max() < 1.0, "a fully covered sample would make the metric vacuous"
@@ -566,48 +648,38 @@ def test_no_recorded_target_keeps_everything():
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(not _SHIPPED.exists(), reason="shipped freq_shapes metadata absent")
-def test_freq_shapes_annotates_the_class_each_frequency_marks():
+def test_each_frequency_is_scoped_to_the_classes_it_marks(published_test_split):
     """
-    A label bit of this dataset means "a packet at class_freqs[bit] is present".
+    A label bit of this dataset means "a burst at that frequency is present".
 
-    The stored regions carry only the frequency, so the dataset derives which
-    encoded classes each one marks — every combination whose bit is set.
+    The regions carry only the frequency, so the dataset derives which encoded
+    classes each one marks - every combination whose bit is set.
     """
-    from xai4tsc.data.datasets import FreqShapesDataset
-
-    ds = FreqShapesDataset()
-    splits, encoder = ds.load_saved_splits(_SHIPPED.parent, encode="multihot")
-    rows = splits[1][2].to_dict("records")
+    ds, (_x, _y, metadata), encoder = published_test_split
 
     expected = {
         freq: tuple(k for k, combo in enumerate(encoder.classes_) if combo[bit])
-        for bit, freq in enumerate(ds.class_freqs)
+        for bit, freq in enumerate(ds.discriminative_frequencies)
     }
-    annotated = [r for row in rows for r in row["ground_truth"]]
+    scoped = [r for row in metadata for r in row["ground_truth"]]
 
-    assert annotated
-    assert all(tuple(r["classes"]) == expected[r["freq"]] for r in annotated)
+    assert scoped
+    assert all(tuple(r["classes"]) == expected[r["freq"]] for r in scoped)
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(not _SHIPPED.exists(), reason="shipped freq_shapes metadata absent")
-def test_each_class_gets_its_own_mask_on_a_multi_label_sample():
+def test_each_class_gets_its_own_mask_on_a_multi_label_sample(published_test_split):
     """
     The whole point of the per-class scope.
 
-    `freq_shapes` overlaps co-occurring class windows by 25-50 % by design, so
-    scoring every class against the union would discard exactly what the dataset
-    was built to measure — and give each class an identical mask.
+    The dataset overlaps co-occurring class windows by 25-50 % by design, so
+    scoring every class against the union would discard exactly what it was built
+    to measure - and give each class an identical mask.
     """
-    from xai4tsc.data.datasets import FreqShapesDataset
+    _ds, (_x, _y, metadata), encoder = published_test_split
 
-    ds = FreqShapesDataset()
-    splits, encoder = ds.load_saved_splits(_SHIPPED.parent, encode="multihot")
-    rows = splits[1][2].to_dict("records")
-
-    # A sample carrying two discriminative packets.
-    row = next(r for r in rows if len(r["ground_truth"]) == 2)
+    # A sample carrying two discriminative bursts.
+    row = next(r for r in metadata if len(r["ground_truth"]) == 2)
     regions = regions_for_sample(row)
     masks = {
         k: time_mask(regions_for_class(regions, k), 1, 500).tobytes()

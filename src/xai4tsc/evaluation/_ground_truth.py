@@ -21,12 +21,19 @@ The time domain comes first: ``pos`` and ``length`` are all a time-domain datase
 has to provide, and they are what every localization metric reads. ``freqs`` and
 ``phases`` are the optional augmentation that only the frequency and
 time-frequency metrics consume.
+
+A frequency is read as cycles per series, which is the unit a coefficient grid is
+indexed by. A dataset annotating in Hz instead records the ``sampling_rate`` its
+frequencies are relative to - on the region, or once on the sample row - and
+:meth:`GroundTruthRegion.cycles` converts. Getting that wrong is quiet and costly:
+the mask lands on bins the class signal never occupies, and the metric then reports
+chance however good the attribution is.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -54,7 +61,13 @@ _LENGTH_KEYS = ("len", "length")
 """Accepted spellings of the interval length: the stored key and the field name."""
 
 _KNOWN_KEYS = frozenset(
-    {"pos", *_LENGTH_KEYS, *_SCALAR_ALIASES, *_SCALAR_ALIASES.values()}
+    {
+        "pos",
+        "sampling_rate",
+        *_LENGTH_KEYS,
+        *_SCALAR_ALIASES,
+        *_SCALAR_ALIASES.values(),
+    }
 )
 """Every key a stored region may carry.
 
@@ -149,11 +162,19 @@ class GroundTruthRegion:
     classes : tuple of int or None
         Classes the region discriminates; ``None`` means every class.
     freqs : tuple of float
-        Frequency components, in cycles per series. Read only by the frequency
-        and time-frequency metrics; empty for a time-domain region.
+        Frequency components. Read only by the frequency and time-frequency
+        metrics; empty for a time-domain region. The unit depends on
+        :attr:`sampling_rate`: without one they are cycles per series, with one
+        they are Hz. See :meth:`cycles`.
     phases : tuple of float
         Phases, paired with :attr:`freqs` by index. Recorded for completeness;
         no metric reads them.
+    sampling_rate : float or None
+        Sampling rate in Hz that :attr:`freqs` is relative to. ``None`` means
+        :attr:`freqs` is already in cycles per series, which is the unit a
+        coefficient grid is indexed by, so nothing needs converting. A dataset
+        that annotates in Hz - the natural unit for a physical signal - records
+        the rate alongside its regions and :meth:`cycles` converts.
     """
 
     pos: int = 0
@@ -162,6 +183,7 @@ class GroundTruthRegion:
     classes: tuple[int, ...] | None = None
     freqs: tuple[float, ...] = ()
     phases: tuple[float, ...] = ()
+    sampling_rate: float | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping) -> GroundTruthRegion:
@@ -218,6 +240,7 @@ class GroundTruthRegion:
         classes = pick("classes")
         freqs = pick("freqs")
         phases = pick("phases")
+        rate = raw.get("sampling_rate")
 
         localizing = {"pos", *_LENGTH_KEYS, "freq", "freqs"} & set(raw)
         if not localizing:
@@ -237,7 +260,36 @@ class GroundTruthRegion:
             classes=None if classes is None else _as_int_tuple(classes, "classes"),
             freqs=() if freqs is None else _as_float_tuple(freqs, "freqs"),
             phases=() if phases is None else _as_float_tuple(phases, "phases"),
+            sampling_rate=(
+                None if rate is None else _as_float_tuple(rate, "sampling_rate")[0]
+            ),
         )
+
+    def cycles(self, signal_length: int) -> tuple[float, ...]:
+        """
+        Return :attr:`freqs` as cycles per series, converting from Hz if needed.
+
+        A coefficient grid is indexed by cycles per series: rFFT bin ``k`` of a
+        length-``T`` signal is the component completing ``k`` oscillations across
+        those ``T`` samples, with no sampling rate involved. A frequency in Hz is
+        a count per second instead, so it scales by the series duration
+        ``signal_length / sampling_rate``: at 100 Hz over 500 samples the series
+        lasts 5 s, and 7 Hz is 35 cycles per series.
+
+        Parameters
+        ----------
+        signal_length : int
+            Length ``T`` of the time-domain series.
+
+        Returns
+        -------
+        tuple of float
+            One value per entry of :attr:`freqs`, in cycles per series.
+        """
+        if self.sampling_rate is None:
+            return self.freqs
+        scale = signal_length / self.sampling_rate
+        return tuple(freq * scale for freq in self.freqs)
 
     def interval(self, signal_length: int) -> tuple[int, int]:
         """
@@ -293,6 +345,10 @@ def regions_for_sample(sample_meta: object) -> list[GroundTruthRegion]:
     key recorded as the region's :attr:`~GroundTruthRegion.classes` scope when
     the region does not state one itself.
 
+    A ``sampling_rate`` recorded on the sample row applies to every region of that
+    sample, so a dataset annotating in Hz states the rate once rather than on each
+    region. A region carrying its own rate keeps it.
+
     Parameters
     ----------
     sample_meta : object
@@ -332,24 +388,50 @@ def regions_for_sample(sample_meta: object) -> list[GroundTruthRegion]:
                 region = GroundTruthRegion.from_mapping(_require_mapping(raw))
                 # The outer key names the class unless the region states its own.
                 if region.classes is None:
-                    region = GroundTruthRegion(
-                        pos=region.pos,
-                        length=region.length,
-                        channels=region.channels,
-                        classes=scope,
-                        freqs=region.freqs,
-                        phases=region.phases,
-                    )
+                    region = replace(region, classes=scope)
                 regions.append(region)
-        return regions
+        return _with_sampling_rate(regions, sample_meta)
 
     if isinstance(gt, Sequence) and not isinstance(gt, str):
-        return [GroundTruthRegion.from_mapping(_require_mapping(raw)) for raw in gt]
+        return _with_sampling_rate(
+            [GroundTruthRegion.from_mapping(_require_mapping(raw)) for raw in gt],
+            sample_meta,
+        )
 
     raise ValueError(
         "ground_truth should be a list of regions or a {class: [regions]} mapping, "
         f"got {type(gt).__name__}"
     )
+
+
+def _with_sampling_rate(
+    regions: list[GroundTruthRegion], sample_meta: Mapping
+) -> list[GroundTruthRegion]:
+    """
+    Apply the sample row's ``sampling_rate`` to the regions that lack one.
+
+    Parameters
+    ----------
+    regions : list of GroundTruthRegion
+        The sample's parsed regions.
+    sample_meta : Mapping
+        The sample's metadata row, which may carry ``sampling_rate``.
+
+    Returns
+    -------
+    list of GroundTruthRegion
+        The regions, each with a sampling rate if one was available.
+    """
+    rate = sample_meta.get("sampling_rate")
+    if rate is None:
+        return regions
+    rate = _as_float_tuple(rate, "sampling_rate")[0]
+    return [
+        region
+        if region.sampling_rate is not None
+        else replace(region, sampling_rate=rate)
+        for region in regions
+    ]
 
 
 def _require_mapping(raw: object) -> Mapping:
@@ -465,7 +547,8 @@ def coefficient_mask(
         Shape of one sample's attribution: ``(C, n_freq)`` for a frequency
         explanation or ``(C, n_freq, n_time)`` for a time-frequency one.
     signal_length : int
-        Length ``T`` of the time-domain series (sets the frequency scale).
+        Length ``T`` of the time-domain series (sets the frequency scale, and the
+        duration a region's frequency in Hz is converted against).
     transform : DomainTransform or None
         The explanation's transform; ``n_fft`` / ``hop_length`` are read from it
         for the STFT grid geometry when present.
@@ -494,10 +577,10 @@ def coefficient_mask(
             continue
         # A region with no frequency recorded is not localized in frequency, so it
         # marks the whole column; the time extent still applies.
-        freqs = region.freqs or (0.0,)
-        for freq in freqs:
-            # STFT bin scales cycles/sample (freq/T) onto the n_fft grid; rFFT bin
-            # over the full series is just the cycles-per-series count == freq.
+        cycles = region.cycles(signal_length) or (0.0,)
+        for freq in cycles:
+            # An rFFT bin over the full series *is* the cycles-per-series count;
+            # an STFT bin rescales cycles/sample (freq/T) onto the n_fft grid.
             scale = n_fft / signal_length if (is_tf and n_fft) else 1.0
             f_bin = min(max(round(freq * scale), 0), n_freq - 1)
             for channel in channels:

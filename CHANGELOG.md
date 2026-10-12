@@ -22,6 +22,31 @@ by `generate_explanation()` are unaffected.
 
 ### Added
 
+- **The synthetic dataset is now generated instead of shipped, and loads through the
+  package API.** `freq_shapes` could only be read by the runner: its generator was
+  a placeholder that raised, and the data was committed to the repository (11 MB)
+  where a package install could never find it, so the documented
+  `load_dataset(...).split(...)` path raised and told the caller to set a runner
+  config key. The dataset is now `Synth_Multilabel_Freq`, generated on first use
+  and cached, with its generator and its own stratified partition ported from
+  [multilabel-ts-xai-benchmark](https://github.com/TimeXAIgroup/multilabel-ts-xai-benchmark)
+  (MIT, recorded in `THIRD_PARTY_LICENSES.md`). At its defaults it reproduces that
+  project's published dataset bit-for-bit - 4000 samples, 2800/600/600 - which a
+  digest test pins. The committed copy and its `.gitignore` negation chain are
+  gone.
+- **Ground-truth regions can be annotated in Hz.** A region frequency is read as
+  cycles per series, the unit a coefficient grid is indexed by. A dataset recording
+  physical frequencies now states the `sampling_rate` they are relative to, on the
+  region or once on the sample row, and `GroundTruthRegion.cycles()` converts.
+  Omitting it keeps the previous meaning, so existing metadata is unaffected.
+
+### Fixed
+
+- **`Time-Frequency AUC` scored against the wrong frequency bins, and so reported
+  chance for every explainer.** The shipped ground truth records its frequencies in
+  Hz (7/19/37 at 100 Hz over 500 samples) while the mask builder read them as
+  cycles per series, putting the mask on bins 7/19/37 where the true bins are
+  35/95/185.
 - **Every result is now reproducible on its own.** `general.reproducible: true`
   used to seed numpy and torch once per run, after which the RNG advanced through
   every split, model and explanation - so a result depended on which entries ran

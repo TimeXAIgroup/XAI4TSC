@@ -146,8 +146,8 @@ Example
 
 The shipped ``experiment_runner/configs/example.yaml`` is the go-to demo and the
 config the runner uses by default (``python -m experiment_runner.main``). It
-needs no download: the synthetic ``freq_shapes`` dataset is shared with the
-repository. It trains two model architectures (LeNet and FCN), explains them
+needs no download: the synthetic ``Synth_Multilabel_Freq`` dataset is generated
+on first use and cached. It trains two model architectures (LeNet and FCN), explains them
 with three time-domain methods (Integrated Gradients, Guided Backpropagation,
 and TSHAP), and scores those explanations with the Complexity and Pixel-Flipping
 metrics:

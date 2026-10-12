@@ -1,11 +1,14 @@
 """Dataset classes: ``UcrUeaDataset``, ``LocalDataset``, ``SyntheticDataset``."""
 
 import logging
+import math
 from abc import ABC, abstractmethod
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_UCR_UEA_dataset
 
@@ -13,14 +16,37 @@ from .._domains import Domain, resolve_data_domain
 from .._random import DEFAULT_SEED, resolve_rng
 from .base import (
     DatasetBase,
+    _assemble_splits,
     _class_index_view,
     _ensure_bct,
+    _fit_label_encoder,
     _impute_data,
     _make_encoder,
 )
 from .data_loaders import FORMAT_LOADERS
 
 logger = logging.getLogger(__name__)
+
+
+def _powerset(items: tuple | list) -> list[tuple]:
+    """
+    Return all ``2 ** n`` subsets of *items*, ordered by size then by value.
+
+    Parameters
+    ----------
+    items : tuple or list
+        The elements to combine.
+
+    Returns
+    -------
+    list of tuple
+        The subsets, starting with the empty one.
+    """
+    return [
+        combination
+        for size in range(len(items) + 1)
+        for combination in combinations(items, size)
+    ]
 
 
 def _pad_variable_length(x_nested: pd.DataFrame) -> np.ndarray:
@@ -586,63 +612,139 @@ class SyntheticDataset(DatasetBase, ABC):
         )
 
 
-class FreqShapesDataset(SyntheticDataset):
+class SynthMultilabelFreqDataset(SyntheticDataset):
     """
-    Localized wave-packet dataset for XAI time-frequency localization evaluation.
+    Multi-label synthetic dataset with time-frequency ground-truth explanations.
 
-    Each sample is a sum of windowed sinusoids ("wave packets"). A multi-hot label
-    marks which discriminative attributes are present; attribute ``k`` adds a
-    packet at its characteristic frequency ``class_freqs[k]`` placed at a random
-    time window. Non-discriminative distractor packets — global background
-    sinusoids and shorter local packets, all at *other* frequencies — are added so
-    the discriminative signal must be localized in both time and frequency.
+    Each sample is a sum of sinusoidal bursts. A multi-hot label marks which
+    discriminative frequencies are present: frequency ``k`` of
+    ``discriminative_frequencies`` contributes a burst of
+    ``frequency_window_length`` samples at a random time window, and the classes
+    are the power set of those frequencies (3 frequencies give 8 classes).
+    Non-discriminative distractor sinusoids are added at other frequencies, some
+    spanning the whole series and some windowed, so the discriminative signal has
+    to be localized in both time and frequency to be found.
 
-    The per-sample metadata records the ground-truth regions under
-    ``ground_truth`` plus distractors under ``non_discriminative``, as the plain
-    mappings that survive the JSON round-trip of ``save_splits``. The evaluation
-    side parses them into
-    :class:`~xai4tsc.evaluation._ground_truth.GroundTruthRegion` when a metric
-    needs them, so the stored shape is free to differ: both a flat region list and
-    the per-class ``{class: [region, ...]}`` mapping are read, and the singular
-    ``channel`` / ``freq`` / ``phase`` keys this dataset writes are accepted
-    alongside their plural forms. This makes the dataset a ground truth for the
-    localization metrics (e.g. TimeFrequencyAUC).
+    Per-sample metadata records the discriminative regions under ``ground_truth``
+    and the distractors under ``non_discriminative``, which makes this dataset a
+    ground truth for the localization metrics (e.g. ``Time-Frequency AUC``).
+    Regions are stored as the plain mappings that survive the JSON round-trip of
+    :meth:`~xai4tsc.data.base.DatasetBase.save_splits`, with the singular
+    ``channel`` / ``freq`` / ``phase`` keys;
+    :meth:`~xai4tsc.evaluation._ground_truth.GroundTruthRegion.from_mapping`
+    parses them.
 
-    .. note::
+    Region frequencies are recorded in Hz, as the source dataset writes them, and
+    every metadata row carries the ``sampling_rate`` they are relative to.
 
-       The programmatic generator is **currently disabled** —
-       :meth:`generate_dataset` is a placeholder that raises. ``freq_shapes`` ships
-       a fixed, paper-faithful pre-split dataset committed under the synthetic cache
-       dir (``cache/datasets/synthetic/freq_shapes/``); the runner loads it directly
-       as a pre-split layout via ``load_saved_splits`` when ``cache_path`` is set.
-       The constructor still accepts the original generation ``init_params`` so
-       existing configs do not break, but they are inert. This is a temporary
-       arrangement until the generator is validated.
+    The dataset owns its own train / test / val partition - the source
+    repository's two-stage stratified split, seeded by ``seed`` - so the
+    ``train_split`` and ``val_split`` arguments of :meth:`split` are not used.
+    Configure the partition with ``train_ratio`` and ``test_ratio`` instead.
+
+    Notes
+    -----
+    Adapted from the reference implementation at
+    https://github.com/TimeXAIgroup/multilabel-ts-xai-benchmark
+    (``data/benchmark.py``, ``generate_dataset.py``, ``utils.py``), MIT licensed,
+    Copyright (c) 2026 TimeXAIgroup; see ``THIRD_PARTY_LICENSES.md``.
+
+    References
+    ----------
+    J. Fischer, N. Gumpfer, T. Papenbrock, and J. Hannig, "A Synthetic Multi-Label
+    Time Series Classification Dataset with Time-Frequency Ground-Truth Explanation
+    for Evaluating Explainable Artificial Intelligence Methods", SSRN preprint
+    7389286. Dataset: https://doi.org/10.5281/zenodo.20744119
     """
 
     data_domain: Domain = Domain.TIME
-    """Raw series, despite the name: the *discriminative features* are frequencies
-    localized in time, while the arrays themselves are time-domain
-    ``(B, 1, 500)`` ``float32``."""
+    """Raw series: the discriminative features are frequencies localized in time,
+    but the arrays themselves are time-domain ``(B, 1, T)`` ``float32``."""
 
     def __init__(
         self,
-        name: str = "freq_shapes",
+        name: str = "Synth_Multilabel_Freq",
         cache_dir: str | Path | None = None,
-        seed: int = DEFAULT_SEED,
-        n_samples: int = 600,
-        length: int = 500,
-        class_freqs: tuple[int, ...] = (7, 19, 37),
-        packet_len: int = 150,
-        n_global_distractors: int = 3,
-        n_local_distractors: int = 3,
-        max_freq: int = 49,
+        seed: int = 42,
+        sample_length: int = 500,
+        sampling_rate: int = 100,
+        discriminative_frequencies: tuple[int, ...] = (7, 19, 37),
+        frequency_window_length: int = 150,
+        num_samples_per_pattern: int = 500,
+        overlap_min: float = 0.25,
+        overlap_max: float = 0.5,
+        noise_std: float = 0.1,
+        sin_amplitude: float = 1.0,
+        num_full_distractions: int = 3,
+        num_window_distractions: int = 3,
+        train_ratio: float = 0.7,
+        test_ratio: float = 0.15,
         max_samples: int | None = None,
         sample_strategy: str = "random",
         max_series_length: int | None = None,
         series_position: str = "first",
     ) -> None:
-        """Configure the generator; see class docstring for the parameter meaning."""
+        """
+        Configure the generator and the partition.
+
+        The defaults are the source repository's, and reproduce its published
+        dataset exactly: 4000 samples of length 500 at 100 Hz, split 2800/600/600.
+
+        Parameters
+        ----------
+        name : str
+            Dataset identifier (also the registry key).
+        cache_dir : str or Path or None
+            Cache root. ``None`` generates fresh on every :meth:`load` with no
+            persistence.
+        seed : int
+            Seed for generation and for the partition, as the source repository
+            uses one seed for both.
+        sample_length : int
+            Number of timesteps per sample.
+        sampling_rate : int
+            Sampling rate in Hz. Sets the time axis and the Nyquist frequency that
+            bounds the distractor pool.
+        discriminative_frequencies : tuple of int
+            Frequencies in Hz whose presence or absence defines the label bits.
+            All must lie below the Nyquist frequency.
+        frequency_window_length : int
+            Length in samples of each discriminative burst.
+        num_samples_per_pattern : int
+            Samples generated per class pattern; the total is this times
+            ``2 ** len(discriminative_frequencies)``.
+        overlap_min : float
+            Minimum fractional overlap between consecutive discriminative bursts.
+        overlap_max : float
+            Maximum fractional overlap between consecutive discriminative bursts.
+        noise_std : float
+            Standard deviation of the additive Gaussian background noise.
+        sin_amplitude : float
+            Amplitude of every sinusoidal component, discriminative or distractor.
+        num_full_distractions : int
+            Distractor sinusoids spanning the whole sample.
+        num_window_distractions : int
+            Distractor sinusoids placed in random windows of
+            ``frequency_window_length``. These are placed independently, so they
+            are not subject to the overlap bounds.
+        train_ratio : float
+            Fraction of samples in the training split.
+        test_ratio : float
+            Fraction of samples in the test split; validation takes the remainder.
+        max_samples, sample_strategy, max_series_length, series_position
+            Restriction parameters forwarded to
+            :class:`~xai4tsc.data.base.DatasetBase`. A sample restriction is
+            applied before the partition, so it changes which rows each split
+            holds.
+
+        Raises
+        ------
+        ValueError
+            If a burst is longer than a sample, a discriminative frequency is not
+            below the Nyquist frequency, the distractor pool cannot supply the
+            requested number of distinct distractors, or the split ratios do not
+            leave a positive validation fraction.
+        """
         super().__init__(
             name=name,
             cache_dir=cache_dir,
@@ -652,32 +754,551 @@ class FreqShapesDataset(SyntheticDataset):
             max_series_length=max_series_length,
             series_position=series_position,
         )
-        if packet_len > length:
+        if frequency_window_length > sample_length:
             raise ValueError(
-                f"packet_len ({packet_len}) must not exceed length ({length})."
+                f"frequency_window_length ({frequency_window_length}) must not "
+                f"exceed sample_length ({sample_length})."
             )
-        self.n_samples = n_samples
-        self.length = length
-        self.class_freqs = tuple(class_freqs)
-        self.packet_len = packet_len
-        self.n_global_distractors = n_global_distractors
-        self.n_local_distractors = n_local_distractors
-        self.max_freq = max_freq
+        nyquist = int(sampling_rate / 2)
+        out_of_band = [f for f in discriminative_frequencies if not 0 < f < nyquist]
+        if out_of_band:
+            raise ValueError(
+                f"discriminative_frequencies {out_of_band} are not below the "
+                f"Nyquist frequency ({nyquist} Hz) of sampling_rate "
+                f"{sampling_rate}."
+            )
+        pool_size = len(
+            [f for f in range(1, nyquist) if f not in discriminative_frequencies]
+        )
+        needed = max(num_full_distractions, num_window_distractions)
+        if needed > pool_size:
+            raise ValueError(
+                f"{needed} distinct distractors requested but only {pool_size} "
+                f"non-discriminative frequencies exist below {nyquist} Hz."
+            )
+        if not 0 < train_ratio < 1 or not 0 < test_ratio < 1:
+            raise ValueError(
+                f"train_ratio ({train_ratio}) and test_ratio ({test_ratio}) must "
+                "each lie strictly between 0 and 1."
+            )
+        if train_ratio + test_ratio >= 1:
+            raise ValueError(
+                f"train_ratio ({train_ratio}) + test_ratio ({test_ratio}) must be "
+                "below 1 so the validation split is non-empty."
+            )
+        self.sample_length = sample_length
+        self.sampling_rate = sampling_rate
+        self.discriminative_frequencies = tuple(discriminative_frequencies)
+        self.frequency_window_length = frequency_window_length
+        self.num_samples_per_pattern = num_samples_per_pattern
+        self.overlap_min = overlap_min
+        self.overlap_max = overlap_max
+        self.noise_std = noise_std
+        self.sin_amplitude = sin_amplitude
+        self.num_full_distractions = num_full_distractions
+        self.num_window_distractions = num_window_distractions
+        self.train_ratio = train_ratio
+        self.test_ratio = test_ratio
+
+    # ── Generation ─────────────────────────────────────────────────────────────
+
+    @property
+    def nyquist_frequency(self) -> int:
+        """Highest representable frequency in Hz, bounding the distractor pool."""
+        return int(self.sampling_rate / 2)
+
+    @property
+    def distractor_pool(self) -> np.ndarray:
+        """Integer frequencies in Hz available to distractors, in ascending order."""
+        return np.array(
+            [
+                f
+                for f in range(1, self.nyquist_frequency)
+                if f not in self.discriminative_frequencies
+            ]
+        )
+
+    def _cache_params(self) -> dict:
+        """
+        Return the generation parameters that define the cached blob's identity.
+
+        The partition ratios are deliberately absent: they slice the cached blob
+        rather than change it, so two configs that split it differently share one
+        generated copy.
+
+        Returns
+        -------
+        dict
+            Short keys mapped to their values, joined into the cache folder name.
+        """
+        return {
+            "a": self.sin_amplitude,
+            "dg": self.num_full_distractions,
+            "dw": self.num_window_distractions,
+            "f": "-".join(str(f) for f in self.discriminative_frequencies),
+            "fs": self.sampling_rate,
+            "n": self.num_samples_per_pattern,
+            "ov": f"{self.overlap_min}-{self.overlap_max}",
+            "sd": self.noise_std,
+            "t": self.sample_length,
+            "w": self.frequency_window_length,
+        }
+
+    def generate_dataset(self) -> tuple:
+        """
+        Generate the whole dataset, unsplit.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, pd.DataFrame]
+            ``(data, labels, metadata)`` where *data* is ``(B, 1, T)`` float32,
+            *labels* is ``(B, n_frequencies)`` multi-hot and *metadata* holds one
+            row per sample with ``ground_truth``, ``non_discriminative`` and
+            ``sampling_rate``.
+        """
+        rng = np.random.default_rng(self.seed)
+        time_axis = np.arange(self.sample_length) / self.sampling_rate
+        pool = self.distractor_pool
+
+        # First pass: draw every sample's regions. The signals are synthesised only
+        # afterwards, so the noise stream sits entirely downstream of this one.
+        labels, metadata = [], []
+        for pattern in _powerset(self.discriminative_frequencies):
+            label = [int(f in pattern) for f in self.discriminative_frequencies]
+            active = np.array(pattern)
+            for _ in range(self.num_samples_per_pattern):
+                labels.append(label)
+                if len(active) > 1:
+                    rng.shuffle(active)
+                metadata.append(
+                    {
+                        "ground_truth": self._draw_bursts(rng, active),
+                        "non_discriminative": self._draw_distractors(rng, pool),
+                        "sampling_rate": self.sampling_rate,
+                    }
+                )
+
+        # Second pass: synthesise each signal from the regions already drawn.
+        data = np.stack([self._make_sample(rng, row, time_axis) for row in metadata])
+        logger.info(
+            "Generated %d samples of length %d at %d Hz (%d classes).",
+            len(labels),
+            self.sample_length,
+            self.sampling_rate,
+            2 ** len(self.discriminative_frequencies),
+        )
+        return (
+            data[:, None, :],
+            np.array(labels, dtype=np.int64),
+            pd.DataFrame(metadata),
+        )
+
+    def _draw_bursts(self, rng: np.random.Generator, freqs: np.ndarray) -> list[dict]:
+        """
+        Draw one discriminative region per frequency in *freqs*.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            The generation stream.
+        freqs : np.ndarray
+            Active discriminative frequencies in Hz, already shuffled so that the
+            earliest window is not always the lowest frequency.
+
+        Returns
+        -------
+        list of dict
+            One region mapping per frequency, ordered by window position.
+        """
+        windows = self._place_windows(rng, len(freqs))
+        return [
+            {
+                "channel": 0,
+                "pos": start,
+                "len": stop - start,
+                "freq": int(freq),
+                "phase": float(rng.uniform(0, 2 * np.pi)),
+            }
+            for freq, (start, stop) in zip(freqs, windows, strict=True)
+        ]
+
+    def _draw_distractors(
+        self, rng: np.random.Generator, pool: np.ndarray
+    ) -> list[dict]:
+        """
+        Draw the non-discriminative components: full-length first, then windowed.
+
+        The two groups are drawn without replacement independently, so one
+        frequency may appear once in each group of the same sample.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            The generation stream.
+        pool : np.ndarray
+            Candidate frequencies in Hz, excluding the discriminative ones.
+
+        Returns
+        -------
+        list of dict
+            Region mappings for the full-length then the windowed distractors.
+        """
+        full = rng.choice(pool, size=self.num_full_distractions, replace=False)
+        regions = [
+            {
+                "channel": 0,
+                "pos": 0,
+                "len": self.sample_length,
+                "freq": int(freq),
+                "phase": float(rng.uniform(0, 2 * np.pi)),
+            }
+            for freq in full
+        ]
+        windowed = rng.choice(pool, size=self.num_window_distractions, replace=False)
+        # Placed one at a time, so these are exempt from the overlap bounds that
+        # apply between consecutive discriminative bursts.
+        windows = [self._place_windows(rng, 1)[0] for _ in windowed]
+        regions += [
+            {
+                "channel": 0,
+                "pos": start,
+                "len": stop - start,
+                "freq": int(freq),
+                "phase": float(rng.uniform(0, 2 * np.pi)),
+            }
+            for freq, (start, stop) in zip(windowed, windows, strict=True)
+        ]
+        return regions
+
+    def _place_windows(
+        self, rng: np.random.Generator, num_windows: int
+    ) -> list[tuple[int, int]]:
+        """
+        Return ``(start, stop)`` for *num_windows* windows placed in the series.
+
+        A single window is placed uniformly. Two or more are placed as one chain:
+        a hop is drawn per adjacent pair so consecutive windows overlap by between
+        ``overlap_min`` and ``overlap_max`` of their length, and the whole chain is
+        then shifted to a uniformly drawn offset. Only consecutive windows are
+        constrained, so with three windows the first and last never overlap.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            The generation stream.
+        num_windows : int
+            How many windows to place; ``0`` draws nothing and returns an empty
+            list.
+
+        Returns
+        -------
+        list of tuple of int
+            One ``(start, stop)`` pair per window, ordered in time.
+        """
+        width = self.frequency_window_length
+        if num_windows == 0:
+            return []
+        if num_windows == 1:
+            start = int(rng.integers(0, max(1, self.sample_length - width + 1)))
+            return [(start, start + width)]
+
+        hop_min = max(1, int(width * (1 - self.overlap_max)))
+        hop_max = max(hop_min, int(width * (1 - self.overlap_min)))
+        hops = rng.integers(hop_min, hop_max + 1, size=num_windows - 1)
+
+        span = int(hops.sum()) + width
+        if span > self.sample_length:
+            # The chain does not fit: shrink the hops proportionally, which tightens
+            # the overlap past overlap_max rather than dropping a window.
+            scale = (self.sample_length - width) / max(1, int(hops.sum()))
+            hops = np.maximum(1, (hops * scale)).astype(int)
+            span = int(hops.sum()) + width
+
+        offset = int(rng.integers(0, max(1, self.sample_length - span + 1)))
+        starts = [offset] + [
+            offset + int(hops[:k].sum()) for k in range(1, num_windows)
+        ]
+        return [(start, start + width) for start in starts]
+
+    def _make_sample(
+        self, rng: np.random.Generator, row: dict, time_axis: np.ndarray
+    ) -> np.ndarray:
+        """
+        Synthesise one signal from the regions already recorded for it.
+
+        Every component is a slice of a sinusoid evaluated on absolute time, so a
+        region's ``phase`` is its phase at ``t=0`` rather than at the window onset,
+        and the envelope is rectangular.
+
+        Parameters
+        ----------
+        rng : np.random.Generator
+            The generation stream; one noise draw is taken per sample.
+        row : dict
+            One metadata row, holding ``ground_truth`` and ``non_discriminative``.
+        time_axis : np.ndarray
+            ``arange(sample_length) / sampling_rate``, in seconds.
+
+        Returns
+        -------
+        np.ndarray
+            The signal, ``(sample_length,)`` float32.
+        """
+        signal = rng.normal(0, self.noise_std, self.sample_length).astype(np.float32)
+        regions = row["ground_truth"] + row["non_discriminative"]
+        for region in regions:
+            start = region["pos"]
+            stop = min(start + region["len"], self.sample_length)
+            signal[start:stop] += self.sin_amplitude * np.sin(
+                2 * np.pi * region["freq"] * time_axis[start:stop] + region["phase"]
+            )
+        return signal
+
+    # ── Splitting ──────────────────────────────────────────────────────────────
+
+    def split(
+        self,
+        train_split: float = 0.8,
+        val_split: float = 0.0,
+        random_state: int | None = DEFAULT_SEED,
+        encode: str = "label",
+        impute_missing: bool = False,
+        rng: np.random.Generator | None = None,
+        stratify: bool = True,
+        class_order: list | None = None,
+    ) -> tuple:
+        """
+        Generate (or load from cache) and apply this dataset's own partition.
+
+        The partition is the source repository's: two chained stratified
+        ``train_test_split`` calls seeded by this dataset's ``seed``, giving
+        ``train_ratio`` / ``test_ratio`` / remainder. It is a property of the
+        dataset rather than of the run, so re-running returns the same rows.
+
+        Parameters
+        ----------
+        train_split : float
+            Not used; the partition comes from ``train_ratio``. A value that
+            disagrees with it is reported once.
+        val_split : float
+            Not used; the validation fraction is ``1 - train_ratio - test_ratio``.
+            A value that disagrees with it is reported once.
+        random_state : int or None
+            Seeds the sample restriction only. The partition uses the dataset's
+            own ``seed``.
+        encode : str
+            Label encoding scheme; ``"multihot"`` is the fitting choice for this
+            dataset's multi-hot labels and the one that lets a region be scoped to
+            the classes it discriminates.
+        impute_missing : bool
+            Accepted for signature parity. Generated data holds no NaN, so there
+            is nothing to impute.
+        rng : np.random.Generator or None
+            Shared generator for the sample restriction; overrides *random_state*.
+        stratify : bool
+            Accepted for signature parity. The partition is stratified by class
+            combination by construction.
+        class_order : list or None
+            Explicit class order, forwarded to the encoder.
+
+        Returns
+        -------
+        tuple[list, encoder]
+            ``(splits, fitted_encoder)`` where *splits* is a list of
+            ``(X, y, metadata)`` tuples in order ``[train, test, val]``.
+        """
+        self._report_unused_ratios(train_split, val_split)
+        rng = resolve_rng(random_state, rng)
+
+        self._split_rng = rng
+        try:
+            data, labels, metadata = self.load()
+        finally:
+            self._split_rng = None
+
+        labels = np.asarray(labels)
+        data, labels, metadata = self._restrict(data, labels, metadata, rng)
+        full_length = data.shape[-1]
+        data = self._restrict_length_numpy(data)
+        if data.shape[-1] != full_length:
+            # The regions are positions in the generated series. Truncating it does
+            # not move them, so a region past the cut now describes signal that is
+            # no longer there; the masks clip rather than crash, which is exactly
+            # what makes this worth saying out loud.
+            logger.warning(
+                "'%s' was truncated from %d to %d timesteps, but its ground-truth "
+                "regions still describe the full series. Localization metrics will "
+                "score against regions that may fall outside the truncated signal.",
+                self.name,
+                full_length,
+                data.shape[-1],
+            )
+
+        encoder, targets = _fit_label_encoder(labels, encode, class_order)
+        splits = _assemble_splits(data, targets, metadata, self._partition(labels))
+        splits = [(x, y, self._scope_metadata(m, encoder)) for x, y, m in splits]
+        names = ("Training", "Test", "Validation")
+        for name, (x, _, _) in zip(names, splits, strict=True):
+            logger.info("%s data shape: %s", name, x.shape)
+        self._splits, self._encoder = splits, encoder
+        return self._splits, self._encoder
+
+    def _report_unused_ratios(self, train_split: float, val_split: float) -> None:
+        """
+        Warn when configured split fractions disagree with this dataset's own.
+
+        Silently ignoring them would leave a user editing ``train_split`` with no
+        effect and no explanation.
+
+        Parameters
+        ----------
+        train_split : float
+            The requested training fraction.
+        val_split : float
+            The requested validation fraction.
+        """
+        own_val = round(1 - self.train_ratio - self.test_ratio, 10)
+        mismatched = not math.isclose(
+            train_split, self.train_ratio, abs_tol=1e-9
+        ) or not math.isclose(val_split, own_val, abs_tol=1e-9)
+        if mismatched:
+            logger.warning(
+                "'%s' supplies its own partition (train %.4g / test %.4g / val "
+                "%.4g), so train_split=%.4g and val_split=%.4g are ignored. Set "
+                "train_ratio / test_ratio in init_params to change it.",
+                self.name,
+                self.train_ratio,
+                self.test_ratio,
+                own_val,
+                train_split,
+                val_split,
+            )
+
+    def _restrict(
+        self,
+        data: np.ndarray,
+        labels: np.ndarray,
+        metadata: pd.DataFrame | None,
+        rng: np.random.Generator,
+    ) -> tuple:
+        """
+        Apply ``max_samples`` to data, labels and metadata together.
+
+        :meth:`~xai4tsc.data.base.DatasetBase._restrict_samples_numpy` drops rows
+        from the arrays only, which would leave the metadata one row per original
+        sample and so no longer aligned. Selecting the indices once and applying
+        them to all three keeps the per-sample alignment the ground truth depends
+        on.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Full ``(B, C, T)`` array.
+        labels : np.ndarray
+            Full label array.
+        metadata : pd.DataFrame or None
+            Per-sample metadata, or ``None``.
+        rng : np.random.Generator
+            Stream for the sample selection.
+
+        Returns
+        -------
+        tuple
+            ``(data, labels, metadata)``, restricted and still index-aligned.
+        """
+        n = data.shape[0]
+        idx = self._select_sample_idx(n, labels, rng)
+        if len(idx) == n:
+            return data, labels, metadata
+        logger.info(
+            "Subsampling dataset from %d to %d samples (strategy: %s).",
+            n,
+            len(idx),
+            getattr(self, "_sample_strategy", "random"),
+        )
+        restricted = (
+            metadata.iloc[idx].reset_index(drop=True) if metadata is not None else None
+        )
+        return data[idx], labels[idx], restricted
+
+    def _partition(self, labels: np.ndarray) -> list[np.ndarray]:
+        """
+        Return the per-split row indices, in ``[train, test, val]`` order.
+
+        Ported from the source repository: a first stratified split peels off the
+        training rows, a second divides what is left into validation and test. The
+        stratification key is the string form of the multi-hot row, as there, and
+        both calls use this dataset's ``seed``. Sizes are rounded to absolute
+        counts before the call, which is what keeps the ratios exact.
+
+        Parameters
+        ----------
+        labels : np.ndarray
+            Multi-hot label rows, one per sample.
+
+        Returns
+        -------
+        list of np.ndarray
+            Train, test and validation row indices.
+        """
+        indices = np.arange(len(labels))
+        keys = [str(row) for row in np.asarray(labels).astype(int)]
+
+        train_size = round(self.train_ratio * len(indices))
+        train_idx, rest_idx = self._stratified_split(
+            indices, keys, len(indices) - train_size
+        )
+        rest_keys = [keys[i] for i in rest_idx]
+        test_size = round(self.test_ratio / (1 - self.train_ratio) * len(rest_idx))
+        val_idx, test_idx = self._stratified_split(rest_idx, rest_keys, test_size)
+        return [train_idx, test_idx, val_idx]
+
+    def _stratified_split(
+        self, indices: np.ndarray, keys: list[str], holdout: int
+    ) -> tuple:
+        """
+        Split *indices*, stratified by *keys*, falling back to random if it cannot.
+
+        A small ``num_samples_per_pattern`` leaves too few samples of some class
+        combination to stratify, which sklearn reports as a bare error. The base
+        splitter warns and falls back in that case, so this does too rather than
+        failing a run over a size the user is free to choose.
+
+        Parameters
+        ----------
+        indices : np.ndarray
+            Row indices to divide.
+        keys : list of str
+            Stratification key per entry of *indices*.
+        holdout : int
+            Number of rows to hold out.
+
+        Returns
+        -------
+        tuple
+            ``(kept, holdout)`` index arrays.
+        """
+        try:
+            return train_test_split(
+                indices,
+                test_size=holdout,
+                stratify=keys,
+                random_state=self.seed,
+            )
+        except ValueError:
+            logger.warning(
+                "Stratified split not possible for '%s' (a class combination has "
+                "too few samples); falling back to a random split. Raise "
+                "num_samples_per_pattern to stratify.",
+                self.name,
+            )
+            return train_test_split(indices, test_size=holdout, random_state=self.seed)
+
+    # ── Ground-truth class scoping ─────────────────────────────────────────────
 
     def load_saved_splits(self, directory: Path | str, encode: str = "label") -> tuple:
         """
-        Load the pre-split files and annotate each region with the classes it marks.
-
-        A label bit of this dataset means "the sample contains a packet at
-        ``class_freqs[bit]``", so a ground-truth region's frequency says
-        which bit it belongs to. Under the multi-hot encoding every combination is
-        its own class, so a region marks *every* class whose combination has that
-        bit set, and the evaluation side can score a per-class explanation against
-        the regions that actually belong to that class.
-
-        The annotation happens here rather than in the stored files: it depends on
-        the label encoding, which is resolved at load time, and the committed data
-        is deliberately left as produced.
+        Load the saved splits and scope each region to the classes it marks.
 
         Parameters
         ----------
@@ -693,14 +1314,70 @@ class FreqShapesDataset(SyntheticDataset):
             ``classes`` added to every ground-truth region.
         """
         splits, encoder = super().load_saved_splits(directory, encode=encode)
-        classes_for = self._classes_per_frequency(encoder)
-        if not classes_for:
-            return splits, encoder
-        annotated = [
-            (x, y, self._annotate_regions(metadata, classes_for))
-            for x, y, metadata in splits
+        scoped = [
+            (x, y, self._scope_metadata(metadata, encoder)) for x, y, metadata in splits
         ]
-        return annotated, encoder
+        self._splits = scoped
+        return scoped, encoder
+
+    def _scope_metadata(self, metadata: object, encoder: object) -> object:
+        """
+        Return *metadata* with each ground-truth region scoped to its classes.
+
+        A label bit of this dataset means "the sample contains a burst at
+        ``discriminative_frequencies[bit]``", so a region's frequency says which
+        bit it belongs to. Under the multi-hot encoding every combination is its
+        own class, so a region marks every class whose combination has that bit
+        set, and the evaluation side can then score a per-class explanation
+        against the regions that actually belong to that class.
+
+        The scoping happens here rather than in the stored files because it
+        depends on the label encoding, which is only resolved at load time.
+
+        Parameters
+        ----------
+        metadata : object
+            Per-sample metadata: a ``pd.DataFrame`` or a list of row mappings.
+            Anything else is returned unchanged.
+        encoder : object
+            The fitted label encoder.
+
+        Returns
+        -------
+        object
+            The same form as *metadata*, with ``classes`` added to each region.
+            Regions are rebuilt rather than mutated, so the loaded JSON objects
+            are left alone.
+        """
+        classes_for = self._classes_per_frequency(encoder)
+        if not classes_for or metadata is None:
+            return metadata
+
+        def scope(regions: object) -> object:
+            """Add the class scope to every region of one sample."""
+            if not isinstance(regions, list):
+                return regions
+            out = []
+            for region in regions:
+                if not isinstance(region, dict):
+                    out.append(region)
+                    continue
+                classes = classes_for.get(region.get("freq"))
+                out.append({**region, "classes": list(classes)} if classes else region)
+            return out
+
+        if isinstance(metadata, pd.DataFrame):
+            if "ground_truth" not in metadata:
+                return metadata
+            scoped = metadata.copy()
+            scoped["ground_truth"] = scoped["ground_truth"].map(scope)
+            return scoped
+        return [
+            {**row, "ground_truth": scope(row["ground_truth"])}
+            if isinstance(row, dict) and "ground_truth" in row
+            else row
+            for row in metadata
+        ]
 
     def _classes_per_frequency(self, encoder: object) -> dict[int, tuple[int, ...]]:
         """
@@ -719,94 +1396,21 @@ class FreqShapesDataset(SyntheticDataset):
             multi-hot and a frequency therefore says nothing about a class.
         """
         classes = list(getattr(encoder, "classes_", []))
-        n_bits = len(self.class_freqs)
+        n_bits = len(self.discriminative_frequencies)
         if not classes or any(np.ndim(c) != 1 or len(c) != n_bits for c in classes):
             return {}
         return {
             freq: tuple(
                 index for index, combo in enumerate(classes) if int(combo[bit]) == 1
             )
-            for bit, freq in enumerate(self.class_freqs)
+            for bit, freq in enumerate(self.discriminative_frequencies)
         }
-
-    @staticmethod
-    def _annotate_regions(
-        metadata: pd.DataFrame | None, classes_for: dict[int, tuple[int, ...]]
-    ) -> pd.DataFrame | None:
-        """
-        Return *metadata* with ``classes`` added to each ground-truth region.
-
-        Parameters
-        ----------
-        metadata : pd.DataFrame or None
-            One row per sample; the ``ground_truth`` column holds region mappings.
-        classes_for : dict
-            ``{frequency: (class_index, ...)}`` from
-            :meth:`_classes_per_frequency`.
-
-        Returns
-        -------
-        pd.DataFrame or None
-            A copy with the annotation; regions are rebuilt rather than mutated so
-            the loaded JSON objects are left alone.
-        """
-        if metadata is None or "ground_truth" not in metadata:
-            return metadata
-
-        def annotate(regions: object) -> object:
-            """Add the class scope to every region of one sample."""
-            if not isinstance(regions, list):
-                return regions
-            out = []
-            for region in regions:
-                if not isinstance(region, dict):
-                    out.append(region)
-                    continue
-                classes = classes_for.get(region.get("freq"))
-                out.append({**region, "classes": list(classes)} if classes else region)
-            return out
-
-        annotated = metadata.copy()
-        annotated["ground_truth"] = annotated["ground_truth"].map(annotate)
-        return annotated
-
-    def _cache_key(self) -> str:
-        """
-        Return the fixed cache folder name (``self.name``, i.e. ``freq_shapes``).
-
-        The dataset is a shipped fixed snapshot, not a parametric generation, so the
-        cache key is stable and independent of the (now inert) ``init_params``. This
-        makes :meth:`cache_subdir` resolve to the committed
-        ``…/synthetic/freq_shapes/`` pre-split layout the runner loads.
-        """
-        return self.name
-
-    def generate_dataset(self) -> tuple:
-        """
-        Disabled placeholder — the programmatic generator is turned off for now.
-
-        ``freq_shapes`` ships a fixed pre-split dataset committed under the synthetic
-        cache dir; the runner loads it directly (see the class docstring). This stub
-        exists only to satisfy the :class:`SyntheticDataset` ABC.
-
-        Raises
-        ------
-        NotImplementedError
-            Always — set ``cache_path`` so the runner loads the shipped pre-split
-            layout instead of generating.
-        """
-        raise NotImplementedError(
-            "freq_shapes ships a fixed pre-split dataset committed under the "
-            "synthetic cache dir (cache/datasets/synthetic/freq_shapes/); the "
-            "programmatic generator is disabled for now. Set `cache_path` so the "
-            "runner loads the pre-split layout via load_saved_splits."
-        )
 
 
 # ── Synthetic-dataset registry ──────────────────────────────────────────────────
 
 SYNTHETIC_DATASETS: dict[str, type] = {
-    "freq_shapes": FreqShapesDataset,
+    "Synth_Multilabel_Freq": SynthMultilabelFreqDataset,
 }
 
 

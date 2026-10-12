@@ -1,6 +1,8 @@
 """Unit tests for src/xai4tsc/data/ — no I/O beyond tmp_path, no network."""
 
+import hashlib
 import json
+from itertools import pairwise
 
 import numpy as np
 import pandas as pd
@@ -20,11 +22,12 @@ from xai4tsc.data.base import (
 from xai4tsc.data.data_loaders import load_json, load_metadata
 from xai4tsc.data.datasets import (
     SYNTHETIC_DATASETS,
-    FreqShapesDataset,
     LocalDataset,
     SyntheticDataset,
+    SynthMultilabelFreqDataset,
     UcrUeaDataset,
     _pad_variable_length,
+    _powerset,
     register_synthetic_dataset,
 )
 
@@ -567,13 +570,19 @@ def test_load_numpy_prefers_separate_metadata_file(tmp_path):
     assert metadata["region"].tolist() == ["x", "y"]
 
 
-# ── SyntheticDataset / FreqShapesDataset ────────────────────────────────────────
+# ── SyntheticDataset / SynthMultilabelFreqDataset ───────────────────────────────
 
 
 @pytest.mark.unit
 def test_load_dataset_dispatches_to_synthetic_not_ucr():
-    ds = load_dataset("freq_shapes", n_samples=16, length=64, packet_len=24, seed=1)
-    assert isinstance(ds, FreqShapesDataset)
+    ds = load_dataset(
+        "Synth_Multilabel_Freq",
+        num_samples_per_pattern=2,
+        sample_length=64,
+        frequency_window_length=16,
+        seed=1,
+    )
+    assert isinstance(ds, SynthMultilabelFreqDataset)
     assert not isinstance(ds, UcrUeaDataset)
 
 
@@ -581,8 +590,8 @@ class _SynthStub(SyntheticDataset):
     """
     Minimal concrete SyntheticDataset for exercising the ABC (caching/splits).
 
-    FreqShapesDataset's generator is now a disabled placeholder, so the cache /
-    split-roundtrip behaviour of the ABC is covered with this tiny stand-in.
+    The shipped dataset overrides split() to apply its own partition, so the ABC's
+    own cache / split-roundtrip behaviour is covered with this tiny stand-in.
     """
 
     _COMBOS = np.array(
@@ -625,29 +634,316 @@ class _SynthStub(SyntheticDataset):
         return data, labels, meta
 
 
-@pytest.mark.unit
-def test_freq_shapes_generator_disabled():
-    # The programmatic generator is a placeholder for now; loading uses the shipped
-    # pre-split layout in the synthetic cache dir instead.
-    with pytest.raises(NotImplementedError, match="pre-split"):
-        FreqShapesDataset(n_samples=8, length=32, packet_len=8).generate_dataset()
+# The published dataset this generator is a port of, pinned by digest rather than
+# by a committed copy of the 11 MB it used to ship as. Covers all three splits, so
+# it pins the partition as well as the generation; `n` is stated separately so a
+# shape change fails with a readable message instead of a hash mismatch.
+# Source: https://doi.org/10.5281/zenodo.20744119
+_PUBLISHED = {
+    "train": {
+        "n": 2800,
+        "data": "7661c5d39dcfc68de8c7080dcc79456b933bc432d8f7a742ae53656ac73a725b",
+        "labels": "3cea107e41ad3fe37cdc1fbbf3f8e725cb1730bdb48eb499508939d55b4aee99",
+        "metadata": "0b38370e06502fda337c675dda142c337b1915eda2ed4e6d1f123c371218030d",
+    },
+    "test": {
+        "n": 600,
+        "data": "30f31ce7590964ea9fe597d75cd9b375c5f165a8136ef626a0f30176be32049b",
+        "labels": "0d7d008f97f93c4e665e85944147d266b92b26b07b8eb39b1d3d19e27a54af17",
+        "metadata": "a6883b881164b9f110b6804c9406a000082590c514ccd69554320f580687479a",
+    },
+    "val": {
+        "n": 600,
+        "data": "1d3f56fcd8fe837b1be7b08cc97f55821d8d7610194e398c061dd43186f53659",
+        "labels": "f7d42e41a9a15b71358d4cf658d50b60046d4921c982e36017cc9cede6efd31c",
+        "metadata": "3653e1cc47d245ae8da930c9a054a29032f3420b82367b7879b5c913488dc04a",
+    },
+}
+
+
+def _sha(payload):
+    """Hash raw bytes, or a JSON-serialisable object in a canonical form."""
+    if not isinstance(payload, bytes):
+        payload = json.dumps(payload, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _published_form(row):
+    """
+    Strip a metadata row to the keys the published file carries.
+
+    The generator adds ``sampling_rate`` to the row and ``classes`` to each region
+    at load time; neither exists upstream, so both are dropped before hashing.
+    """
+    return {
+        key: [
+            {k: v for k, v in region.items() if k != "classes"} for region in row[key]
+        ]
+        for key in ("ground_truth", "non_discriminative")
+    }
+
+
+@pytest.fixture(scope="module")
+def published_splits():
+    """Generate the dataset at its shipped defaults, once for the module."""
+    ds = SynthMultilabelFreqDataset()
+    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    return ds, splits, encoder
 
 
 @pytest.mark.unit
-def test_freq_shapes_cache_key_is_fixed():
-    # Fixed key (independent of the now-inert init_params) so cache_subdir lands on
-    # the committed cache/datasets/synthetic/freq_shapes/ layout.
-    ds = FreqShapesDataset(n_samples=600, length=500, class_freqs=(7, 19, 37))
-    assert ds._cache_key() == "freq_shapes"
-    assert ds.cache_subdir("/tmp/c").parts[-2:] == ("synthetic", "freq_shapes")
+def test_generator_reproduces_the_published_dataset(published_splits):
+    """
+    The defaults must reproduce the dataset this generator was ported from.
+
+    This is the whole justification for generating rather than shipping: if the
+    port drifts, the framework quietly stops evaluating the published benchmark
+    while still claiming to. Four details in the generator are load-bearing for
+    this (draw order, absolute-time phase, rectangular envelope, single RNG), and
+    none of them is visible from the output - this test is what makes them
+    testable.
+    """
+    _ds, splits, encoder = published_splits
+    for name, (x, y, metadata) in zip(("train", "test", "val"), splits, strict=True):
+        expected = _PUBLISHED[name]
+        assert x.shape == (expected["n"], 1, 500), name
+        labels = [{"label": [int(v) for v in encoder.classes_[i]]} for i in y]
+        assert (
+            _sha(np.ascontiguousarray(x, dtype=np.float32).tobytes())
+            == (expected["data"])
+        ), f"{name} signals differ from the published dataset"
+        assert _sha(labels) == expected["labels"], f"{name} labels differ"
+        assert _sha([_published_form(r) for r in metadata]) == expected["metadata"], (
+            f"{name} ground-truth metadata differs"
+        )
 
 
 @pytest.mark.unit
-def test_freq_shapes_loads_committed_presplit(tmp_path):
-    # Fabricate the committed pre-split layout the runner loads (the generator never
-    # runs). Multi-hot labels + per-sample flat-list ground-truth metadata round-trip.
-    ds = FreqShapesDataset(cache_dir=tmp_path)
-    cache = ds.cache_subdir(tmp_path)  # …/synthetic/freq_shapes
+def test_recorded_frequency_names_the_bin_the_class_signal_occupies(published_splits):
+    """
+    A recorded frequency must identify the coefficient bin carrying its class.
+
+    The regions are stored in Hz, so reading one directly as a bin index lands
+    ``T / fs`` bins away - on frequencies the class signal never occupies, which
+    scores as chance however good the attribution is. Deriving the bin from the
+    signals rather than from the schema is what catches that, and asserting the
+    naive reading carries *no* signal is what documents why the unit matters.
+    """
+    _ds, splits, encoder = published_splits
+    x, y, metadata = splits[0]
+    signal_length = x.shape[-1]
+    rate = metadata[0]["sampling_rate"]
+    spectra = np.abs(np.fft.rfft(x[:, 0, :], axis=1))
+    combos = np.array([encoder.classes_[i] for i in y])
+
+    for bit, freq in enumerate((7, 19, 37)):
+        present = combos[:, bit] == 1
+        correct = round(freq * signal_length / rate)
+        ratio_at_correct = (
+            spectra[present, correct].mean() / spectra[~present, correct].mean()
+        )
+        ratio_at_naive = spectra[present, freq].mean() / spectra[~present, freq].mean()
+        assert ratio_at_correct > 5, (
+            f"{freq} Hz should dominate bin {correct} when its label bit is set, "
+            f"but the on/off amplitude ratio is only {ratio_at_correct:.2f}"
+        )
+        assert ratio_at_naive < 2, (
+            f"bin {freq} unexpectedly carries class information "
+            f"(ratio {ratio_at_naive:.2f}); the Hz-as-bin confusion this guards "
+            "against would no longer be detectable"
+        )
+
+
+@pytest.mark.unit
+def test_split_is_stratified_and_metadata_stays_aligned(published_splits):
+    """Each split holds every class in proportion, with its ground truth intact."""
+    _ds, splits, encoder = published_splits
+    for _x, y, metadata in splits:
+        counts = np.bincount(y, minlength=len(encoder.classes_))
+        assert set(counts.tolist()) == {len(y) // len(encoder.classes_)}
+        assert len(metadata) == len(y)
+    # A region's class scope must agree with the label bit it stands for, which is
+    # only checkable because metadata and labels are still row-aligned.
+    _x, y, metadata = splits[1]
+    for target, row in zip(y, metadata, strict=True):
+        combo = encoder.classes_[target]
+        for region in row["ground_truth"]:
+            bit = (7, 19, 37).index(region["freq"])
+            assert int(combo[bit]) == 1 or target not in region["classes"]
+
+
+@pytest.mark.unit
+def test_package_api_generates_and_splits(tmp_path):
+    """
+    The documented package call must work, which it could not before.
+
+    `load_dataset(name, cache_dir=...).split(...)` used to raise
+    NotImplementedError and tell a package user to set a runner config key, so the
+    only shipped synthetic dataset was reachable from the runner alone.
+    """
+    ds = load_dataset(
+        "Synth_Multilabel_Freq",
+        cache_dir=tmp_path,
+        num_samples_per_pattern=8,
+        sample_length=64,
+        sampling_rate=32,
+        frequency_window_length=16,
+        discriminative_frequencies=(3, 7, 11),
+    )
+    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+
+    assert len(splits) == 3
+    assert sum(len(y) for _, y, _ in splits) == 64
+    assert all(x.shape[1:] == (1, 64) for x, _, _ in splits)
+    assert isinstance(encoder, MultiHotLabelEncoder)
+    assert len(encoder.classes_) == 8
+    # Cached as a raw blob, so the second call does not regenerate.
+    assert SyntheticDataset.is_raw_layout(ds.cache_subdir(tmp_path))
+
+
+@pytest.mark.unit
+def test_generation_is_cached_and_not_repeated(tmp_path):
+    calls = {"n": 0}
+    real = SynthMultilabelFreqDataset.generate_dataset
+
+    ds = SynthMultilabelFreqDataset(
+        cache_dir=tmp_path,
+        num_samples_per_pattern=2,
+        sample_length=64,
+        frequency_window_length=16,
+    )
+
+    def counting(self):
+        calls["n"] += 1
+        return real(self)
+
+    ds.generate_dataset = counting.__get__(ds, SynthMultilabelFreqDataset)
+    first = ds.load()[0]
+    second = ds.load()[0]
+    assert calls["n"] == 1
+    np.testing.assert_array_equal(first, second)
+
+
+@pytest.mark.unit
+def test_cache_key_follows_the_generation_parameters():
+    """A parameter change must land in a different cache folder."""
+    base = SynthMultilabelFreqDataset()
+    other = SynthMultilabelFreqDataset(sample_length=256)
+    assert base._cache_key() != other._cache_key()
+    assert base.cache_subdir("/tmp/c").parts[-2] == "synthetic"
+    assert base._cache_key().startswith("Synth_Multilabel_Freq_s42")
+    # The partition slices the blob rather than changing it, so it must not key it.
+    assert base._cache_key() == SynthMultilabelFreqDataset(train_ratio=0.5)._cache_key()
+
+
+@pytest.mark.unit
+def test_configured_split_fractions_are_reported_not_obeyed(caplog):
+    """
+    A train_split the dataset cannot honour must say so.
+
+    This dataset owns its partition, so silently ignoring the configured fractions
+    would leave a user editing them with no effect and no explanation.
+    """
+    ds = SynthMultilabelFreqDataset(
+        num_samples_per_pattern=8, sample_length=32, frequency_window_length=8
+    )
+    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
+        splits, _ = ds.split(train_split=0.9, val_split=0.05, encode="multihot")
+    assert "supplies its own partition" in caplog.text
+    # The partition is the dataset's own regardless of what was asked for: 0.7 of
+    # 64 samples, then the remaining 19 divided in [train, test, val] order.
+    assert [len(y) for _, y, _ in splits] == [45, 9, 10]
+
+
+@pytest.mark.unit
+def test_sample_restriction_keeps_metadata_aligned():
+    """
+    max_samples must drop metadata rows with the samples they describe.
+
+    The base helper restricts the arrays only, which would leave the ground truth
+    describing samples that are no longer there - every mask silently wrong.
+    """
+    ds = SynthMultilabelFreqDataset(
+        num_samples_per_pattern=8,
+        sample_length=32,
+        frequency_window_length=8,
+        max_samples=16,
+    )
+    splits, _ = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    assert sum(len(y) for _, y, _ in splits) == 16
+    for x, y, metadata in splits:
+        assert len(metadata) == len(y) == len(x)
+
+
+@pytest.mark.unit
+def test_truncating_the_series_warns_that_the_ground_truth_no_longer_fits(caplog):
+    """
+    Regions are positions in the generated series, and truncation does not move them.
+
+    The masks clip rather than crash, so a region past the cut would silently
+    describe signal that is no longer there - which is why this says so.
+    """
+    ds = SynthMultilabelFreqDataset(
+        num_samples_per_pattern=8,
+        sample_length=64,
+        frequency_window_length=16,
+        max_series_length=32,
+    )
+    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
+        splits, _ = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    assert "still describe the full series" in caplog.text
+    assert all(x.shape[-1] == 32 for x, _, _ in splits)
+
+
+@pytest.mark.unit
+def test_powerset_orders_by_size_then_value():
+    assert _powerset((7, 19, 37)) == [
+        (),
+        (7,),
+        (19,),
+        (37,),
+        (7, 19),
+        (7, 37),
+        (19, 37),
+        (7, 19, 37),
+    ]
+
+
+@pytest.mark.unit
+def test_bursts_overlap_within_the_configured_bounds():
+    """Consecutive discriminative bursts must respect overlap_min / overlap_max."""
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20)
+    _data, _labels, metadata = ds.generate_dataset()
+    pairs = 0
+    for row in metadata.to_dict("records"):
+        regions = row["ground_truth"]
+        for earlier, later in pairwise(regions):
+            overlap = (earlier["pos"] + earlier["len"] - later["pos"]) / earlier["len"]
+            assert 0.25 <= overlap <= 0.5 + 1e-9, row
+            pairs += 1
+    assert pairs > 0
+
+
+@pytest.mark.unit
+def test_rejects_parameters_it_cannot_generate():
+    with pytest.raises(ValueError, match="frequency_window_length"):
+        SynthMultilabelFreqDataset(sample_length=32, frequency_window_length=64)
+    with pytest.raises(ValueError, match="Nyquist"):
+        SynthMultilabelFreqDataset(sampling_rate=20, discriminative_frequencies=(7, 19))
+    with pytest.raises(ValueError, match="distinct distractors"):
+        SynthMultilabelFreqDataset(
+            sampling_rate=10, discriminative_frequencies=(1,), num_full_distractions=8
+        )
+    with pytest.raises(ValueError, match="below 1"):
+        SynthMultilabelFreqDataset(train_ratio=0.9, test_ratio=0.2)
+
+
+@pytest.mark.unit
+def test_loads_a_saved_presplit_layout(tmp_path):
+    # A saved layout is still loadable directly, and still gets its regions scoped
+    # to the classes each frequency marks.
+    ds = SynthMultilabelFreqDataset(cache_dir=tmp_path)
+    cache = ds.cache_subdir(tmp_path)
     cache.mkdir(parents=True)
     combos = [[0, 0, 0], [1, 0, 1], [0, 1, 0], [1, 1, 1]]
     for split, n in [("train", 4), ("test", 2), ("val", 2)]:
@@ -666,14 +962,12 @@ def test_freq_shapes_loads_committed_presplit(tmp_path):
     assert len(splits) == 3
     assert splits[0][0].shape == (4, 1, 16)
     assert isinstance(encoder, MultiHotLabelEncoder)
-    # Per-sample flat-list ground-truth metadata survives the round-trip.
     assert "ground_truth" in pd.DataFrame(splits[1][2]).columns
-
-
-@pytest.mark.unit
-def test_freq_shapes_packet_len_exceeds_length_raises():
-    with pytest.raises(ValueError, match="packet_len"):
-        FreqShapesDataset(length=32, packet_len=64)
+    # The scoped splits are what get_splits() returns, not the unscoped ones.
+    assert ds.get_splits()[0] is splits
+    # Four combinations here, of which [1,0,1] and [1,1,1] have bit 0 (7 Hz) set.
+    scoped = pd.DataFrame(splits[1][2])["ground_truth"].iloc[0][0]
+    assert tuple(scoped["classes"]) == (2, 3)
 
 
 @pytest.mark.unit

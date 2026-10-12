@@ -17,11 +17,6 @@ results/
 
 # runner specific folders
 /cache/*
-!/cache/datasets/
-/cache/datasets/*
-!/cache/datasets/synthetic/
-/cache/datasets/synthetic/*
-!/cache/datasets/synthetic/freq_shapes/
 /experiments/**
 experiment_runner/configs/**
 !/experiment_runner/configs/master.yaml

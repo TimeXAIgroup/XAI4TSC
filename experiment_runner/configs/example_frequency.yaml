@@ -4,9 +4,10 @@
 #     python -m experiment_runner.main --conf experiment_runner/configs/example_frequency.yaml
 #
 # Like `example.yaml`, this needs no download — it uses the synthetic
-# `freq_shapes` dataset, which additionally ships per-sample GROUND-TRUTH
-# localization metadata. That lets the `Time-Frequency AUC` metric score how well
-# an attribution lands on the truly discriminative frequency/time regions.
+# `Synth_Multilabel_Freq` dataset, which additionally generates per-sample
+# ground-truth localization metadata. That lets the `Time-Frequency AUC` metric
+# score how well an attribution lands on the truly discriminative frequency/time
+# regions.
 #
 # It explains a model with FreqRISE (in both the frequency and time-frequency
 # domains) plus a frequency explanation-space wrapper, and scores those with the
@@ -25,17 +26,17 @@ general:
   device: "use_available"
 
 # --- Data: synthetic dataset with ground-truth localization metadata ---
-# `freq_shapes` ships a fixed, paper-faithful pre-split dataset committed under the
-# synthetic cache dir (cache/datasets/synthetic/freq_shapes/), including per-sample
-# ground-truth localization metadata. With `cache_path` set the runner loads that
-# pre-split layout directly, preserving the original split — so `train_split` /
-# `val_split` are inert here and the programmatic generator is disabled for now.
+# `Synth_Multilabel_Freq` is generated on first use and cached under the synthetic
+# cache dir, per-sample ground-truth localization metadata included. It supplies its
+# own stratified partition (0.7/0.15/0.15, seeded by the dataset), so the
+# `train_split`/`val_split` below only have to agree with it; change the partition
+# through `init_params: {train_ratio, test_ratio}`.
 data_config:
   default_settings:
-    train_split: 0.8
-    val_split: 0.1
+    train_split: 0.7
+    val_split: 0.15
   datasets:
-    - dataset: "freq_shapes"
+    - dataset: "Synth_Multilabel_Freq"
       encode: "multihot"
 
 # --- Model: one architecture (FreqRISE dominates runtime) ---
@@ -105,6 +106,6 @@ evaluation_config:
     - metric: "Time-Frequency Perturbation"   # needs a TIME_FREQUENCY explainer
       metric_class_params:
         features_in_step: 10                  # STFT coefficients perturbed per step
-    - metric: "Time-Frequency AUC"            # ground-truth localization (freq_shapes)
+    - metric: "Time-Frequency AUC"            # ground-truth localization
 
 results_rel_path: "./experiments/results/"

@@ -21,7 +21,11 @@ unchanged; scores move once. Split-cache folder names change once with them.
 by `generate_explanation()` are unaffected. `train_model()` and `evaluate_model()`
 now require a destination: pass `save_path=`, or build the model through
 `load_model(..., save_path=...)`. Code that relied on the old fall-back to the
-working directory has to name a directory.
+working directory has to name a directory. `ModelBase.load_from_checkpoint` is
+removed: build the class and load the weights
+(`MyCNN(...).configure(device=...)` then `load_state_dict`), or reload through
+`load_model({"model": ..., "model_ckpt_path": ...})`, which also resolves the
+class and reads the constructor arguments back from the checkpoint's config.
 
 ### Added
 
@@ -53,6 +57,23 @@ working directory has to name a directory.
 
 ### Fixed
 
+- **The getting-started example trained a classifier worse than chance, and**
+  **taught a call signature that did nothing.** It asked for an 80/10 split with
+  `use_predefined_splits=True`, where `train_split`, `val_split` and `stratify`
+  are ignored and no validation set is produced, so early stopping fell back to
+  training loss and the shipped result was `spec=0.0000`, `TN=0`, `mcc=-0.083` -
+  a one-class predictor, whose explanations the example then scored. It now
+  takes a real 80/10/10 split, passes the validation split to `train_model`,
+  trains to a usable accuracy, builds its model with the constructor and
+  `configure()`, caches the download, and prints the `Complexity` score it
+  computes instead of discarding it. An integration test runs it and asserts the
+  model is not degenerate; nothing executed `examples/` before.
+- **`load_model` blamed a missing checkpoint for an unregistered model name.**
+  Its final branch raised `"No model checkpoint path supplied!"`, but it is
+  reached whenever the `model` name is not in `MODELS` *and* no checkpoint was
+  given - so a typo in the name was reported as a missing checkpoint. The error
+  now names the unresolved value, lists the registered models, and says how to
+  register or supply a class, matching what the checkpoint branch already did.
 - **A checkpoint written by a directly built model could not be reloaded.** Only
   `load_model` recorded the constructor arguments, so a model built with its own
   constructor had nothing to write into the `_config.json` beside its weights, and
@@ -201,6 +222,16 @@ working directory has to name a directory.
   `format: csv` request could be served numpy data from another dataset that
   happened to share its name. Existing cache folder names are unchanged: the new
   tokens are emitted only for non-default values.
+
+### Removed
+
+- **`ModelBase.load_from_checkpoint`.** It had no callers anywhere in the
+  project, no test coverage, and left `self.device` as `None` while moving the
+  weights onto that device, so the attribute disagreed with where the model
+  actually was. It was `load_model` minus class resolution and minus reading the
+  checkpoint's config, and the one case it covered - reloading an unregistered
+  class from plain Python values - is two lines of public API. See the migration
+  note above.
 
 ### Changed
 

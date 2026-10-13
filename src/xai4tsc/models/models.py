@@ -240,10 +240,18 @@ def load_model(
     model_config: dict, device: str = "cpu", save_path: str | Path | None = None
 ) -> ModelBase:
     """
-    Load or instantiate a model from a config dict.
+    Reload a saved model, or build one named by a config dict.
 
     Looks for a ``.pt`` checkpoint path or a Python class path in
     *model_config* and returns a ready-to-use :class:`ModelBase` instance.
+
+    Resolves the class the weights and reads the constructor arguments back out
+    of the ``config.json`` beside them.  Building a *new* model from a registry
+    name is a config-driven fallback for the experiment runner needs.
+    From Python, construct the class and call
+    :meth:`~xai4tsc.models.base.ModelBase.configure` instead:
+    ``FCN(in_channels=1, num_classes=2).configure(device="cpu",save_path=out)``,
+    which takes plain values rather than a config dict.
 
     A ``.pt`` checkpoint may be either the self-describing dict written by
     :func:`save_model` (carrying ``model_class``) or a bare state dict as
@@ -279,7 +287,8 @@ def load_model(
         If ``model_ckpt_path`` names a ``.pt`` file that does not exist.
     ValueError
         If no class can be resolved for a supplied checkpoint, or if neither a
-        checkpoint path nor a registered ``model`` name is given.
+        checkpoint path nor a registered ``model`` name is given.  The message
+        names whichever of the two is missing.
     """
     model = None
     if "model_ckpt_path" in model_config:
@@ -420,7 +429,14 @@ def load_model(
             "Built %s from the MODELS registry (no checkpoint supplied).", model.name
         )
     else:
-        raise ValueError("No model checkpoint path supplied!")
+        # Reached when no checkpoint was given AND the name is not registered.
+        raise ValueError(
+            f"Cannot build a model from {model_config.get('model')!r}: it is not "
+            "a registered model name, and no 'model_ckpt_path' was supplied. "
+            f"Registered models: {sorted(MODELS)}. To build an unregistered "
+            "class, register it with register_model() first, or supply "
+            "'class_name'/'class_path' together with a checkpoint."
+        )
 
     return model
 

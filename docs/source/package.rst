@@ -48,14 +48,16 @@ and from its submodule (e.g. ``from xai4tsc.models import load_model``).
 Function                                                     Purpose
 ==========================================================  ===============================================================
 :func:`~xai4tsc.data.datasets.load_dataset`                 Load a UCR/UEA, local, or synthetic dataset.
-:func:`~xai4tsc.models.models.load_model`                   Instantiate a model by name or from a checkpoint.
+:func:`~xai4tsc.models.models.load_model`                   Reload a model from a checkpoint (or build one by registry name).
 :func:`~xai4tsc.xai.explain.generate_explanation`           Produce an :class:`~xai4tsc.xai.Explanation` for chosen samples.
 :func:`~xai4tsc.evaluation.evaluate.evaluate`               Score an explanation with a metric from the registry.
 ==========================================================  ===============================================================
 
-A model built with its own constructor rather than through ``load_model`` needs
-to be told where it runs and where it writes, which is what
-:meth:`~xai4tsc.models.base.ModelBase.configure` is for:
+Building and reloading models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To build a **new** model, call its constructor and then
+:meth:`~xai4tsc.models.base.ModelBase.configure`:
 
 .. code-block:: python
 
@@ -64,10 +66,37 @@ to be told where it runs and where it writes, which is what
    )
 
 ``device`` and ``save_path`` are properties of the machine and the run, not of
-the architecture, so they are not constructor arguments. The methods that write
+the architecture, so they are not constructor arguments. ``configure`` returns
+the model, so it chains, and an omitted argument leaves the current value
+alone. The methods that write
 (:meth:`~xai4tsc.models.base.ModelBase.train_model`,
 :meth:`~xai4tsc.models.base.ModelBase.evaluate_model`) raise rather than guess a
 destination, so nothing lands in the working directory by accident.
+
+To **reload** a model, use :func:`~xai4tsc.models.models.load_model`. It resolves
+the class the weights belong to and reads the constructor arguments back out of
+the ``config.json`` written beside the checkpoint, so the architecture does not
+have to be restated:
+
+.. code-block:: python
+
+   model = load_model(
+       {"model": "FCN", "model_ckpt_path": "results/run_1/FCN_epoch_12.pt"},
+       device="cpu",
+       save_path="results/run_1",
+   )
+
+``load_model`` can also build a new model from a registry name, which is the
+route the YAML-driven experiment runner takes. From Python the constructor is
+the more direct one. For a class that is not in ``MODELS`` and has no config
+entry, load the weights yourself:
+
+.. code-block:: python
+
+   model = MyCNN(in_channels=1, num_classes=2).configure(device="cpu")
+   model.load_state_dict(
+       torch.load(path, weights_only=True, map_location="cpu")
+   )
 
 Built-in components
 ~~~~~~~~~~~~~~~~~~~~~

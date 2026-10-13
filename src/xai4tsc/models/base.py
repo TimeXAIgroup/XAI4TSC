@@ -618,41 +618,6 @@ class ModelBase(nn.Module, ABC):
             save_path, epoch if epoch is not None else self.best_epoch
         )
 
-    @classmethod
-    def load_from_checkpoint(
-        cls,
-        model_path: Path,
-        device: str | torch.device = "cpu",
-        eval: bool = True,
-        **init_params: object,
-    ) -> "ModelBase":
-        """
-        Instantiate the class and load weights from *model_path*.
-
-        Parameters
-        ----------
-        model_path : Path
-            Path to a ``.pt`` state-dict file produced by :meth:`save_model`.
-        device : str or torch.device
-            Target device.
-        eval : bool
-            Set the model to evaluation mode after loading.
-        **init_params
-            Keyword arguments forwarded to ``__init__``.
-
-        Returns
-        -------
-        ModelBase
-            A new instance with loaded weights.
-        """
-        instance = cls(**init_params).to(device)
-        instance.load_state_dict(
-            torch.load(model_path, weights_only=True, map_location=device)
-        )
-        if eval:
-            instance.eval()
-        return instance
-
     # ── Evaluation ───────────────────────────────────────────────────────────
 
     def evaluate_model(

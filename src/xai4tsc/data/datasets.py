@@ -297,7 +297,8 @@ class UcrUeaDataset(DatasetBase):
         When :attr:`use_predefined_splits` is ``True``, loads the official
         ``_TRAIN.ts`` and ``_TEST.ts`` files directly and ignores
         ``train_split``, ``val_split``, and ``stratify``.  No validation set
-        is produced.
+        is produced, and passing a non-default value for any of the three is
+        reported rather than silently dropped.
 
         Otherwise delegates to :meth:`DatasetBase.split` for random /
         stratified splitting.
@@ -313,6 +314,8 @@ class UcrUeaDataset(DatasetBase):
                 stratify=stratify,
                 class_order=class_order,
             )
+
+        self._report_ignored_split_args(train_split, val_split, stratify)
 
         rng = resolve_rng(random_state, rng)
         data_train, labels_train = self._load_one_split("TRAIN", rng)
@@ -351,6 +354,50 @@ class UcrUeaDataset(DatasetBase):
         self._splits = [(data_train, y_train, None), (data_test, y_test, None)]
         self._encoder = encoder
         return self._splits, self._encoder
+
+    def _report_ignored_split_args(
+        self, train_split: float, val_split: float, stratify: bool
+    ) -> None:
+        """
+        Warn when split arguments are passed that the archive partition ignores.
+
+        Silently dropping them leaves a user editing ``val_split`` with no
+        effect and no explanation - and the validation set they asked for is
+        the one that decides whether early stopping monitors validation or
+        training loss, so the consequence is worth stating rather than
+        inferring.
+
+        ``random_state`` is deliberately not reported: it still seeds
+        ``max_samples`` restriction in :meth:`_load_one_split`.
+
+        Parameters
+        ----------
+        train_split : float
+            The requested training fraction.
+        val_split : float
+            The requested validation fraction.
+        stratify : bool
+            Whether stratified splitting was requested.
+        """
+        ignored = []
+        if not math.isclose(train_split, 0.8, abs_tol=1e-9):
+            ignored.append(f"train_split={train_split:.4g}")
+        if not math.isclose(val_split, 0.0, abs_tol=1e-9):
+            ignored.append(f"val_split={val_split:.4g}")
+        if not stratify:
+            ignored.append("stratify=False")
+        if not ignored:
+            return
+
+        logger.warning(
+            "'%s' uses the archive's own TRAIN/TEST partition, so %s %s ignored "
+            "and no validation set is produced - early stopping will monitor "
+            "training loss. Set use_predefined_splits=False to split the pooled "
+            "data by these fractions instead.",
+            self.name,
+            ", ".join(ignored),
+            "is" if len(ignored) == 1 else "are",
+        )
 
 
 class LocalDataset(DatasetBase):

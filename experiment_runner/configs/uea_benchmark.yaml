@@ -16,12 +16,14 @@ general:
 
 data_config:
   default_settings:
-    train_split: 0.8
-    val_split: 0.1
+    val_split: 0.0                 # the archive partition has no validation split, so early
+                                   # stopping monitors training loss. Stated rather than left
+                                   # to inherit master's 0.1, which would be ignored here
     encode: "label"
     allow_padding: true            # zero-pad variable-length series to the longest length
     allow_imputation: true         # impute NaN values with the per-channel mean
-    use_predefined_splits: true    # use the official _TRAIN/_TEST splits
+    use_predefined_splits: true    # use the official _TRAIN/_TEST splits; train_split and
+                                   # val_split do not apply
   datasets:
     - dataset: "UEA"               # expands to all 33 UEA multivariate datasets
       overrides:                   # skip the very large datasets that risk OOM

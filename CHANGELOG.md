@@ -68,6 +68,14 @@ class and reads the constructor arguments back from the checkpoint's config.
   `configure()`, caches the download, and prints the `Complexity` score it
   computes instead of discarding it. An integration test runs it and asserts the
   model is not degenerate; nothing executed `examples/` before.
+- **Split fractions the archive partition ignores are now reported.**
+  `use_predefined_splits: true` discards `train_split`, `val_split` and
+  `stratify` and produces no validation set, which was documented in a docstring
+  and silent at runtime. Passing a non-default value for any of the three now
+  warns, names the values, and states the consequence - early stopping monitors
+  training loss without a validation split. `random_state` is deliberately not
+  reported: it still seeds sample restriction. `uea_benchmark.yaml` asked for
+  `val_split: 0.1` on this path and so implied a validation split it never got.
 - **`load_model` blamed a missing checkpoint for an unregistered model name.**
   Its final branch raised `"No model checkpoint path supplied!"`, but it is
   reached whenever the `model` name is not in `MODELS` *and* no checkpoint was

@@ -856,6 +856,50 @@ def test_configured_split_fractions_are_reported_not_obeyed(caplog):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"val_split": 0.1}, "val_split=0.1"),
+        ({"train_split": 0.7}, "train_split=0.7"),
+        ({"stratify": False}, "stratify=False"),
+    ],
+)
+def test_predefined_splits_report_the_arguments_they_ignore(kwargs, expected, caplog):
+    """
+    Arguments the archive partition cannot honour must say so.
+
+    The official _TRAIN/_TEST files are used as-is, so a configured fraction has
+    no effect. Dropping it silently is what let the shipped example ask for a
+    validation split and train without one.
+    """
+    ds = UcrUeaDataset("GunPoint", use_predefined_splits=True)
+
+    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
+        ds._report_ignored_split_args(
+            kwargs.get("train_split", 0.8),
+            kwargs.get("val_split", 0.0),
+            kwargs.get("stratify", True),
+        )
+
+    assert expected in caplog.text
+    assert "no validation set" in caplog.text
+    # The remedy belongs in the message, not just in the docstring.
+    assert "use_predefined_splits=False" in caplog.text
+
+
+@pytest.mark.unit
+def test_predefined_splits_stay_quiet_when_nothing_was_asked_for(caplog):
+    # Warning on the defaults would make every official-split run noisy, and
+    # nothing was actually ignored.
+    ds = UcrUeaDataset("GunPoint", use_predefined_splits=True)
+
+    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
+        ds._report_ignored_split_args(0.8, 0.0, True)
+
+    assert caplog.text == ""
+
+
+@pytest.mark.unit
 def test_sample_restriction_keeps_metadata_aligned():
     """
     max_samples must drop metadata rows with the samples they describe.

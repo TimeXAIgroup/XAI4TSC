@@ -25,7 +25,52 @@ working directory has to name a directory. `ModelBase.load_from_checkpoint` is
 removed: build the class and load the weights
 (`MyCNN(...).configure(device=...)` then `load_state_dict`), or reload through
 `load_model({"model": ..., "model_ckpt_path": ...})`, which also resolves the
-class and reads the constructor arguments back from the checkpoint's config.
+class and reads the constructor arguments back from the checkpoint's config. The
+`rel_type_kwargs` key `bubble_size` is now `point_size`, matching the style it
+sizes. `train_model()` and `evaluate_model()` take their training
+hyperparameters as keyword arguments instead of a `hyperparams` dict
+(`train_model(data, labels, epochs=50, batchsize=32, ...)`,
+`evaluate_model(data, labels, batchsize=32)`), and `xai4tsc.models.base.t_con_defaults`
+is removed with them - the defaults are now the signature. YAML configs keep
+their `hyperparams:` block, which the runner unpacks. `generate_explanation()`
+renames `samples` to `n_samples`, and `visualization_type` now defaults to the
+tuple `("points",)` instead of `None`.
+
+### Changed
+
+- **Defaults have one source: the package signature that consumes them.** Every
+  `default_settings` value existed two to five times - in `master.yaml`, in the
+  package, and often again as a `.get(key, literal)` fallback in the runner that
+  could never fire - and the copies had drifted: `val_split` was `0.1` in master
+  and `0.0` in `DatasetBase.split`, and `["points"]` was written in five places.
+  The runner now derives each of those values from the parameter that consumes
+  it, through a table naming the owner, so a renamed parameter fails at startup
+  instead of leaving a stale literal behind. Keys the package never sees - the
+  `skip_*` switches, `path`, `is_presplit`, the Quantus blocks - are listed as
+  runner-owned, and `master.yaml` stays their source. A test requires every key
+  to be in one list or the other.`master.yaml` keeps its values as documentation
+	and gains descriptions for the keys that had none; a test holds them to the
+	signatures. The one default that had to move to make this true is `val_split`,
+	which is `0.1` everywhere now: a package caller who omits it gets a 10% 
+	validation split where previously they got none. Every call site in the project
+	already passed it, so no shipped config or test changes.
+- **The config is resolved once, before anything validates or runs it.**
+  `default_settings` used to be merged onto each entry only when the pipeline
+  reached it, in four places, plus twice more in validators that needed an
+  effective value early - and one of those merged in place, so validating a
+  config rewrote it and left every entry sharing one `samples` dict with the
+  defaults block. `config_resolve` now does it once: after it returns, every
+  entry carries its effective settings, deep-copied, and the four merges in the
+  pipeline and the two in the validators are gone. The resolved config logged at
+  the start of a run therefore shows each entry exactly as it ran. One decision
+  genuinely needs to tell a stated setting from an inherited one - a checkpoint
+  entry must not retrain just because `default_settings` says `train: true` - and
+  that now happens during resolution, which is the only place it is knowable.
+- **A mistyped training hyperparameter is a config error.** `hyperparams:
+  {epochss: 50}` reached `hyperparams.get("epochs", default)` and trained the
+  default number of epochs without a word. The block is now validated against
+  `train_model`'s signature, naming the entry and suggesting the near-miss, and
+  an unknown key would raise at the call even if it got that far.
 
 ### Added
 
@@ -57,6 +102,45 @@ class and reads the constructor arguments back from the checkpoint's config.
 
 ### Fixed
 
+- **Three leftovers from the `bubbles` -> `points` rename.**
+  `generate_explanation` still defaulted `visualization_type` to `["bubbles"]`
+  while its own docstring, `plot_exp`, `_get_explanation` and the runner all said
+  `"points"` - and since that default wins whenever the argument is omitted,
+  every plot written through the defaulted package path was named
+  `..._bubbles.png`. `add_relevance` defaulted to `"bubble"`, a third spelling,
+  and the `rel_type_kwargs` key was still `bubble_size`. All three now say
+  points. `"bubbles"` was never a value the dispatch matched, in any version, so
+  nothing that worked before behaves differently.
+  An unrecognised style still renders the points overlay rather than raising -
+  that is deliberate and now documented at the dispatch and in both docstrings,
+  with a test pinning it: a style name only selects an overlay, so a wrong one
+  costs a re-render and touches no attribution, metric or saved array, and the
+  name is echoed into the filename so a typo will be visible.
+- **Impossible split fractions are refused at config time.**
+  `train_split + val_split >= 1` leaves nothing for the test split:
+  `_split_dataset` derived a zero or negative `rel_test`, sklearn rejected it,
+  and the `except ValueError` around that call reported it as a stratification
+  problem and retried before raising again - so the error named the wrong cause,
+  after the dataset had been loaded. The fractions are now checked before
+  anything is downloaded, naming the dataset and the arithmetic. Entries using
+  the archive partition or an already-split directory are exempt, since they
+  never reach the splitter.
+- **Out-of-range sample indices are refused before the model trains.**
+  `explanation_config.samples.indices` reached numpy as
+  `IndexError: index 999999 is out of bounds for axis 0`, from inside the
+  explainer, so after training had completed. The runner now checks the
+  indices against the test split as soon as the split exists and before any
+  model is built, and the package raises a named error at the point of use so a
+  direct `generate_explanation` call is covered too. Config validation catches
+  the data-independent part - a non-empty list of non-negative integers - up
+  front, since it runs before any dataset is loaded and cannot know the split
+  size.
+- **An unknown `samples.type` silently explained the entire test split.** The
+  dispatch fell through to an undocumented `"all"` branch, and because metrics
+  are computed only on the explained samples, a typo quietly changed which
+  subset every number in the run was scored over - in the most expensive
+  direction. `"all"` is now documented in `master.yaml` and the three accepted
+  values are validated, so a typo is a config error naming the near-miss.
 - **The getting-started example trained a classifier worse than chance, and**
   **taught a call signature that did nothing.** It asked for an 80/10 split with
   `use_predefined_splits=True`, where `train_split`, `val_split` and `stratify`

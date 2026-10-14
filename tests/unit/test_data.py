@@ -151,6 +151,7 @@ def test_split_encode_onehot_reads_the_hot_index():
         np.array([0, 1, 2, 0, 1, 2]),
         encode="onehot",
         train_split=0.5,
+        val_split=0.0,
         stratify=False,
     )
     assert set(np.unique(splits[0][1])) <= {0, 1, 2}
@@ -163,7 +164,7 @@ def test_split_encode_ordinal_without_order_warns_for_string_labels(caplog):
     y = np.array(["low", "medium", "high", "low", "medium", "high"])
     with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
         _, encoder = _split_dataset(
-            data, y, encode="ordinal", train_split=0.5, stratify=False
+            data, y, encode="ordinal", train_split=0.5, val_split=0.0, stratify=False
         )
     assert "class_order" in caplog.text
     assert _class_name_map(encoder) == {0: "high", 1: "low", 2: "medium"}
@@ -178,6 +179,7 @@ def test_split_encode_ordinal_honours_class_order():
         y,
         encode="ordinal",
         train_split=0.5,
+        val_split=0.0,
         stratify=False,
         class_order=["low", "medium", "high"],
     )
@@ -194,6 +196,7 @@ def test_split_encode_ordinal_numeric_labels_need_no_order():
         np.array([10, 20, 30, 10, 20, 30]),
         encode="ordinal",
         train_split=0.5,
+        val_split=0.0,
         stratify=False,
     )
     assert _class_name_map(encoder) == {0: "10", 1: "20", 2: "30"}

@@ -2,9 +2,12 @@
 
 import numpy as np
 import pytest
+from experiment_runner.config import config_resolve
+from experiment_runner.main import MASTER_CONFIG
 from experiment_runner.utils import (
     _METRICS_COLUMNS,
     _aggregate_metric,
+    _check_sample_indices,
     _format_label_list,
     _result_row,
     expand_datasets,
@@ -160,3 +163,74 @@ def test_result_row_carries_the_seed():
 def test_result_row_seed_is_empty_when_unseeded():
     """`reproducible: false` applies no seed, so the cell stays empty."""
     assert _result_row("ds", "m", "e", "k", "ok", score=1.0)["seed"] is None
+
+
+# ── sample index bounds ───────────────────────────────────────────────────────
+
+
+def _explanation_config(samples, method="Integrated_Gradients"):
+    return {
+        "default_settings": {"samples": {"type": "index", "indices": [0]}},
+        "explainers": [{"method": method, "samples": samples}],
+    }
+
+
+@pytest.mark.unit
+def test_out_of_range_index_raises_before_training():
+    """
+    The bound is checked once the split exists and before any model trains.
+
+    Config validation cannot do it: it runs before a dataset is loaded, so the
+    test-split size does not exist yet.
+    """
+    cfg = _explanation_config({"type": "index", "indices": [0, 1, 999999]})
+
+    with pytest.raises(ValueError) as excinfo:
+        _check_sample_indices(cfg, n_test=55, dataset_id="Chinatown")
+    message = str(excinfo.value)
+    assert "999999" in message
+    assert "55 samples" in message
+    assert "0-54" in message
+    assert "Chinatown" in message
+
+
+@pytest.mark.unit
+def test_last_valid_index_is_accepted():
+    cfg = _explanation_config({"type": "index", "indices": [54]})
+
+    assert _check_sample_indices(cfg, n_test=55, dataset_id="Chinatown") is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("samples", [{"type": "random", "count": 5}, {"type": "all"}])
+def test_other_sample_types_are_not_bound_checked(samples):
+    # Only explicit indices can be out of range; the other modes derive theirs
+    # from the data itself.
+    cfg = _explanation_config(samples)
+
+    assert _check_sample_indices(cfg, n_test=3, dataset_id="Coffee") is None
+
+
+@pytest.mark.unit
+def test_indices_inherited_from_default_settings_are_checked(tmp_path):
+    # An entry that states no samples block of its own still gets checked,
+    # because config_resolve has already overlaid default_settings onto it.
+    # Driving this through the real resolve is the point: it is what makes the
+    # bound check able to read the effective value straight off the entry.
+    user = {
+        "experiment_name": "resolve_then_check",
+        "results_rel_path": str(tmp_path),
+        "data_config": {"datasets": []},
+        "train_config": {"models": []},
+        "evaluation_config": {"metrics": []},
+        "explanation_config": {
+            "default_settings": {"samples": {"type": "index", "indices": [0, 4242]}},
+            "explainers": [{"method": "Integrated_Gradients"}],
+        },
+    }
+    config = config_resolve(user, MASTER_CONFIG)
+
+    with pytest.raises(ValueError, match="4242"):
+        _check_sample_indices(
+            config["explanation_config"], n_test=10, dataset_id="GunPoint"
+        )

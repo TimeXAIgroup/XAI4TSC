@@ -46,29 +46,21 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
         save_path=out_dir,  # best checkpoint + training plots land here
     )
 
-    # Set up hyperparameters
-    hyperparams = {
-        "epochs": 50,
-        "batchsize": 32,
-        "loss_func": "CrossEntropy",
-        "optimizer": "adam",
-        "learn_rate": 0.001,
-        "patience": 3,
-    }
-
     # Train the model. Passing the validation split makes early stopping and
-    # best-checkpoint selection monitor validation loss instead of training
-    # loss.
+    # best-checkpoint selection monitor validation loss instead of training loss.
     model.train_model(
         train_data,
         train_labels,
-        hyperparams,
+        epochs=50,
+        batchsize=32,
+        learn_rate=0.001,
+        patience=3,
         data_val=val_data,
         labels_val=val_labels,
     )
 
     # Evaluate on test data
-    results = model.evaluate_model(test_data, test_labels, hyperparams)
+    results = model.evaluate_model(test_data, test_labels, batchsize=32)
 
     # Generate explanations, available explainers are listed in xai4tsc.xai.EXPLAINERS
     exp = generate_explanation(

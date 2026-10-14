@@ -53,8 +53,12 @@ general:
 
 data_config:
   default_settings:
-    train_split: 0.8
-    val_split: 0.1
+    # The values in this block mirror the package defaults.
+    train_split: 0.8        # fraction of the samples used for training
+    val_split: 0.1          # fraction held out for validation, taken from what training
+                            # leaves. 0 produces no validation split, and early stopping
+                            # then monitors training loss instead of validation loss.
+                            # Ignored by `use_predefined_splits` and `is_presplit`.
     channels: 1
     length: 150
     encode: "label"         # how to read the label column; the pipeline always carries 1-D
@@ -165,12 +169,13 @@ data_config:
 
 train_config:
   default_settings:
-    hyperparams:
+    hyperparams:            # each key is a keyword argument of train_model; the values
+                            # mirror its defaults and a test keeps the two in step
       epochs: 20            # epochs to run in this call (a resumed run continues the count)
       batchsize: 8          # batchsize for model training
-      loss_func: "CrossEntropy"   # only "CrossEntropy" is supported
-      optimizer: "adam"           # only "adam" is supported
-      learn_rate: 0.001
+      loss_func: "crossentropy"   # only "crossentropy" is supported; matched case-insensitively
+      optimizer: "adam"           # only "adam" is supported; matched case-insensitively
+      learn_rate: 0.001     # optimizer learning rate
       patience: 3           # epochs without a >0.005 improvement before early stopping
       save_best: true       # true = keep the best epoch by validation loss (training loss
                             #   when there is no val split); false = keep the final epoch
@@ -248,11 +253,15 @@ train_config:
 
 explanation_config:
   default_settings:
-    target: "predicted"     # "predicted", "label", "all"
+    # As in data_config: these mirror the package defaults and a test holds them
+    # in step.
+    target: "predicted"     # class an attribution explains and is scored against:
+                            # "predicted", "label", or "all" (one explanation per class)
     visualization_type:
-      - "points"           # Available: points (default), background, intensity, bar, graph
-    samples:
-      type: "index"      # "index" or "random"
+      - "points"            # Available: points (default), background, intensity, bar, graph
+    samples:                # which test samples to explain. Metrics score only these, so
+                            # this also decides the subset every number refers to
+      type: "index"         # "index", "random", or "all" (every sample in the test split)
       indices: [0]          # Used when type = "index"
       count: 5              # Used when type = "random"
     save_exp_values: false  # true = save exp_values, indices, labels as .npy

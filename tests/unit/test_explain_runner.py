@@ -77,6 +77,8 @@ def _explainer_config(sample_type, **extra):
         "method": "integrated_gradients",
         "target": "predicted",
         "samples": {"type": sample_type},
+        "visualization_type": ["points"],
+        "save_exp_values": False,
     }
     cfg.update(extra)
     return cfg
@@ -101,7 +103,7 @@ def test_by_index_branch_passes_indices(tmp_path, monkeypatch):
     )
 
     assert calls["indices"] == [0, 2]
-    assert "samples" not in calls  # index does not forward a random count
+    assert "n_samples" not in calls  # index does not forward a random count
     assert (
         calls["save_path"]
         == tmp_path / "explanations" / "explanations_integrated_gradients"
@@ -115,6 +117,8 @@ def test_wrapper_save_folder_uses_qualified_name(tmp_path, monkeypatch):
         "method": "SIGN",
         "target": "predicted",
         "samples": {"type": "index", "indices": [0, 2]},
+        "visualization_type": ["points"],
+        "save_exp_values": False,
         "base": {"method": "Integrated_Gradients"},
     }
 
@@ -149,7 +153,7 @@ def test_random_branch_passes_count(tmp_path, monkeypatch):
     )
 
     assert calls["indices"] is None
-    assert calls["samples"] == 3
+    assert calls["n_samples"] == 3
 
 
 # ── artifact saving ─────────────────────────────────────────────────────────────

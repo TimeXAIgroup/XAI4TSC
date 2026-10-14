@@ -43,7 +43,9 @@ def plot_relevance(
         Relevance values matching the shape of *signal*.  Defaults to zeros.
     rel_type : str
         Visualisation style: ``"points"`` (default), ``"background"``,
-        ``"intensity"``, ``"graph"``, ``"bar"``, or ``None``.
+        ``"intensity"``, ``"graph"``, ``"bar"``, or ``None`` for no overlay.
+        An unrecognised value renders the default points overlay rather than
+        raising, and is used verbatim in the output filename.
     rel_type_kwargs : dict
         Extra keyword arguments forwarded to :func:`add_relevance`.
     linewidth : float
@@ -204,7 +206,7 @@ def add_relevance(
     ax: Axes,
     signal: np.ndarray,
     relevance: np.ndarray,
-    rel_type: str = "bubble",
+    rel_type: str = "points",
     threshold: float = 0.0,
     cmap: str = "bwr",
     cmap_boost: float = 0.0,
@@ -223,7 +225,9 @@ def add_relevance(
         1-D relevance values matching *signal*.
     rel_type : str
         Visualisation style: ``"points"`` (default), ``"background"``,
-        ``"intensity"``, ``"graph"``, ``"bar"``, or ``None``.
+        ``"intensity"``, ``"graph"``, ``"bar"``, or ``None`` for no overlay.
+        An unrecognised value renders the default points overlay rather than
+        raising, and is used verbatim in the output filename.
     threshold : float
         Relevance values below this absolute magnitude are suppressed.
     cmap : str or Colormap
@@ -232,7 +236,7 @@ def add_relevance(
         Value added (with sign) to non-zero relevances before colour mapping.
     **kwargs
         Style overrides forwarded to the chosen visualisation type
-        (e.g. ``bubble_size``, ``bar_height``, ``linewidth``).
+        (e.g. ``point_size``, ``bar_height``, ``linewidth``).
 
     Returns
     -------
@@ -333,7 +337,8 @@ def add_relevance(
         )
     elif rel_type is None:
         return ax
-    else:  # points as default
+    else:
+        # "points" and anything unrecognised both land here
         # relevance thresholding & boost
         x = np.where(np.abs(relevance) >= threshold)[0]
         y = signal[x]
@@ -344,7 +349,7 @@ def add_relevance(
             marker="o",
             c=z,
             cmap=cmap,
-            s=kwargs.get("bubble_size", 10),
+            s=kwargs.get("point_size", 10),
             zorder=0,
             vmin=np.min(relevance),
             vmax=np.max(relevance),

@@ -17,12 +17,15 @@ general:
 data_config:
   default_settings:
     train_split: 0.8
-    val_split: 0.1
+    val_split: 0.0              # the archive partition has no validation split, so early
+                                # stopping monitors training loss. Stated rather than left
+                                # to inherit master's 0.1, which would be ignored here
     encode: "label"
-    allow_padding: true       # zero-pad variable-length series to the longest length
-    allow_imputation: true    # impute NaN values with the per-channel mean
+    use_predefined_splits: true # use official _TRAIN.ts/_TEST.ts splits; ignores train_split, val_split, stratify
+    allow_padding: true         # zero-pad variable-length series to the longest length
+    allow_imputation: true      # impute NaN values with the per-channel mean
   datasets:
-    - dataset: "UCR"          # expands to all 128 UCR univariate datasets
+    - dataset: "UCR"            # expands to all 128 UCR univariate datasets
 
 train_config:
   default_settings:

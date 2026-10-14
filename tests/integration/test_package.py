@@ -44,15 +44,13 @@ def test_model_trains_and_predicts(split_dataset, tmp_path):
     model.train_model(
         train_data,
         train_labels,
-        hyperparams={
-            "epochs": 2,
-            "batchsize": 8,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.001,
-            "patience": 2,
-            "save_best": False,
-        },
+        epochs=2,
+        batchsize=8,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.001,
+        patience=2,
+        save_best=False,
     )
     out_classes, _ = model.predict(test_data, test_labels)
 
@@ -83,15 +81,13 @@ def test_lstm_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     model.train_model(
         train_data,
         train_labels,
-        hyperparams={
-            "epochs": 2,
-            "batchsize": 8,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.001,
-            "patience": 2,
-            "save_best": False,
-        },
+        epochs=2,
+        batchsize=8,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.001,
+        patience=2,
+        save_best=False,
     )
     out_classes, _ = model.predict(test_data, test_labels)
     assert out_classes.shape[0] == len(test_data)
@@ -135,15 +131,13 @@ def test_patchtst_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     model.train_model(
         train_data,
         train_labels,
-        hyperparams={
-            "epochs": 2,
-            "batchsize": 8,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.001,
-            "patience": 2,
-            "save_best": False,
-        },
+        epochs=2,
+        batchsize=8,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.001,
+        patience=2,
+        save_best=False,
     )
     out_classes, _ = model.predict(test_data, test_labels)
     assert out_classes.shape[0] == len(test_data)
@@ -185,15 +179,13 @@ def test_xlstm_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     model.train_model(
         train_data,
         train_labels,
-        hyperparams={
-            "epochs": 2,
-            "batchsize": 8,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.001,
-            "patience": 2,
-            "save_best": False,
-        },
+        epochs=2,
+        batchsize=8,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.001,
+        patience=2,
+        save_best=False,
     )
     out_classes, _ = model.predict(test_data, test_labels)
     assert out_classes.shape[0] == len(test_data)
@@ -317,7 +309,9 @@ def test_plot_exp_saves_pngs(trained_model, split_dataset, tmp_path, targets):
         indices=[0, 1],
         device="cpu",
         save_path=tmp_path,
-        visualization_type=["points"],
+        # visualization_type deliberately omitted: the glob below then pins the
+        # internal default, which was "bubbles" while every docstring and the
+        # runner said "points".
     )
 
     # Plots are written flat under save_path, tagged by index — no sub-directories.
@@ -656,15 +650,13 @@ def test_model_learns_separable_task(config, tmp_path):
     model.train_model(
         data,
         labels,
-        hyperparams={
-            "epochs": 60,
-            "batchsize": 16,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.01,
-            "patience": 60,
-            "save_best": False,
-        },
+        epochs=60,
+        batchsize=16,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.01,
+        patience=60,
+        save_best=False,
     )
     preds, _ = model.predict(data, labels)
     acc = float((preds == labels).mean())

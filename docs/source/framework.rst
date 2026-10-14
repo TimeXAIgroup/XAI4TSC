@@ -129,12 +129,28 @@ Getting Started
    and metrics under ``metric_class_params`` or ``metric_call_params``. A parameter
    in the wrong place is reported with the place it belongs.
 
-   **Where defaults live.** Parameter defaults belong to the class that consumes
-   them -- a model's or explainer's constructor, or
-   :data:`xai4tsc.models.base.t_con_defaults` for training hyperparameters -- so
-   a value you omit behaves identically whether you drive the pipeline from a YAML
-   config or import the package. ``master.yaml`` documents those defaults in
-   comments but does not supply them, so the two entry points cannot diverge.
+   **Where defaults live.** Every default belongs to the package parameter that
+   consumes it -- a model's or explainer's constructor, the arguments of
+   :meth:`~xai4tsc.models.base.ModelBase.train_model` for training
+   hyperparameters, or those of :meth:`~xai4tsc.data.DatasetBase.split` and
+   :func:`~xai4tsc.generate_explanation` for the pipeline's own settings, so a
+   value you omit behaves identically whether you drive the pipeline from a YAML
+   config or import the package.
+
+   A component's parameters reach it through
+   :func:`~xai4tsc.utils.dict_to_args`, which simply does not pass what you did
+   not set. The settings in a ``default_settings`` block are read by the runner
+   before it calls anything, so for those it keeps a table ``_PACKAGE_BACKED``
+   in ``experiment_runner/defaults.py``, naming the parameter that owns each
+   key, and reads the value off that signature at startup. A renamed parameter
+   therefore fails immediately instead of leaving a stale copy behind. Keys the
+   package never sees, such as the ``skip_*`` switches and the Quantus parameter
+   blocks, are listed alongside as runner-owned, and for those ``master.yaml`` is
+   the source. The two lists must together cover every key, which a test enforces.
+
+   ``master.yaml`` documents all of them in comments but supplies only the
+   runner-owned ones, so the two entry points cannot diverge; a test compares
+   every documented value against the signature it came from.
 
 ``experiment_runner/configs/master.yaml`` is the annotated reference for every
 available config key. It is **not runnable**: it lists each component as a

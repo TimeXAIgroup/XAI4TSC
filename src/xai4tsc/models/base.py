@@ -22,23 +22,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 logger = logging.getLogger(__name__)
 
-t_con_defaults = {
-    "epochs": 20,
-    "batchsize": 8,
-    "learn_rate": 1e-3,
-    "patience": 3,
-    "save_best": True,
-    "loss_func": "crossentropy",
-    "optimizer": "adam",
-}
-"""Training hyperparameter defaults.
-
-:meth:`ModelBase.train_model` falls back to these per key, so a hyperparameter the
-caller omits behaves the same whether the pipeline is driven from a YAML config or
-from the package API. ``master.yaml`` documents them in comments and a test holds
-the two in step; it does not supply them.
-"""
-
 
 def _json_safe(value: object) -> bool:
     """
@@ -309,7 +292,13 @@ class ModelBase(nn.Module, ABC):
         self,
         data_train: np.ndarray,
         labels_train: np.ndarray,
-        hyperparams: dict,
+        epochs: int = 20,
+        batchsize: int = 8,
+        learn_rate: float = 1e-3,
+        patience: int = 3,
+        save_best: bool = True,
+        loss_func: str = "crossentropy",
+        optimizer: str = "adam",
         data_val: np.ndarray | None = None,
         labels_val: np.ndarray | None = None,
         save_path: Path | str | None = None,
@@ -329,10 +318,24 @@ class ModelBase(nn.Module, ABC):
             Training data of shape ``(n_samples, n_channels, n_timesteps)``.
         labels_train : np.ndarray
             Integer class labels.
-        hyperparams : dict
-            Training hyperparameters.  Recognised keys: ``epochs``,
-            ``batchsize``, ``learn_rate``, ``patience``, ``loss_func``,
-            ``optimizer``, ``save_best``.
+        epochs : int
+            Number of epochs to run in this call, 20 by default.  A run resuming
+            from a checkpoint continues its epoch count.
+        batchsize : int
+            Samples per batch, 8 by default.
+        learn_rate : float
+            Optimizer learning rate, ``1e-3`` by default.
+        patience : int
+            Epochs without improvement before early stopping, 3 by default.
+        save_best : bool
+            Whether to write a checkpoint whenever the monitored loss improves,
+            ``True`` by default.
+        loss_func : str
+            Loss function name, ``"crossentropy"`` by default (the only
+            supported value).  Matched case-insensitively.
+        optimizer : str
+            Optimizer name, ``"adam"`` by default (the only supported value).
+            Matched case-insensitively.
         data_val : np.ndarray, optional
             Validation data of shape ``(n_samples, n_channels, n_timesteps)``.
             When provided, validation loss drives early stopping and checkpointing.
@@ -365,28 +368,21 @@ class ModelBase(nn.Module, ABC):
             np.ascontiguousarray(labels_train, dtype=np.int64)
         )
 
-        epochs = hyperparams.get("epochs", t_con_defaults["epochs"])
         start_epoch = start_epoch if start_epoch is not None else (self.best_epoch or 0)
         final_epoch = start_epoch + epochs
-        batchsize = hyperparams.get("batchsize", t_con_defaults["batchsize"])
-        learn_rate = hyperparams.get("learn_rate", t_con_defaults["learn_rate"])
-        patience = hyperparams.get("patience", t_con_defaults["patience"])
-        loss_func_name = hyperparams.get(
-            "loss_func", t_con_defaults["loss_func"]
-        ).lower()
+
+        loss_func_name = loss_func.lower()
         if loss_func_name == "crossentropy":
-            loss_func = nn.CrossEntropyLoss()
+            loss_function = nn.CrossEntropyLoss()
         else:
             raise ValueError(
                 f"Unsupported loss function '{loss_func_name}'. "
                 "Supported: 'crossentropy'."
             )
 
-        optimizer_name = hyperparams.get(
-            "optimizer", t_con_defaults["optimizer"]
-        ).lower()
+        optimizer_name = optimizer.lower()
         if optimizer_name == "adam":
-            optimizer = optim.Adam(self.parameters(), lr=learn_rate)
+            optimizer_instance = optim.Adam(self.parameters(), lr=learn_rate)
         else:
             raise ValueError(
                 f"Unsupported optimizer '{optimizer_name}'. Supported: 'adam'."
@@ -425,11 +421,11 @@ class ModelBase(nn.Module, ABC):
             for x_batch, y_batch in loader:
                 x_batch = x_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
-                optimizer.zero_grad()
+                optimizer_instance.zero_grad()
                 outputs = self(x_batch)
-                loss = loss_func(outputs, y_batch)
+                loss = loss_function(outputs, y_batch)
                 loss.backward()
-                optimizer.step()
+                optimizer_instance.step()
 
                 running_loss += loss.item()
                 preds = torch.max(outputs.data, 1)[1]
@@ -442,7 +438,7 @@ class ModelBase(nn.Module, ABC):
             epoch_accs.append(epoch_acc)
 
             # Monitor validation loss when available, else training loss.
-            val_loss = self._validation_loss(val_loader, loss_func)
+            val_loss = self._validation_loss(val_loader, loss_function)
             monitor_loss = val_loss if val_loss is not None else epoch_loss
             if val_loss is not None:
                 logger.info(
@@ -464,7 +460,7 @@ class ModelBase(nn.Module, ABC):
 
             if monitor_loss < (best_loss - p_tol):
                 cur_patience = 0
-                if hyperparams.get("save_best", t_con_defaults["save_best"]):
+                if save_best:
                     if best_path is not None:
                         best_path.unlink()
                         # The superseded checkpoint's config goes with it,
@@ -624,7 +620,7 @@ class ModelBase(nn.Module, ABC):
         self,
         data: np.ndarray,
         labels: np.ndarray,
-        hyperparams: dict,
+        batchsize: int = 8,
         threshold: float = 0.5,
         save_path: Path | str | None = None,
     ) -> dict:
@@ -641,8 +637,8 @@ class ModelBase(nn.Module, ABC):
             Test data.
         labels : np.ndarray
             Integer ground-truth labels.
-        hyperparams : dict
-            Used for ``batchsize``.
+        batchsize : int
+            Samples per batch, 8 by default.
         threshold : float
             Decision threshold for binary classification.
         save_path : Path or str, optional
@@ -665,7 +661,7 @@ class ModelBase(nn.Module, ABC):
                 torch.from_numpy(np.ascontiguousarray(data, dtype=np.float32)),
                 torch.from_numpy(np.ascontiguousarray(labels, dtype=np.int64)),
             ),
-            batch_size=hyperparams.get("batchsize", t_con_defaults["batchsize"]),
+            batch_size=batchsize,
             num_workers=4,
             drop_last=False,
         )

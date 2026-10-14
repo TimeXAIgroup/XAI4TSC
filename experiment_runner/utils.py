@@ -40,6 +40,14 @@ def expand_datasets(datasets: list[dict]) -> list[dict]:
     ``overrides`` map (``{dataset_name: {setting: value}}``) sets per-member
     exceptions that take precedence over the entry's inline settings.
 
+    Runs after :func:`~experiment_runner.config.config_resolve`, so each entry
+    already carries its effective settings, and after
+    :func:`~experiment_runner.config.config_sanity_check`, so one mistake in a
+    wildcard entry is reported once rather than once per member. Expansion
+    preserves the resolved-entry invariant: a member is built from an
+    already-resolved base, and an override still wins because it is the priority
+    dict of the merge below.
+
     Parameters
     ----------
     datasets : list[dict]
@@ -188,3 +196,50 @@ def _format_label_list(labels: list[str], limit: int = 10) -> str:
     if len(labels) <= limit:
         return ", ".join(labels)
     return f"{', '.join(labels[:limit])}, ... and {len(labels) - limit} more"
+
+
+def _check_sample_indices(
+    explanation_config: dict, n_test: int, dataset_id: str
+) -> None:
+    """
+    Check configured sample indices against the test split.
+
+    ``config_sanity_check`` runs before any dataset is loaded, so it can only
+    check that the indices are non-negative integers.  The bound needs the split,
+    and the split exists before any model trains - which is where this runs, so a
+    typo costs seconds instead of a training run plus a bare ``IndexError`` from
+    inside the explainer.
+
+    Parameters
+    ----------
+    explanation_config : dict
+        The resolved ``explanation_config`` section.
+    n_test : int
+        Number of samples in the test split.
+    dataset_id : str
+        Identity of the dataset being set up, for the error message.
+
+    Raises
+    ------
+    ValueError
+        If any explainer requests an index outside the test split.
+    """
+    for index, entry in enumerate(explanation_config.get("explainers") or []):
+        if not isinstance(entry, dict):
+            continue
+        samples = entry.get("samples")
+        if not isinstance(samples, dict) or samples.get("type") != "index":
+            continue
+        indices = samples.get("indices")
+        if not isinstance(indices, list):
+            continue
+        out_of_range = [i for i in indices if isinstance(i, int) and i >= n_test]
+        if out_of_range:
+            method = entry.get("method", "?")
+            msg = (
+                f"Dataset '{dataset_id}': explanation_config.explainers[{index}] "
+                f"('{method}') requests sample indices {out_of_range}, but the "
+                f"test split has {n_test} samples (valid: 0-{n_test - 1})."
+            )
+            logger.error(msg)
+            raise ValueError(msg)

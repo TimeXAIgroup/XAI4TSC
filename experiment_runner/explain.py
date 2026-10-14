@@ -210,7 +210,7 @@ def _generate_explanation(
             / "explanations"
             / f"explanations_{_explainer_display_name(explainer_config)}"
         )
-    visualization_type = explainer_config.get("visualization_type", ["points"])
+    visualization_type = explainer_config["visualization_type"]
 
     # Explain only certain samples addressed by index
     if explainer_config["samples"]["type"] == "index":
@@ -240,7 +240,7 @@ def _generate_explanation(
             params=params,
             encoder=encoder,
             indices=None,
-            samples=explainer_config["samples"]["count"],
+            n_samples=explainer_config["samples"]["count"],
             prng=prng,
             device=device,
             save_path=explanation_dir,
@@ -258,7 +258,6 @@ def _generate_explanation(
             params=params,
             encoder=encoder,
             indices=list(np.arange(len(data)).tolist()),
-            samples=len(data),
             prng=prng,
             device=device,
             save_path=explanation_dir,
@@ -271,7 +270,7 @@ def _generate_explanation(
     if metadata is not None and explanation is not None:
         explanation.metadata = [metadata[int(i)] for i in explanation.indices]
 
-    if explainer_config.get("save_exp_values", False) and explanation is not None:
+    if explainer_config["save_exp_values"] and explanation is not None:
         explanation_dir.mkdir(parents=True, exist_ok=True)
         np.save(explanation_dir / "exp_values.npy", explanation.exp_values)
         np.save(explanation_dir / "indices.npy", explanation.indices)

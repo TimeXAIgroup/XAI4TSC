@@ -1,6 +1,7 @@
 """``generate_explanation()`` entry point, ``EXPLAINERS`` registry, plot helpers."""
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -34,11 +35,11 @@ def generate_explanation(
     params: dict | None = None,
     encoder: OneHotEncoder | LabelEncoder | OrdinalEncoder | None = None,
     indices: list | None = None,
-    samples: int = 5,
+    n_samples: int = 5,
     prng: np.random.Generator | None = None,
     device: str = "cpu",
     save_path: Path | str | None = None,
-    visualization_type: list | None = None,
+    visualization_type: Sequence[str] = ("points",),
     data_domain: str | Domain = Domain.TIME,
 ) -> Explanation | None:
     """
@@ -65,7 +66,7 @@ def generate_explanation(
         Encoder used to encode the labels, by default None
     indices : list, optional
         Indices of samples to explain, by default None
-    samples : int, optional
+    n_samples : int, optional
         Number of random samples to explain if no indices supplied, by default 5
     prng : np.random.Generator, optional
         Generator used to pick random sample indices. When ``None`` a generator
@@ -76,8 +77,8 @@ def generate_explanation(
         Device to calculate on, by default ``"cpu"``.
     save_path : Path | str, optional
         Path to save the explanation visualisation to, by default None
-    visualization_type : list, optional
-        Plot styles to render when saving, by default ``["points"]``.
+    visualization_type : Sequence[str], optional
+        Plot styles to render when saving, by default ``("points",)``.
     data_domain : str or Domain, optional
         Signal domain *data* is expressed in, i.e. the domain the model consumes
         (``"time"`` by default; see :attr:`xai4tsc.data.DatasetBase.data_domain`).
@@ -89,18 +90,16 @@ def generate_explanation(
     Explanation
         An object of the Explanation dataclass.
     """
-    if visualization_type is None:
-        visualization_type = ["bubbles"]
     prng = resolve_rng(DEFAULT_SEED, prng)
 
     model.eval()
     # Samples to explain are in list form
-    if indices is None and samples > 0:
+    if indices is None and n_samples > 0:
         indices = np.arange(len(data))
         prng.shuffle(indices)
-        indices = indices[:samples]
+        indices = indices[:n_samples]
     elif len(indices) == 0:
-        if samples <= 0:
+        if n_samples <= 0:
             logger.warning(
                 "Supplied no indices to explain nor a sample count for "
                 "random explanations, aborting."
@@ -108,7 +107,18 @@ def generate_explanation(
             return None
         indices = np.arange(len(data))
         prng.shuffle(indices)
-        indices = indices[:samples]
+        indices = indices[:n_samples]
+    else:
+        # Explicitly requested indices are the one path numpy would fail on, and
+        # it fails with a bare IndexError naming an axis rather than the setting
+        # that produced it.  Both data[indices] below and the metadata lookup in
+        # _get_explanation index by these, so one check covers both.
+        out_of_range = [int(i) for i in indices if not 0 <= int(i) < len(data)]
+        if out_of_range:
+            raise ValueError(
+                f"indices {out_of_range} are out of range for {len(data)} "
+                f"samples (valid: 0-{len(data) - 1})."
+            )
 
     explanation = _get_explanation(
         method=method,
@@ -138,7 +148,7 @@ def _get_explanation(
     device: str = "cpu",
     orig_indices: np.ndarray | None = None,
     save_path: Path | None = None,
-    visualization_type: list | None = None,
+    visualization_type: Sequence[str] = ("points",),
     data_domain: str | Domain = Domain.TIME,
 ) -> Explanation:
     """
@@ -167,8 +177,8 @@ def _get_explanation(
         Original indices of the supplied samples, by default None
     save_path : Path, optional
         Path to save visualisation to, by default None
-    visualization_type : list, optional
-        Plot styles to render when saving, by default ``["points"]``.
+    visualization_type : Sequence[str], optional
+        Plot styles to render when saving, by default ``("points",)``.
     data_domain : str or Domain, optional
         Signal domain *data* is expressed in, i.e. the domain the model consumes
         (``"time"`` by default; see :attr:`xai4tsc.data.DatasetBase.data_domain`).
@@ -188,8 +198,6 @@ def _get_explanation(
     ValueError
         If the explainer cannot consume data in *data_domain*.
     """
-    if visualization_type is None:
-        visualization_type = ["points"]
     # Instantiate the explainer, filtering config params to its __init__.
     explainer_key = method.lower()
     explainer_instance = build_explainer(explainer_key, params)
@@ -281,7 +289,7 @@ def plot_exp(
     exp: Explanation,
     norm: bool = True,
     save_path: Path | str | None = None,
-    visualization_type: list | None = None,
+    visualization_type: Sequence[str] = ("points",),
 ) -> None:
     """
     Render and save relevance plots for every sample in *exp*.
@@ -307,7 +315,7 @@ def plot_exp(
         Whether to normalize explanation values, by default True.
     save_path : Path | str | None, optional
         Directory to save the plots to, by default None.
-    visualization_type : list | None, optional
+    visualization_type : Sequence[str], optional
         Overlay styles for time / frequency plots: any of ``"points"`` (default),
         ``"background"``, ``"intensity"``, ``"graph"``, or ``"bar"``. Ignored for
         time-frequency, which renders a single fixed heatmap view.
@@ -318,8 +326,6 @@ def plot_exp(
         If *exp* is a frequency / time-frequency explanation but carries no
         ``exp.transform`` to derive the transformed signal from.
     """
-    if visualization_type is None:
-        visualization_type = ["points"]
     save_path = Path(save_path) if isinstance(save_path, str) else save_path
     save_path.mkdir(parents=True, exist_ok=True)
 

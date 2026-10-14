@@ -54,7 +54,7 @@ def test_indices_none_samples_positive_shuffles_and_truncates(monkeypatch):
         data=data,
         labels=labels,
         indices=None,
-        samples=3,
+        n_samples=3,
         prng=np.random.default_rng(0),
     )
 
@@ -76,7 +76,7 @@ def test_empty_indices_samples_positive_selects_random(monkeypatch):
         data=data,
         labels=labels,
         indices=[],
-        samples=2,
+        n_samples=2,
         prng=np.random.default_rng(1),
     )
 
@@ -100,7 +100,7 @@ def test_empty_indices_nonpositive_samples_returns_none(monkeypatch, caplog):
             data=np.zeros((5, 1, 4), dtype=np.float32),
             labels=np.arange(5),
             indices=[],
-            samples=0,
+            n_samples=0,
         )
 
     assert result is None
@@ -109,6 +109,49 @@ def test_empty_indices_nonpositive_samples_returns_none(monkeypatch, caplog):
 
 
 # ── explainer validation & registry ──────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [[0, 999999], [-1], [10]])
+def test_out_of_range_indices_raise_naming_the_range(monkeypatch, bad):
+    """
+    An index past the end of the data must say so, not reach numpy.
+
+    It used to surface as ``IndexError: index 999999 is out of bounds for axis 0``
+    from ``data[indices]``, which names an axis rather than the setting that
+    produced it - and in a run, only after the model had already trained.
+    """
+    _patch_get_explanation(monkeypatch)
+    data = np.zeros((10, 1, 4), dtype=np.float32)
+    labels = np.arange(10)
+
+    with pytest.raises(ValueError, match=r"out of range for 10 samples"):
+        generate_explanation(
+            method="integrated_gradients",
+            model=_DummyModel(),
+            data=data,
+            labels=labels,
+            indices=bad,
+            prng=np.random.default_rng(0),
+        )
+
+
+@pytest.mark.unit
+def test_in_range_indices_are_passed_through(monkeypatch):
+    # The boundary index must not be rejected: valid is 0..len-1.
+    recorded = _patch_get_explanation(monkeypatch)
+    data = np.zeros((10, 1, 4), dtype=np.float32)
+
+    generate_explanation(
+        method="integrated_gradients",
+        model=_DummyModel(),
+        data=data,
+        labels=np.arange(10),
+        indices=[0, 9],
+        prng=np.random.default_rng(0),
+    )
+
+    assert list(recorded["orig_indices"]) == [0, 9]
 
 
 @pytest.mark.unit

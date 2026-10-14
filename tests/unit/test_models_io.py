@@ -976,7 +976,7 @@ def test_training_from_scratch_numbers_epochs_from_one(tmp_path):
     model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
     data, labels = _tiny_batch()
 
-    model.train_model(data, labels, _TRAIN_HP)
+    model.train_model(data, labels, **_TRAIN_HP)
 
     # The surviving checkpoint is the *best* epoch, which may be 1 or 2 - the
     # point is that it is numbered within this call's budget.
@@ -992,7 +992,7 @@ def test_resumed_training_continues_the_epoch_count(tmp_path):
     first.mkdir()
     model = load_model(_TINY_FCN, device="cpu", save_path=first)
     data, labels = _tiny_batch()
-    model.train_model(data, labels, _TRAIN_HP)
+    model.train_model(data, labels, **_TRAIN_HP)
     checkpoint = next(first.glob("FCN_epoch_*.pt"))
 
     second = tmp_path / "second"
@@ -1001,7 +1001,7 @@ def test_resumed_training_continues_the_epoch_count(tmp_path):
         device="cpu",
         save_path=second,
     )
-    resumed.train_model(data, labels, _TRAIN_HP)
+    resumed.train_model(data, labels, **_TRAIN_HP)
 
     assert resumed.best_epoch > 2, "a resumed run must not restart the epoch count"
     assert [f.name for f in second.glob("*.pt")] == [
@@ -1016,7 +1016,7 @@ def test_explicit_start_epoch_overrides_the_checkpoint(tmp_path):
     model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
     data, labels = _tiny_batch()
 
-    model.train_model(data, labels, _TRAIN_HP, start_epoch=100)
+    model.train_model(data, labels, **_TRAIN_HP, start_epoch=100)
 
     assert model.best_epoch in (101, 102)
     assert list(tmp_path.glob("FCN_epoch_10*.pt"))
@@ -1108,8 +1108,10 @@ def test_writing_without_a_destination_raises(method):
     model = FCN(in_channels=1, num_classes=2)
     data, labels = _tiny_batch()
 
+    # evaluate_model takes only the batch size; the rest describes training.
+    kwargs = _TRAIN_HP if method == "train_model" else {"batchsize": 8}
     with pytest.raises(ValueError, match="needs a save_path"):
-        getattr(model, method)(data, labels, _TRAIN_HP)
+        getattr(model, method)(data, labels, **kwargs)
 
 
 @pytest.mark.unit
@@ -1119,8 +1121,8 @@ def test_directly_built_model_writes_files_named_after_its_class(tmp_path):
     model = FCN(in_channels=1, num_classes=2)
     data, labels = _tiny_batch()
 
-    model.train_model(data, labels, _TRAIN_HP, save_path=tmp_path)
-    model.evaluate_model(data, labels, _TRAIN_HP)
+    model.train_model(data, labels, **_TRAIN_HP, save_path=tmp_path)
+    model.evaluate_model(data, labels, batchsize=8)
 
     written = sorted(f.name for f in tmp_path.iterdir())
     assert not [f for f in written if f.startswith("None")], written

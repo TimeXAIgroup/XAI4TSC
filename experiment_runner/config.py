@@ -5,12 +5,17 @@ Resolves user YAML against ``master.yaml``, applies per-method defaults,
 and validates model and explainer names against the live runtime registries.
 """
 
+import copy
 import difflib
 import inspect
 import logging
 from pathlib import Path
 
 import yaml
+
+from xai4tsc.utils.utils import merge_dicts
+
+from .defaults import apply_package_defaults, hyperparam_names
 
 logger = logging.getLogger("xai4tsc.runner.config")
 
@@ -277,13 +282,22 @@ def config_resolve(
     user_config: dict, master_path: Path, issues: "ConfigIssues | None" = None
 ) -> dict:
     """
-    Resolve a user config against the master config.
+    Resolve a user config into the form the rest of the run reads.
 
     Steps performed:
 
     1. Load master.yaml (annotated reference with all known keys and the default
        values of the ``general`` and ``default_settings`` blocks).
     2. Warn + drop any unknown top-level or nested keys found in user_config.
+    3. Replace every package-backed ``default_settings`` value the user did not
+       state with the one read off the package parameter that consumes it
+       (:func:`~experiment_runner.defaults.apply_package_defaults`).
+    4. Overlay each section's ``default_settings`` onto every one of its list
+       entries (:func:`_resolve_entries`).
+
+    After this returns, **every list entry carries its effective settings**, so
+    nothing downstream has to merge again or know which layer a value came from.
+    Validation, the cache key and the pipeline all read final values.
 
     Master's four component lists (``datasets``, ``models``, ``explainers``,
     ``metrics``) are a **catalogue**, not a source of values: parameter defaults
@@ -307,13 +321,72 @@ def config_resolve(
     Returns
     -------
     dict
-        Resolved config with defaults applied and unknown keys removed.
+        Resolved config: defaults applied, unknown keys removed, entries merged.
     """
     with open(master_path) as f:
         master = yaml.safe_load(f)
 
     # Warn + drop at the top level and recursively inside known sections
-    return _merge_warn_drop(user_config, master, "root", issues)
+    resolved = _merge_warn_drop(user_config, master, "root", issues)
+    apply_package_defaults(user_config, resolved)
+    _resolve_entries(resolved)
+    return resolved
+
+
+def _resolve_entries(config: dict) -> None:
+    """
+    Overlay each section's ``default_settings`` onto every one of its entries.
+
+    Modifies *config* in place. This is the one place the per-entry merge
+    happens; the four component lists are walked here because the merge cannot be
+    expressed as a single top-level one. :func:`~xai4tsc.utils.utils.merge_dicts`
+    descends into dict values and treats a list as an opaque leaf - the same
+    reason a user's list replaces master's catalogue wholesale - so nothing can
+    push ``<section>.default_settings`` into the elements of its sibling list
+    without walking that list. The four blocks also have disjoint key spaces, so
+    there is no single block to merge from: ``train_split`` has no business in a
+    model entry.
+
+    Both sides are deep-copied, and both copies are needed.
+    :func:`~xai4tsc.utils.utils.merge_dicts` writes into its first argument, so
+    without copying the entry the raw config would be mutated; and for a key the
+    entry does not have it inserts the default's own object, so without copying
+    the defaults every entry that inherited ``samples`` or ``hyperparams`` would
+    share one dict with the defaults block and with its siblings, and a later
+    write to one would reach them all.
+
+    Parameters
+    ----------
+    config : dict
+        The config after master has been merged in, modified in place.
+    """
+    for section, list_key in _ENTRY_SECTIONS.values():
+        block = config.get(section) or {}
+        defaults = block.get("default_settings") or {}
+        entries = block.get(list_key)
+        if not isinstance(entries, list):
+            continue
+
+        resolved_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                # Left as-is for _validate_entries to report by position.
+                resolved_entries.append(entry)
+                continue
+            resolved = merge_dicts(copy.deepcopy(entry), copy.deepcopy(defaults))
+            # Set correct train values for checkpoints without training:
+            # Presence of `train` on the raw entry decides whether a checkpoint
+            # retrains, and the merge is about to make every entry carry it.
+            if (
+                section == "train_config"
+                and "model_ckpt_path" in resolved
+                and "train" not in entry
+            ):
+                resolved["train"] = None
+            resolved_entries.append(resolved)
+        # A new list rather than an in-place replacement: _merge_warn_drop copies
+        # each section shallowly, so this list is still the user's own object.
+        block[list_key] = resolved_entries
 
 
 _LEGACY_TRAIN_VALUES = frozenset({"till_epoch", "for_epochs"})
@@ -673,6 +746,166 @@ def _validate_general_seeding(general: dict, issues: ConfigIssues) -> None:
         )
 
 
+_SAMPLE_TYPES = ("index", "random", "all")
+"""Accepted ``samples.type`` values, in the order ``master.yaml`` documents them."""
+
+
+def _validate_data_splits(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check that each dataset's split fractions can produce three splits.
+
+    It is pure arithmetic on config values, so it is caught here instead before a
+    dataset is even downloaded. Entries using the archive partition or an already-split
+    directory never reach the splitter, so their fractions are not checked here; they
+    are reported as ignored when the split runs.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    section = config.get("data_config") or {}
+    for index, entry in enumerate(section.get("datasets") or []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("use_predefined_splits") or entry.get("is_presplit"):
+            continue
+
+        name = entry.get("dataset", "?")
+        where = f"data_config.datasets[{index}] ('{name}')"
+        train_split = entry.get("train_split")
+        val_split = entry.get("val_split")
+        if not isinstance(train_split, (int, float)) or isinstance(train_split, bool):
+            continue
+        if not isinstance(val_split, (int, float)) or isinstance(val_split, bool):
+            continue
+
+        if not 0 < train_split < 1:
+            issues.error(
+                where,
+                f"train_split must be between 0 and 1, got {train_split!r}.",
+            )
+        elif train_split + val_split >= 1:
+            issues.error(
+                where,
+                f"train_split ({train_split:.4g}) + val_split ({val_split:.4g}) "
+                f"= {train_split + val_split:.4g} leaves nothing for the test "
+                "split; together they must stay below 1.",
+            )
+        elif val_split < 0:
+            issues.error(where, f"val_split cannot be negative, got {val_split!r}.")
+
+
+def _validate_explanation_samples(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check each explainer's ``samples`` block as far as the data allows.
+
+    Only the data-independent part of ``indices`` is checked here, because
+    ``config_sanity_check`` runs before any dataset is loaded and so cannot know
+    how many test samples there will be. The bound itself is checked once the
+    split exists.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    section = config.get("explanation_config") or {}
+    for index, entry in enumerate(section.get("explainers") or []):
+        if not isinstance(entry, dict):
+            continue
+        method = entry.get("method", "?")
+        where = f"explanation_config.explainers[{index}] ('{method}')"
+        samples = entry.get("samples")
+        if not isinstance(samples, dict):
+            continue
+
+        sample_type = samples.get("type")
+        if sample_type not in _SAMPLE_TYPES:
+            issues.error(
+                f"{where}.samples.type",
+                f"must be one of {list(_SAMPLE_TYPES)}, got {sample_type!r}."
+                f"{_suggest(str(sample_type), _SAMPLE_TYPES)} An unrecognised "
+                "value would explain the whole test split, which is also the "
+                "subset every metric would then score.",
+            )
+            continue
+
+        if sample_type == "index":
+            indices = samples.get("indices")
+            if not isinstance(indices, list) or not indices:
+                issues.error(
+                    f"{where}.samples.indices",
+                    "must be a non-empty list of sample indices when "
+                    f"samples.type is 'index', got {indices!r}.",
+                )
+                continue
+            bad = [
+                i
+                for i in indices
+                if isinstance(i, bool) or not isinstance(i, int) or i < 0
+            ]
+            if bad:
+                issues.error(
+                    f"{where}.samples.indices",
+                    f"must contain non-negative integers; {bad} is not usable.",
+                )
+        elif sample_type == "random":
+            count = samples.get("count")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                issues.error(
+                    f"{where}.samples.count",
+                    "must be a positive integer when samples.type is "
+                    f"'random', got {count!r}.",
+                )
+
+
+def _validate_hyperparams(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check every model entry's ``hyperparams`` block against what training takes.
+
+    The block is handed to
+    :meth:`~xai4tsc.models.base.ModelBase.train_model` as keyword arguments, so
+    an unrecognised key raises there. Reporting it here instead names the entry
+    and offers the near-miss, and does so before a dataset is downloaded. It is
+    an error rather than a warning because the keys decide how the model trains:
+    a silently dropped ``epochs`` moves every number the run produces.
+
+    The accepted names come from :func:`~experiment_runner.defaults.hyperparam_names`,
+    which derives them from the pointer table, so they cannot drift from the
+    signature.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    accepted = hyperparam_names()
+    for index, entry in enumerate(
+        (config.get("train_config") or {}).get("models") or []
+    ):
+        if not isinstance(entry, dict):
+            continue
+        hyperparams = entry.get("hyperparams")
+        if not isinstance(hyperparams, dict):
+            continue
+        where = (
+            f"train_config.models[{index}] ('{entry.get('model', '?')}').hyperparams"
+        )
+        for key in hyperparams:
+            if key not in accepted:
+                issues.error(
+                    where,
+                    f"'{key}' is not a training parameter.{_suggest(key, accepted)}",
+                )
+
+
 def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> bool:
     """
     Check whether the supplied config contains errors.
@@ -724,6 +957,9 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
 
     _normalize_train_switch(config["train_config"], issues)
     _validate_general_seeding(config.get("general", {}), issues)
+    _validate_data_splits(config, issues)
+    _validate_explanation_samples(config, issues)
+    _validate_hyperparams(config, issues)
 
     # Lazy imports to avoid circular dependencies at module level
     from xai4tsc.xai.explain import EXPLAINERS

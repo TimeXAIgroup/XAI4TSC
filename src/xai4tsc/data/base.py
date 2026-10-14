@@ -395,7 +395,7 @@ def _split_dataset(
     labels: np.ndarray,
     metadata: pd.DataFrame | None = None,
     train_split: float = 0.8,
-    val_split: float = 0.0,
+    val_split: float = 0.1,
     random_state: int | None = DEFAULT_SEED,
     encode: str = "label",
     stratify: bool = True,
@@ -669,7 +669,7 @@ class DatasetBase(ABC):
     def split(
         self,
         train_split: float = 0.8,
-        val_split: float = 0.0,
+        val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
         encode: str = "label",
         impute_missing: bool = False,

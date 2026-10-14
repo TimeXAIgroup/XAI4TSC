@@ -127,8 +127,12 @@ def test_config_resolve_injects_no_constructor_params():
     user = _minimal_user_config()
     user["explanation_config"]["explainers"] = [{"method": "Occlusion"}]
     config = config_resolve(user, MASTER_CONFIG)
-    explainer = config["explanation_config"]["explainers"][0]
-    assert explainer == {"method": "Occlusion"}, (
+    section = config["explanation_config"]
+    explainer = section["explainers"][0]
+    # Resolve overlays default_settings onto every entry, and nothing beyond it:
+    # none of Occlusion's own constructor parameters may arrive from master's
+    # catalogue entry, since those defaults belong to the class.
+    assert set(explainer) == {"method"} | set(section["default_settings"]), (
         "master.yaml must not override the explainer's own defaults"
     )
 
@@ -615,14 +619,20 @@ def test_master_metric_entries_carry_only_their_identity():
 
 @pytest.mark.unit
 def test_master_hyperparams_match_the_package_defaults():
-    from xai4tsc.models.base import t_con_defaults
+    """
+    Every hyperparameter master documents is a real ``train_model`` keyword.
 
+    The values themselves are compared in ``test_defaults.py``, against the
+    signature the runner derives them from. What this adds is coverage of the
+    other direction: a key master lists that training would reject.
+    """
+    from xai4tsc.models.base import ModelBase
+
+    accepted = set(inspect.signature(ModelBase.train_model).parameters)
     master = yaml.safe_load(MASTER_CONFIG.read_text())
-    hyperparams = master["train_config"]["default_settings"]["hyperparams"]
-    for key, expected in t_con_defaults.items():
-        got = hyperparams[key]
-        assert str(got).lower() == str(expected).lower(), (
-            f"hyperparams.{key}: master={got!r} but t_con_defaults={expected!r}"
+    for key in master["train_config"]["default_settings"]["hyperparams"]:
+        assert key in accepted, (
+            f"master documents hyperparams.{key}, which train_model does not take"
         )
 
 
@@ -1009,3 +1019,120 @@ def test_null_general_seed_is_accepted():
     cfg["general"] = {"seed": None}
     cfg = config_resolve(cfg, MASTER_CONFIG)
     assert config_sanity_check(cfg) is True
+
+
+# ── split fractions and sample selection ──────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"train_split": 0.9, "val_split": 0.5}, "leaves nothing for the test"),
+        ({"train_split": 0.9, "val_split": 0.1}, "leaves nothing for the test"),
+        ({"train_split": 1.5}, "train_split must be between 0 and 1"),
+        ({"val_split": -0.2}, "val_split cannot be negative"),
+    ],
+)
+def test_impossible_split_fractions_are_refused(entry, expected):
+    """
+    Fractions that leave no test split must fail at config time.
+
+    They used to reach sklearn as a negative test_size, which the splitter caught
+    and reported as a stratification problem before raising again - so the error
+    named the wrong cause, after the dataset had already been loaded.
+    """
+    cfg = _entry_config(data_config=[{"dataset": "GunPoint", **entry}])
+
+    with pytest.raises(ValueError, match=expected):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_split_fractions_are_not_checked_for_the_archive_partition():
+    # use_predefined_splits never reaches the splitter, so its fractions are
+    # ignored rather than impossible; split() reports that separately.
+    cfg = _entry_config(
+        data_config=[
+            {
+                "dataset": "GunPoint",
+                "train_split": 0.9,
+                "val_split": 0.5,
+                "use_predefined_splits": True,
+            }
+        ]
+    )
+
+    assert config_sanity_check(cfg) is True
+
+
+@pytest.mark.unit
+def test_unknown_sample_type_is_refused_naming_the_cost():
+    """
+    A typo in samples.type used to silently explain the whole test split.
+
+    Metrics are computed only on the explained samples, so that quietly changed
+    which subset every number in the run was scored over.
+    """
+    cfg = _entry_config(
+        explanation_config=[
+            {"method": "Integrated_Gradients", "samples": {"type": "indx"}}
+        ]
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        config_sanity_check(cfg)
+    message = str(excinfo.value)
+    assert "indx" in message
+    assert "'index'" in message, "should suggest the near-miss"
+    assert "whole test split" in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sample_type", ["index", "random", "all"])
+def test_documented_sample_types_are_accepted(sample_type):
+    samples = {"type": sample_type, "indices": [0], "count": 3}
+    cfg = _entry_config(
+        explanation_config=[{"method": "Integrated_Gradients", "samples": samples}]
+    )
+
+    assert config_sanity_check(cfg) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("samples", "expected"),
+    [
+        ({"type": "index", "indices": []}, "non-empty list"),
+        ({"type": "index", "indices": [0, -3]}, "non-negative integers"),
+        ({"type": "index", "indices": [0, "two"]}, "non-negative integers"),
+        ({"type": "random", "count": 0}, "positive integer"),
+    ],
+)
+def test_malformed_sample_selection_is_refused(samples, expected):
+    # The bound itself needs the test split, which config validation cannot see;
+    # these are the parts that are checkable without any data.
+    cfg = _entry_config(
+        explanation_config=[{"method": "Integrated_Gradients", "samples": samples}]
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_split_and_sample_problems_share_one_report(caplog):
+    # Both new checks must go through the collector, so one run reports
+    # everything rather than failing on whichever is reached first.
+    cfg = _entry_config(
+        data_config=[{"dataset": "GunPoint", "train_split": 0.9, "val_split": 0.5}],
+        explanation_config=[
+            {"method": "Integrated_Gradients", "samples": {"type": "indx"}}
+        ],
+    )
+
+    with caplog.at_level("ERROR", logger=_CFG_LOGGER), pytest.raises(ValueError):
+        config_sanity_check(cfg)
+
+    assert "leaves nothing for the test split" in caplog.text
+    assert "indx" in caplog.text

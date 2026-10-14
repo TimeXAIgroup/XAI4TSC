@@ -45,6 +45,48 @@ def test_plot_relevance_rel_types(tmp_path, rel_type):
     assert out.exists()
 
 
+@pytest.mark.unit
+def test_unknown_rel_type_renders_the_points_default(tmp_path):
+    """
+    An unrecognised style renders points rather than raising.
+
+    This is a deliberate choice, not an oversight: a style name only selects an
+    overlay, so a wrong one costs a re-render and touches no attribution, metric
+    or saved array. Pinning it here stops it turning into a raise by accident.
+    """
+    signal, relevance = _signal_relevance()
+    known = plot_relevance(
+        signal, relevance, rel_type="points", save_path=tmp_path / "known.png"
+    )
+    unknown = plot_relevance(
+        signal, relevance, rel_type="pionts", save_path=tmp_path / "unknown.png"
+    )
+
+    assert known.read_bytes() == unknown.read_bytes()
+
+
+@pytest.mark.unit
+def test_point_size_override_is_honoured(tmp_path):
+    # The kwarg was named bubble_size until the style was renamed to points.
+    signal, relevance = _signal_relevance()
+    small = plot_relevance(
+        signal,
+        relevance,
+        rel_type="points",
+        rel_type_kwargs={"point_size": 2},
+        save_path=tmp_path / "small.png",
+    )
+    large = plot_relevance(
+        signal,
+        relevance,
+        rel_type="points",
+        rel_type_kwargs={"point_size": 60},
+        save_path=tmp_path / "large.png",
+    )
+
+    assert small.read_bytes() != large.read_bytes()
+
+
 # ── shape handling ───────────────────────────────────────────────────────────────
 
 

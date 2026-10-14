@@ -127,6 +127,7 @@ def test_tshap_through_runner_adapter(trained_model, split_dataset, tmp_path):
         "target": "predicted",
         "samples": {"type": "index", "indices": [0, 1]},
         "visualization_type": ["points"],
+        "save_exp_values": False,
         "window_length": 0.1,
         "stride": 3,
         "perturb_baseline": "centroid",

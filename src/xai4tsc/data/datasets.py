@@ -283,7 +283,7 @@ class UcrUeaDataset(DatasetBase):
     def split(
         self,
         train_split: float = 0.8,
-        val_split: float = 0.0,
+        val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
         encode: str = "label",
         impute_missing: bool = False,
@@ -367,9 +367,6 @@ class UcrUeaDataset(DatasetBase):
         training loss, so the consequence is worth stating rather than
         inferring.
 
-        ``random_state`` is deliberately not reported: it still seeds
-        ``max_samples`` restriction in :meth:`_load_one_split`.
-
         Parameters
         ----------
         train_split : float
@@ -382,6 +379,9 @@ class UcrUeaDataset(DatasetBase):
         ignored = []
         if not math.isclose(train_split, 0.8, abs_tol=1e-9):
             ignored.append(f"train_split={train_split:.4g}")
+        # Compared against zero rather than against this argument's default:
+        # any non-zero fraction is unachievable on this path, inherited or
+        # stated, and the default is 0.1.
         if not math.isclose(val_split, 0.0, abs_tol=1e-9):
             ignored.append(f"val_split={val_split:.4g}")
         if not stratify:
@@ -1106,7 +1106,7 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
     def split(
         self,
         train_split: float = 0.8,
-        val_split: float = 0.0,
+        val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
         encode: str = "label",
         impute_missing: bool = False,

@@ -36,7 +36,6 @@ from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
 from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils import resolve_rng
-from xai4tsc.utils.utils import merge_dicts
 from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
@@ -55,6 +54,7 @@ from .seeding import boundary_seed, seed_globals
 from .utils import (
     _METRICS_COLUMNS,
     _aggregate_metric,
+    _check_sample_indices,
     _format_label_list,
     _result_row,
     expand_datasets,
@@ -238,10 +238,6 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                 dataset["dataset"],
             )
 
-            # Fill remaining gaps from default_settings (per-member overrides
-            # were already applied during dataset expansion).
-            dataset = merge_dicts(dataset, d_con["default_settings"])
-
             if dataset.get("skip_dataset"):
                 logger.info(
                     "Skipping dataset '%s' (skip_dataset: true).", dataset["dataset"]
@@ -259,7 +255,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                     Path(dataset["path"]), encode=dataset["encode"]
                 )
             else:
-                use_predefined_splits = dataset.get("use_predefined_splits", False)
+                use_predefined_splits = dataset["use_predefined_splits"]
                 is_synthetic = dataset["dataset"] in SYNTHETIC_DATASETS
                 if is_synthetic:
                     # Synthetic datasets are generated from params (forwarded via
@@ -268,9 +264,9 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         name=dataset["dataset"],
                         cache_dir=cache_dir,
                         max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset.get("sample_strategy", "random"),
+                        sample_strategy=dataset["sample_strategy"],
                         max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset.get("series_position", "first"),
+                        series_position=dataset["series_position"],
                         **dataset.get("init_params", {}),
                     )
                 else:
@@ -278,15 +274,15 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         name=dataset["dataset"],
                         path=dataset.get("path") or None,
                         cache_dir=cache_dir,
-                        download=dataset.get("download", True),
-                        data_format=dataset.get("format", "numpy"),
-                        pad_series=dataset.get("allow_padding", False),
+                        download=dataset["download"],
+                        data_format=dataset["format"],
+                        pad_series=dataset["allow_padding"],
                         max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset.get("sample_strategy", "random"),
+                        sample_strategy=dataset["sample_strategy"],
                         max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset.get("series_position", "first"),
+                        series_position=dataset["series_position"],
                         use_predefined_splits=use_predefined_splits,
-                        layout=dataset.get("layout", "auto"),
+                        layout=dataset["layout"],
                     )
 
                 # Synthetic auto-detect: a pre-split layout already in the
@@ -313,15 +309,15 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         dataset["val_split"],
                         split_seed,
                         dataset["encode"],
-                        allow_padding=dataset.get("allow_padding", False),
-                        allow_imputation=dataset.get("allow_imputation", False),
+                        allow_padding=dataset["allow_padding"],
+                        allow_imputation=dataset["allow_imputation"],
                         max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset.get("sample_strategy", "random"),
+                        sample_strategy=dataset["sample_strategy"],
                         max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset.get("series_position", "first"),
-                        stratify=dataset.get("stratify", True),
+                        series_position=dataset["series_position"],
+                        stratify=dataset["stratify"],
                         use_predefined_splits=use_predefined_splits,
-                        data_format=dataset.get("format", "numpy"),
+                        data_format=dataset["format"],
                         path=dataset.get("path") or None,
                     )
                     split_dir = split_cache / "splits" if split_cache else None
@@ -335,9 +331,9 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             train_split=dataset["train_split"],
                             val_split=dataset["val_split"],
                             encode=dataset["encode"],
-                            impute_missing=dataset.get("allow_imputation", False),
+                            impute_missing=dataset["allow_imputation"],
                             rng=resolve_rng(split_seed),
-                            stratify=dataset.get("stratify", True),
+                            stratify=dataset["stratify"],
                             class_order=dataset.get("classes") or None,
                         )
                         if split_cache:
@@ -357,6 +353,12 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             if hasattr(test_metadata, "to_dict"):
                 test_metadata = test_metadata.to_dict("records")
 
+            # The test-split size is the one thing config validation cannot know,
+            # so the index bound is checked here: after the split, before any
+            # model trains. Otherwise a typo costs a full training run and then
+            # surfaces as a bare IndexError from inside the explainer.
+            _check_sample_indices(e_con, len(test_data), dataset_id)
+
             if dataset.get("skip_models"):
                 logger.info(
                     "Skipping model/explainer/metrics for '%s' (skip_models: true).",
@@ -372,12 +374,6 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                 # dataset iteration via the shared YAML config object.
                 model_config = copy.deepcopy(model_config)
                 try:
-                    # Update config
-                    entry_sets_train = "train" in model_config
-                    model_config = merge_dicts(model_config, t_con["default_settings"])
-                    if "model_ckpt_path" in model_config and not entry_sets_train:
-                        model_config["train"] = None
-
                     # Auto-detect num_classes and in_channels when not explicitly set.
                     init_params = model_config.setdefault("init_params", {})
                     if init_params.get("num_classes") is None:
@@ -448,19 +444,21 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         )
                         # Train the model (validation drives early stopping
                         # when a val split is present)
+                        hyperparams = model_config["hyperparams"]
                         model_wrapper.train_model(
                             train_data,
                             train_labels,
-                            model_config["hyperparams"],
+                            **hyperparams,
                             data_val=val_data,
                             labels_val=val_labels,
                             save_path=model_path,
                         )
-                        # Evaluate on test data
+                        # Evaluate on test data. Only the batch size applies here;
+                        # the rest of the block describes training.
                         model_wrapper.evaluate_model(
                             test_data,
                             test_labels,
-                            model_config["hyperparams"],
+                            batchsize=hyperparams["batchsize"],
                             save_path=model_path,
                         )
 
@@ -496,11 +494,6 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 e_ind + 1,
                                 len(e_con["explainers"]),
                                 explainer,
-                            )
-
-                            # Update settings
-                            explainer_config = merge_dicts(
-                                explainer_config, e_con["default_settings"]
                             )
 
                             explanation = _generate_explanation(
@@ -648,11 +641,6 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                     )
                                     continue
                                 try:
-                                    # Update settings
-                                    metric_config = merge_dicts(
-                                        metric_config, eval_con["default_settings"]
-                                    )
-
                                     exp_data = test_data[explanation.indices]
 
                                     # Multi-target ("all") stacks one attribution per

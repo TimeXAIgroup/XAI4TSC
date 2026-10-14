@@ -100,14 +100,12 @@ def trained_model(split_dataset, tmp_path_factory):
     model.train_model(
         train_data,
         train_labels,
-        hyperparams={
-            "epochs": 2,
-            "batchsize": 8,
-            "loss_func": "CrossEntropy",
-            "optimizer": "adam",
-            "learn_rate": 0.001,
-            "patience": 2,
-            "save_best": True,
-        },
+        epochs=2,
+        batchsize=8,
+        loss_func="CrossEntropy",
+        optimizer="adam",
+        learn_rate=0.001,
+        patience=2,
+        save_best=True,
     )
     return model

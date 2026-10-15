@@ -29,6 +29,7 @@ from xai4tsc.data import (
     SYNTHETIC_DATASETS,
     LocalDataset,
     SyntheticDataset,
+    class_names,
     load_dataset,
 )
 from xai4tsc.evaluation.evaluate import ground_truth_missing, required_domains_for
@@ -460,6 +461,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             test_labels,
                             batchsize=hyperparams["batchsize"],
                             save_path=model_path,
+                            class_names=class_names(encoder),
                         )
 
                     if dataset.get("skip_explainers"):

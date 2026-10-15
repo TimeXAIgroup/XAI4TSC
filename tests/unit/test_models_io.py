@@ -8,7 +8,13 @@ import pytest
 import torch
 from torch import nn
 
-from xai4tsc.models.base import ModelBase, predict_probs
+from xai4tsc.models.base import (
+    ModelBase,
+    _confusion_counts,
+    _macro,
+    _rates,
+    predict_probs,
+)
 from xai4tsc.models.models import (
     FCN,
     LSTM,
@@ -1208,3 +1214,119 @@ def test_predict_probs_accepts_tensor_and_ndarray_alike():
     from_tensor = predict_probs(model, torch.from_numpy(array))
 
     assert np.array_equal(from_array, from_tensor)
+
+
+# ── test result artifacts: per-class counts, and pos/neg only where they mean ─
+# something
+
+
+@pytest.mark.unit
+def test_summary_reports_pos_neg_only_for_a_binary_model(tmp_path):
+    # pos/neg are sum(y_true == 1) and sum(y_true == 0): the class balance for a
+    # binary problem, and for an 8-class one two arbitrary class counts that read
+    # as a balance. The guarded log line always omitted them; the CSV did not.
+    data = np.random.default_rng(0).standard_normal((12, 1, 32)).astype("float32")
+
+    binary = FCN(in_channels=1, num_classes=2).evaluate_model(
+        data, np.array([0, 1] * 6), batchsize=4, save_path=tmp_path / "binary"
+    )
+    multi = FCN(in_channels=1, num_classes=3).evaluate_model(
+        data, np.array([0, 1, 2] * 4), batchsize=4, save_path=tmp_path / "multi"
+    )
+
+    assert {"pos", "neg"} <= set(binary)
+    assert not {"pos", "neg"} & set(multi)
+    assert {"macro_f1", "macro_mcc"} <= set(multi)
+    # The CSV is written straight from the dict, which is how its columns drifted
+    # away from the log line in the first place.
+    for returned, directory in ((binary, "binary"), (multi, "multi")):
+        csv = next((tmp_path / directory).glob("*_test_results.csv"))
+        assert csv.read_text().splitlines()[0].split(",") == list(returned)
+
+
+@pytest.mark.unit
+def test_per_class_results_are_written_for_every_problem(tmp_path):
+    # The confusion counts are computed to draw the matrix anyway; a sibling file
+    # keeps them readable for a 60-class dataset, where one wide row would not.
+    data = np.random.default_rng(1).standard_normal((12, 1, 32)).astype("float32")
+    labels = np.array([0, 1, 2] * 4)
+
+    FCN(in_channels=1, num_classes=3).evaluate_model(
+        data, labels, batchsize=4, save_path=tmp_path, class_names=["a", "b", "c"]
+    )
+
+    csv = next(tmp_path.glob("*_test_per_class.csv"))
+    rows = [line.split(",") for line in csv.read_text().strip().splitlines()]
+    assert rows[0][:7] == ["class", "name", "support", "tp", "tn", "fp", "fn"]
+    assert [r[0] for r in rows[1:]] == ["0", "1", "2"]
+    assert [r[1] for r in rows[1:]] == ["a", "b", "c"]
+    assert [int(r[2]) for r in rows[1:]] == [4, 4, 4]
+    # tp + tn + fp + fn is the whole test set for each class, one-vs-rest.
+    assert all(sum(int(v) for v in r[3:7]) == 12 for r in rows[1:])
+
+
+@pytest.mark.unit
+def test_class_names_of_the_wrong_length_are_reported_and_ignored(tmp_path, caplog):
+    data = np.random.default_rng(2).standard_normal((8, 1, 32)).astype("float32")
+
+    with caplog.at_level("WARNING", logger="xai4tsc.models.base"):
+        FCN(in_channels=1, num_classes=2).evaluate_model(
+            data,
+            np.array([0, 1] * 4),
+            batchsize=4,
+            save_path=tmp_path,
+            class_names=["only", "three", "names"],
+        )
+
+    assert "Ignoring 3 class names" in caplog.text
+    csv = next(tmp_path.glob("*_test_per_class.csv"))
+    assert [line.split(",")[1] for line in csv.read_text().splitlines()[1:]] == [
+        "0",
+        "1",
+    ]
+
+
+@pytest.mark.unit
+def test_confusion_counts_are_indexed_by_class_not_by_presence():
+    # The full matrix is what makes support_k mean class k. Built over only the
+    # classes present, an absent class shifts every row after it. (evaluate_model
+    # cannot be driven this way yet: its multiclass AUC rejects a test split that
+    # misses a class, so the guarantee is checked on the helper.)
+    cm = np.array([[3, 1, 0], [2, 4, 0], [0, 0, 0]])  # class 2 absent
+
+    counts = _confusion_counts(cm)
+
+    assert len(counts) == 3
+    assert counts[2] == {"support": 0, "tp": 0, "tn": 10, "fp": 0, "fn": 0}
+    assert counts[0] == {"support": 4, "tp": 3, "tn": 4, "fp": 2, "fn": 1}
+    assert all(c["tp"] + c["tn"] + c["fp"] + c["fn"] == 10 for c in counts)
+
+
+@pytest.mark.unit
+def test_rates_are_nan_where_undefined_rather_than_raising():
+    # A class with no true samples and none predicted divides by zero in every
+    # rate; the evaluation must still produce a row for it.
+    empty = _rates(tp=0, tn=10, fp=0, fn=0)
+    assert np.isnan(empty["sensitivity"]) and np.isnan(empty["f1"])
+    assert empty["specificity"] == 1.0
+
+    perfect = _rates(tp=5, tn=5, fp=0, fn=0)
+    assert perfect == pytest.approx(
+        {
+            "sensitivity": 1.0,
+            "specificity": 1.0,
+            "ppv": 1.0,
+            "npv": 1.0,
+            "f1": 1.0,
+            "mcc": 1.0,
+        }
+    )
+
+
+@pytest.mark.unit
+def test_macro_averages_over_the_classes_that_define_a_rate():
+    # One degenerate class must not turn the whole summary into nan.
+    rates = [{"f1": 1.0}, {"f1": 0.5}, {"f1": float("nan")}]
+
+    assert _macro(rates, "f1") == pytest.approx(0.75)
+    assert np.isnan(_macro([{"f1": float("nan")}], "f1"))

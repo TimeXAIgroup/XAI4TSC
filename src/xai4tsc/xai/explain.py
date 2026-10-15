@@ -9,7 +9,7 @@ import torch
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
 from .._random import DEFAULT_SEED, resolve_rng
-from ..data.base import class_names, decode_labels
+from ..data.base import class_names
 from ..models.base import ModelBase, predict_probs
 from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
 from ..utils.utils import dict_to_args
@@ -285,6 +285,16 @@ def _get_explanation(
     return exp
 
 
+def _class_label(names: list[str], index: int) -> str:
+    """
+    Return the display name of class *index*, or the index itself when unnamed.
+
+    An encoder exposing no classes gives an empty name list, in which case the
+    index is the only identifier available.
+    """
+    return names[index] if 0 <= index < len(names) else str(index)
+
+
 def plot_exp(
     exp: Explanation,
     norm: bool = True,
@@ -296,8 +306,13 @@ def plot_exp(
 
     Plots are written flat under *save_path*, one file per sample (and, for
     ``targets="all"`` explanations, per class), named
-    ``relevance_index_<idx>_class_<label>...`` so samples sharing a directory do
-    not overwrite one another. The renderer is chosen by ``exp.explanation_domain``:
+    ``relevance_index_<idx>_class_<name>...`` so samples sharing a directory do
+    not overwrite one another. ``<name>`` is the class the attribution explains
+    (``exp.explained_targets``, falling back to ``exp.labels``), spelled as
+    :func:`~xai4tsc.data.base.class_names` spells it - so a multi-hot class reads
+    ``0-0-1`` rather than ``[0 0 1]``, which is not a usable filename.
+
+    The renderer is chosen by ``exp.explanation_domain``:
     time-domain explanations use the 1-D
     :func:`~xai4tsc.utils.plot.plot_relevance` overlay styles; frequency and
     time-frequency explanations use :func:`~xai4tsc.utils.plot.plot_relevance_f`
@@ -348,7 +363,13 @@ def plot_exp(
         signal = exp.data
 
     multi_target = is_multi_target(exp)
-    class_labels = None if multi_target else decode_labels(exp.encoder, exp.labels)
+    names = class_names(exp.encoder)
+    if multi_target:
+        explained = None
+    else:
+        explained = (
+            exp.explained_targets if exp.explained_targets is not None else exp.labels
+        )
 
     for sample_ind in range(exp.data.shape[0]):
         signal_i = signal[sample_ind : sample_ind + 1]
@@ -358,12 +379,18 @@ def plot_exp(
         # axis first: exp_values[class, sample]; single-target is exp_values[sample].
         if multi_target:
             items = [
-                (label, exp.exp_values[class_ind, sample_ind : sample_ind + 1])
-                for class_ind, label in enumerate(class_names(exp.encoder))
+                (
+                    _class_label(names, class_ind),
+                    exp.exp_values[class_ind, sample_ind : sample_ind + 1],
+                )
+                for class_ind in range(exp.exp_values.shape[0])
             ]
         else:
             items = [
-                (class_labels[sample_ind], exp.exp_values[sample_ind : sample_ind + 1])
+                (
+                    _class_label(names, int(explained[sample_ind])),
+                    exp.exp_values[sample_ind : sample_ind + 1],
+                )
             ]
 
         for label, relevance_i in items:

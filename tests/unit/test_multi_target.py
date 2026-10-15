@@ -15,6 +15,7 @@ import torch
 from sklearn.preprocessing import LabelEncoder
 from torch import nn
 
+from xai4tsc.data.base import MultiHotLabelEncoder
 from xai4tsc.utils import STFTransform
 from xai4tsc.xai import Domain, Explanation, is_multi_target
 from xai4tsc.xai.explain import _get_explanation, plot_exp
@@ -227,3 +228,93 @@ def test_plot_exp_timefrequency_writes_flat_files(tmp_path, multi):
     assert list(tmp_path.glob("relevance_index_5_class_1_timefrequency*.png"))
     if multi:
         assert list(tmp_path.glob("relevance_index_3_class_1_timefrequency*.png"))
+
+
+# ── plot_exp: filenames name the explained class, spelled for a filesystem ────
+
+
+def _time_exp(labels, encoder, explained=None, multi=False):
+    """Build a minimal 2-sample time-domain explanation for the filename tests."""
+    n_classes = len(getattr(encoder, "classes_", [0, 1]))
+    exp_values = (
+        np.zeros((n_classes, 2, 1, 8), dtype=np.float32)
+        if multi
+        else np.zeros((2, 1, 8), dtype=np.float32)
+    )
+    return Explanation(
+        explainer="x",
+        explainer_params={},
+        explanation_type="feature_attribution",
+        exp_values=exp_values,
+        data=np.zeros((2, 1, 8), dtype=np.float32),
+        encoder=encoder,
+        labels=np.asarray(labels, dtype=np.int64),
+        indices=np.array([7, 9]),
+        meta=None,
+        explanation_domain=Domain.TIME,
+        explained_targets=None if explained is None else np.asarray(explained, int),
+    )
+
+
+@pytest.mark.unit
+def test_plot_exp_multihot_filenames_need_no_quoting(tmp_path):
+    # The raw decoded label is a numpy row, so interpolating it gave names like
+    # "relevance_index_7_class_[0 0 1]_points.png": invalid on Windows, and a
+    # single `find | xargs` splits one such name across three words.
+    encoder = MultiHotLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
+    exp = _time_exp([0, 1], encoder)
+
+    plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
+
+    written = [p.name for p in tmp_path.iterdir()]
+    assert written
+    assert not [p for p in written if set(" []") & set(p)], written
+    assert list(tmp_path.glob("relevance_index_7_class_0-0-1_points*.png"))
+
+
+@pytest.mark.unit
+def test_plot_exp_spells_a_class_the_same_in_both_target_modes(tmp_path):
+    # The two paths used to read different helpers: class_names for multi-target
+    # (already hyphen-joined) and decode_labels for single-target (a raw row).
+    encoder = MultiHotLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
+    single, multi = tmp_path / "single", tmp_path / "multi"
+
+    plot_exp(
+        _time_exp([0, 1], encoder), save_path=single, visualization_type=["points"]
+    )
+    plot_exp(
+        _time_exp([0, 1], encoder, multi=True),
+        save_path=multi,
+        visualization_type=["points"],
+    )
+
+    def classes_of(d):
+        return {p.name.split("_class_")[1].split("_points")[0] for p in d.iterdir()}
+
+    assert classes_of(single) <= classes_of(multi)
+    assert classes_of(single) == {"0-0-1", "1-0-0"}
+
+
+@pytest.mark.unit
+def test_plot_exp_names_the_explained_class_not_the_label(tmp_path):
+    # Every shipped config explains target: "predicted", so for a misclassified
+    # sample the label is not the class the attribution is about.
+    encoder = LabelEncoder().fit(np.array([0, 1, 2]))
+    exp = _time_exp([0, 1], encoder, explained=[2, 2])
+
+    plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
+
+    assert list(tmp_path.glob("relevance_index_7_class_2_points*.png"))
+    assert not list(tmp_path.glob("relevance_index_7_class_0_points*.png"))
+
+
+@pytest.mark.unit
+def test_plot_exp_falls_back_to_the_class_index_when_unnamed(tmp_path):
+    # An encoder exposing no classes names nothing; the index is then the only
+    # identifier, and a plot is still written rather than an IndexError raised.
+    exp = _time_exp([0, 1], LabelEncoder())
+
+    plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
+
+    assert list(tmp_path.glob("relevance_index_7_class_0_points*.png"))
+    assert list(tmp_path.glob("relevance_index_9_class_1_points*.png"))

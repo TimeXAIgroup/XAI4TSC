@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -70,6 +71,138 @@ def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarr
         tensor = tensor.to(param.device)
     with torch.no_grad():
         return F.softmax(model(tensor), dim=1).detach().cpu().numpy()
+
+
+def _confusion_counts(cm: np.ndarray) -> list[dict[str, int]]:
+    """
+    Derive the one-vs-rest confusion counts of every class from a full matrix.
+
+    Parameters
+    ----------
+    cm : np.ndarray
+        A ``(K, K)`` confusion matrix over *all* model classes, rows being the
+        true class and columns the predicted one. Built over only the classes
+        present in the data, the rows would no longer be indexed by class.
+
+    Returns
+    -------
+    list of dict
+        One entry per class, in class-index order, with ``support``, ``tp``,
+        ``tn``, ``fp`` and ``fn``.
+    """
+    cm = np.asarray(cm)
+    total = int(cm.sum())
+    counts = []
+    for k in range(cm.shape[0]):
+        tp = int(cm[k, k])
+        support = int(cm[k, :].sum())
+        fp = int(cm[:, k].sum()) - tp
+        fn = support - tp
+        counts.append(
+            {
+                "support": support,
+                "tp": tp,
+                "tn": total - tp - fp - fn,
+                "fp": fp,
+                "fn": fn,
+            }
+        )
+    return counts
+
+
+def _rates(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
+    """
+    Derive the usual rates from one set of confusion counts.
+
+    The rates are fractions in ``[0, 1]`` (``mcc`` in ``[-1, 1]``); one whose
+    denominator is zero - a class with no true samples, or none predicted - is
+    ``nan`` rather than an error, so a degenerate class does not abort the
+    evaluation.
+
+    Parameters
+    ----------
+    tp, tn, fp, fn : int
+        True positives, true negatives, false positives and false negatives.
+
+    Returns
+    -------
+    dict
+        ``sensitivity``, ``specificity``, ``ppv``, ``npv``, ``f1`` and ``mcc``.
+    """
+    nan = float("nan")
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else nan
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else nan
+    ppv = tp / (tp + fp) if (tp + fp) > 0 else nan
+    npv = tn / (tn + fn) if (tn + fn) > 0 else nan
+    f1 = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else nan
+    # The geometric form of Matthews' correlation coefficient, which stays
+    # computable from the rates alone (no large intermediate products).
+    mcc = math.sqrt(sensitivity * specificity * ppv * npv) - math.sqrt(
+        (1 - sensitivity) * (1 - specificity) * (1 - npv) * (1 - ppv)
+    )
+    return {
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "ppv": ppv,
+        "npv": npv,
+        "f1": f1,
+        "mcc": mcc,
+    }
+
+
+def _macro(rates: list[dict[str, float]], key: str) -> float:
+    """
+    Average one rate over the classes that define it.
+
+    Parameters
+    ----------
+    rates : list of dict
+        Per-class rates as returned by :func:`_rates`.
+    key : str
+        The rate to average.
+
+    Returns
+    -------
+    float
+        The unweighted mean over the classes where the rate is defined, or
+        ``nan`` when it is defined for none - a class with no samples and no
+        predictions must not drag the average to ``nan`` on its own.
+    """
+    values = [r[key] for r in rates if not math.isnan(r[key])]
+    return sum(values) / len(values) if values else float("nan")
+
+
+def _display_names(names: Sequence[str] | None, n_classes: int) -> list[str]:
+    """
+    Resolve the display name of every class, falling back to the class index.
+
+    Parameters
+    ----------
+    names : sequence of str or None
+        One name per class index, e.g. from
+        :func:`~xai4tsc.data.base.class_names`. ``None`` names classes by index.
+    n_classes : int
+        How many classes the model distinguishes.
+
+    Returns
+    -------
+    list of str
+        Exactly *n_classes* names. A list of the wrong length is a sign the
+        names came from a different dataset, so it is reported and ignored
+        rather than silently mislabelling the results.
+    """
+    if names is None:
+        return [str(k) for k in range(n_classes)]
+    resolved = [str(name) for name in names]
+    if len(resolved) != n_classes:
+        logger.warning(
+            "Ignoring %d class names for a %d-class model; naming classes by "
+            "index instead.",
+            len(resolved),
+            n_classes,
+        )
+        return [str(k) for k in range(n_classes)]
+    return resolved
 
 
 class ModelBase(nn.Module, ABC):
@@ -623,13 +756,18 @@ class ModelBase(nn.Module, ABC):
         batchsize: int = 8,
         threshold: float = 0.5,
         save_path: Path | str | None = None,
+        class_names: Sequence[str] | None = None,
     ) -> dict:
         """
         Evaluate on test data and return a metrics dict.
 
         Computes accuracy for all tasks and additionally sensitivity, specificity,
-        PPV, NPV, and AUC for binary classification.  Saves ROC and
-        confusion-matrix plots to *save_path*.
+        PPV, NPV, and AUC for binary classification, where ``pos`` / ``neg`` are
+        the class balance. For more than two classes those two would be the
+        counts of class indices 1 and 0, so they are omitted and macro-averaged
+        rates reported instead. Either way the one-vs-rest confusion counts of
+        every class are written to a ``*_test_per_class.csv`` beside the summary.
+        Saves ROC and confusion-matrix plots to *save_path*.
 
         Parameters
         ----------
@@ -646,11 +784,17 @@ class ModelBase(nn.Module, ABC):
             the destination given to
             :func:`~xai4tsc.models.models.load_model`, and falls back to it.
             Raises if neither is set.
+        class_names : sequence of str, optional
+            One display name per class index, as
+            :func:`~xai4tsc.data.base.class_names` returns them, used to label
+            the plots and the per-class results. Classes are named by index when
+            this is not given.
 
         Returns
         -------
         dict
-            Metric values keyed by name.
+            Metric values keyed by name. The summary only; the per-class counts
+            are written to file.
         """
         self._resolve_save_path(save_path, "evaluate_model")
         self.eval()
@@ -680,7 +824,8 @@ class ModelBase(nn.Module, ABC):
         # Determine binary vs. multiclass from model output size, not test labels,
         # so a 3-class model whose test split happens to have 2 classes still uses
         # the correct (multiclass) path.
-        is_binary = y_probs.shape[1] == 2
+        n_model_classes = y_probs.shape[1]
+        is_binary = n_model_classes == 2
 
         if is_binary:
             pos_cls = unique_classes[1]
@@ -690,10 +835,22 @@ class ModelBase(nn.Module, ABC):
             y_pred = np.argmax(y_probs, axis=1).astype(np.int64)
 
         n = len(y_true)
-        pos = np.sum(y_true == 1)
-        neg = np.sum(y_true == 0)
         accuracy = float((y_pred == y_true).sum()) / n if n > 0 else float("nan")
-        results = {"n": n, "pos": pos, "neg": neg, "accuracy": f"{accuracy * 100:.2f}"}
+        # Over all model classes, not just those present: built over the latter,
+        # rows would no longer be indexed by class and an absent class would
+        # shift every one that follows it.
+        cm = confusion_matrix(y_true, y_pred, labels=np.arange(n_model_classes))
+        per_class = _confusion_counts(cm)
+        class_rates = [_rates(c["tp"], c["tn"], c["fp"], c["fn"]) for c in per_class]
+
+        results = {"n": n}
+        if is_binary:
+            # The class balance, which is what pos/neg mean here. For more than
+            # two classes they would be the counts of class indices 1 and 0 and
+            # read as a binary balance that does not exist, so the per-class
+            # table carries each class's support instead.
+            results |= {"pos": per_class[1]["support"], "neg": per_class[0]["support"]}
+        results["accuracy"] = f"{accuracy * 100:.2f}"
 
         auc = float("nan")
         fpr, tpr = [0, 1], [0, 1]
@@ -702,23 +859,16 @@ class ModelBase(nn.Module, ABC):
         if len(unique_classes) < 2:
             logger.warning("AUC undefined: only one class present in test labels.")
         elif is_binary:
-            tp = int(((y_pred == 1) & (y_true == 1)).sum())
-            tn = int(((y_pred == 0) & (y_true == 0)).sum())
-            fp = int(((y_pred == 1) & (y_true == 0)).sum())
-            fn = int(((y_pred == 0) & (y_true == 1)).sum())
-            sensitivity = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
-            specificity = tn / (tn + fp) if (tn + fp) > 0 else float("nan")
+            # Class 1 is the positive class; its one-vs-rest counts are the
+            # binary ones, so they come from the same table the CSV reports.
+            tp, tn = per_class[1]["tp"], per_class[1]["tn"]
+            fp, fn = per_class[1]["fp"], per_class[1]["fn"]
+            rates = class_rates[1]
+            sensitivity = rates["sensitivity"]
+            specificity = rates["specificity"]
+            ppv, npv = rates["ppv"], rates["npv"]
+            f1, mcc = rates["f1"], rates["mcc"]
             auc = roc_auc_score(y_true, y_prob)
-            f1 = 2 * tp / (2 * tp + fp + fn)
-            tpr = tp / pos
-            tnr = tn / neg
-            ppv = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
-            npv = tn / (tn + fn) if (tn + fn) > 0 else float("nan")
-            fpr = 1 - tnr
-            fnr = 1 - tpr
-            _for = 1 - npv
-            fdr = 1 - ppv
-            mcc = math.sqrt(tpr * tnr * ppv * npv) - math.sqrt(fnr * fpr * _for * fdr)
             results.update(
                 {
                     "sensitivity": f"{sensitivity * 100:.2f}",
@@ -736,7 +886,6 @@ class ModelBase(nn.Module, ABC):
             )
 
         else:
-            n_model_classes = y_probs.shape[1]
             partial = len(unique_classes) < n_model_classes
             if partial:
                 logger.warning(
@@ -767,19 +916,27 @@ class ModelBase(nn.Module, ABC):
                 auc_label = f"{auc:.4f}"
             results["auc"] = auc_label
 
+        if not is_binary:
+            # The binary summary reports the single positive class's rates; the
+            # multiclass one averages them, the per-class table holding the rest.
+            results["macro_f1"] = f"{_macro(class_rates, 'f1') * 100:.2f}"
+            results["macro_mcc"] = f"{_macro(class_rates, 'mcc') * 100:.2f}"
+
+        names = _display_names(class_names, n_model_classes)
+
         self.save_path.mkdir(parents=True, exist_ok=True)
         if fpr_tpr_per_class is not None:
             self._plot_roc_multiclass(
                 fpr_tpr_per_class,
                 auc,
                 self.best_epoch,
-                class_labels=unique_classes,
+                class_labels=[names[int(cls)] for cls in unique_classes],
                 n_model_classes=n_model_classes,
             )
         else:
             fpr, tpr, _ = roc_curve(y_true, y_prob)
             self._plot_roc(fpr, tpr, auc, self.best_epoch)
-        self._plot_confusion_matrix(y_true, y_pred, self.best_epoch)
+        self._plot_confusion_matrix(cm, self.best_epoch, display_labels=names)
 
         df = pd.DataFrame([results])
         results_path = (
@@ -788,14 +945,30 @@ class ModelBase(nn.Module, ABC):
         df.to_csv(results_path, index=False)
         logger.info("Test set results saved to %s", results_path)
 
+        # The confusion counts, per class, for every problem:
+        per_class_rows = [
+            {
+                "class": k,
+                "name": names[k],
+                **per_class[k],
+                **{key: f"{value * 100:.2f}" for key, value in class_rates[k].items()},
+            }
+            for k in range(n_model_classes)
+        ]
+        per_class_path = (
+            self.save_path / f"{self.name}_e{self.best_epoch}_test_per_class.csv"
+        )
+        pd.DataFrame(per_class_rows).to_csv(per_class_path, index=False)
+        logger.info("Per-class test results saved to %s", per_class_path)
+
         if is_binary:
             logger.info(
                 "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
                 "spec=%.4f auc=%.4f f1=%.4f mcc=%.4f | TP=%d TN=%d FP=%d FN=%d",
                 self.best_epoch,
                 n,
-                pos,
-                neg,
+                per_class[1]["support"],
+                per_class[0]["support"],
                 accuracy,
                 sensitivity,
                 specificity,
@@ -847,7 +1020,7 @@ class ModelBase(nn.Module, ABC):
         fpr_tpr_per_class: list[tuple],
         auc: float,
         best_epoch: int | None,
-        class_labels: np.ndarray | None = None,
+        class_labels: Sequence[str] | None = None,
         n_model_classes: int | None = None,
     ) -> None:
         _fig, ax = plt.subplots(figsize=(6, 5))
@@ -873,13 +1046,12 @@ class ModelBase(nn.Module, ABC):
 
     def _plot_confusion_matrix(
         self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
+        cm: np.ndarray,
         best_epoch: int | None,
+        display_labels: Sequence[str] | None = None,
     ) -> None:
         _fig, ax = plt.subplots(figsize=(5, 5))
-        cm = confusion_matrix(y_true, y_pred)
-        ConfusionMatrixDisplay(cm).plot(ax=ax)
+        ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(ax=ax)
         ax.set_title(f"Confusion Matrix — Epoch {best_epoch}")
         path = self.save_path / f"{self.name}_e{best_epoch}_confusion_matrix.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")

@@ -1,7 +1,7 @@
 import torch
 
 import xai4tsc
-from xai4tsc.data import load_dataset
+from xai4tsc.data import class_names, load_dataset
 from xai4tsc.evaluation.evaluate import evaluate
 from xai4tsc.xai.explain import generate_explanation
 
@@ -59,8 +59,11 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
         labels_val=val_labels,
     )
 
-    # Evaluate on test data
-    results = model.evaluate_model(test_data, test_labels, batchsize=32)
+    # Evaluate on test data. Passing the class names labels the plots and the
+    # per-class results file by class rather than by index.
+    results = model.evaluate_model(
+        test_data, test_labels, batchsize=32, class_names=class_names(encoder)
+    )
 
     # Generate explanations, available explainers are listed in xai4tsc.xai.EXPLAINERS
     exp = generate_explanation(

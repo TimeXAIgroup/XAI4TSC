@@ -72,7 +72,8 @@ pip install -e PATH/TO/REPOSITORY
 ```
 xai4tsc/
 ├── experiment_runner/          # Standalone CLI — owns all config and orchestration logic
-│   ├── main.py                 # Entry point: python -m experiment_runner.main --conf ...
+│   ├── __main__.py             # Entry point: python -m experiment_runner --conf ...
+│   ├── main.py                 # Pipeline orchestration and the CLI
 │   ├── config.py               # Config loading, validation, defaults
 │   ├── cache.py                # Runner-level split caching helpers
 │   ├── explain.py              # Runner adapter for xai4tsc.xai
@@ -103,8 +104,8 @@ xai4tsc/
 Run the runner as a module from the repository root:
 
 ```bash
-python -m experiment_runner.main --conf experiment_runner/configs/example.yaml
-python -m experiment_runner.main --conf experiment_runner/configs/example.yaml --debug
+python -m experiment_runner --conf experiment_runner/configs/example.yaml
+python -m experiment_runner --conf experiment_runner/configs/example.yaml --debug
 ```
 
 Four ready-to-run configs ship under `experiment_runner/configs/`:
@@ -133,9 +134,8 @@ See our [Getting Started Example](examples/getting_started.py).
 
 Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
 development setup, code style and quality gate, testing conventions, and the
-pattern for adding a new model, explainer, or metric. By participating you agree
-to the [Code of Conduct](CODE_OF_CONDUCT.md). The project is released under the
-[MIT License](LICENSE); third-party code adapted into it is listed in
+pattern for adding a new model, explainer, or metric. The project is released
+under the [MIT License](LICENSE); third-party code adapted into it is listed in
 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
 ---

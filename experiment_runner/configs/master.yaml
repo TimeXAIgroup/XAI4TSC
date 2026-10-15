@@ -59,8 +59,6 @@ data_config:
                             # leaves. 0 produces no validation split, and early stopping
                             # then monitors training loss instead of validation loss.
                             # Ignored by `use_predefined_splits` and `is_presplit`.
-    channels: 1
-    length: 150
     encode: "label"         # how to read the label column; the pipeline always carries 1-D
                             # int64 class indices, and the encoder is kept only to map those
                             # indices back to class names:

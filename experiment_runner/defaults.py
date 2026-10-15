@@ -88,10 +88,6 @@ _RUNNER_OWNED: frozenset[tuple[str, str]] = frozenset(
         # registry entries expose only the adapter's own parameters anyway.
         ("evaluation_config", "metric_class_params"),
         ("evaluation_config", "metric_call_params"),
-        # Declared but read by nothing. Kept classified so the totality check
-        # passes until they are deleted from master.
-        ("data_config", "channels"),
-        ("data_config", "length"),
     }
 )
 """Config keys with no package owner, for which ``master.yaml`` is the source."""

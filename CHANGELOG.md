@@ -38,6 +38,16 @@ tuple `("points",)` instead of `None`.
 
 ### Changed
 
+- **`channels` and `length` are gone from `data_config.default_settings`.** Both
+  were declared in `master.yaml` and read by nothing: the channel count is
+  detected from the data and the series length comes from the dataset, so setting
+  `length: 150` changed nothing while looking like it would truncate. Because
+  master is also the key whitelist, a config that still sets either one is now
+  warned about rather than silently ignored. A test holds the pointer tables and
+  master to each other in both directions, so a key cannot go dead this way again.
+- **`--help` names an invocation that exists.** The usage line read
+  `usage: xai4tsc`, a console script this project does not install; it is now
+  `usage: python -m experiment_runner`.
 - **Defaults have one source: the package signature that consumes them.** Every
   `default_settings` value existed two to five times - in `master.yaml`, in the
   package, and often again as a `.get(key, literal)` fallback in the runner that
@@ -74,6 +84,14 @@ tuple `("points",)` instead of `None`.
 
 ### Added
 
+- **The runner is executable by its package name.** `python -m experiment_runner`
+  failed with `No module named experiment_runner.__main__`, so the only working
+  form was the longer `python -m experiment_runner.main`, which is what every
+  document taught. A `__main__.py` now delegates to a `cli()` extracted from
+  `main.py`, the documentation names the short form, and the longer one keeps
+  working. No console script: `experiment_runner` is deliberately not part of the
+  installed package, so an entry point in `[project.scripts]` would ship a command
+  that fails for everyone who installed from a wheel.
 - **The synthetic dataset is now generated instead of shipped, and loads through the
   package API.** `freq_shapes` could only be read by the runner: its generator was
   a placeholder that raised, and the data was committed to the repository (11 MB)

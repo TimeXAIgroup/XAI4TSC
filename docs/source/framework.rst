@@ -28,8 +28,8 @@ Getting Started
 
    .. code-block:: bash
 
-      python -m experiment_runner.main --conf path/to/your/config.yaml
-      python -m experiment_runner.main --conf path/to/your/config.yaml --debug
+      python -m experiment_runner --conf path/to/your/config.yaml
+      python -m experiment_runner --conf path/to/your/config.yaml --debug
 
 3. Results are written under ``results_rel_path/<experiment_name>/`` (the
    ``experiment_name`` from your config), organised as::
@@ -161,7 +161,7 @@ Example
 -------
 
 The shipped ``experiment_runner/configs/example.yaml`` is the go-to demo and the
-config the runner uses by default (``python -m experiment_runner.main``). It
+config the runner uses by default (``python -m experiment_runner``). It
 needs no download: the synthetic ``Synth_Multilabel_Freq`` dataset is generated
 on first use and cached. It trains two model architectures (LeNet and FCN), explains them
 with three time-domain methods (Integrated Gradients, Guided Backpropagation,

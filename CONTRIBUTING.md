@@ -2,8 +2,7 @@
 
 Thanks for your interest in improving XAI4TSC! This guide covers how to report
 problems, set up a development environment, and add a new model, explainer, or
-metric. By participating you agree to abide by our
-[Code of Conduct](https://github.com/TimeXAI-group/XAI4TSC/blob/main/CODE_OF_CONDUCT.md).
+metric.
 
 XAI4TSC is research software that re-implements published methods. Please also
 read the [Disclaimer](https://github.com/TimeXAI-group/XAI4TSC/blob/main/docs/source/disclaimer.md)
@@ -126,7 +125,7 @@ rule:
   module from the repository root:
 
   ```bash
-  python -m experiment_runner.main --conf experiment_runner/configs/example.yaml
+  python -m experiment_runner --conf experiment_runner/configs/example.yaml
   ```
 
   Modules inside the runner use **relative** imports (`from .config import ...`)

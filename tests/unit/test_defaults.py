@@ -99,6 +99,31 @@ def test_pointer_table_covers_every_default_settings_key(section):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("section", _SECTIONS)
+def test_pointer_tables_name_only_keys_master_declares(section):
+    """
+    No table entry may outlive the master key it classifies.
+
+    The complementary direction, and the one that let R18 sit undetected: the
+    totality check above reads master and asks whether each key is classified, so
+    a key deleted from master leaves a table entry that nothing reads and nothing
+    flags. Deleting from both halves is the only way to pass both tests.
+    """
+    block = _master()[section].get("default_settings") or {}
+    declared = set(default_settings_leaves(section, block))
+    orphans = sorted(
+        key
+        for table in (_PACKAGE_BACKED, _RUNNER_OWNED)
+        for (sect, key) in table
+        if sect == section and key not in declared
+    )
+    assert not orphans, (
+        f"{section} keys named by a pointer table but no longer declared in "
+        f"master.yaml: {orphans}"
+    )
+
+
+@pytest.mark.unit
 def test_the_two_tables_do_not_overlap():
     assert not set(_PACKAGE_BACKED) & _RUNNER_OWNED
 

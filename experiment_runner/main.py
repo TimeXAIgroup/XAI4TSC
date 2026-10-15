@@ -3,7 +3,7 @@ Entry point for the xai4tsc experiment runner.
 
 Run from the repository root as a module::
 
-    python -m experiment_runner.main --conf path/to/config.yaml
+    python -m experiment_runner --conf path/to/config.yaml
 
 Orchestrates the full evaluation pipeline as a nested loop over datasets,
 models, explainers, and metrics. Results are saved as ``metrics.csv`` files
@@ -966,10 +966,22 @@ def initial_setup(
     return config, run_log
 
 
-if __name__ == "__main__":
-    # Parse input args
+def cli() -> None:
+    """
+    Parse command-line arguments, run the experiment, and exit.
+
+    The entry point behind ``python -m experiment_runner``. Takes no arguments so
+    that :mod:`experiment_runner.__main__` has a single callable to delegate to.
+
+    Raises
+    ------
+    SystemExit
+        Always: 1 if anything failed during the run, 0 otherwise. The failure
+        count :func:`main` returns is collapsed to a shell exit status.
+    """
     parser = argparse.ArgumentParser(
-        prog="xai4tsc", description="Run an experiment for time series classification."
+        prog="python -m experiment_runner",
+        description="Run an experiment for time series classification.",
     )
     parser.add_argument(
         "--conf",
@@ -987,3 +999,7 @@ if __name__ == "__main__":
 
     # Exit non-zero if any dataset failed
     sys.exit(1 if main(args.conf, debug=args.debug) else 0)
+
+
+if __name__ == "__main__":
+    cli()

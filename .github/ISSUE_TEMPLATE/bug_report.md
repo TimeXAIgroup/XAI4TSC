@@ -15,7 +15,7 @@ A clear and concise description of what the bug is.
 A minimal reproducer makes this far easier to fix. Prefer one of:
 
 - A small **YAML config** run with
-  `python -m experiment_runner.main --conf <your-config>.yaml`, or
+  `python -m experiment_runner --conf <your-config>.yaml`, or
 - A short **package snippet** (a few lines using the `xai4tsc` API).
 
 ```text

@@ -26,6 +26,11 @@ removed: build the class and load the weights
 (`MyCNN(...).configure(device=...)` then `load_state_dict`), or reload through
 `load_model({"model": ..., "model_ckpt_path": ...})`, which also resolves the
 class and reads the constructor arguments back from the checkpoint's config. The
+`use_predefined_splits` moved from `UcrUeaDataset.__init__` to `split()`:
+`UcrUeaDataset(name, use_predefined_splits=True)` becomes
+`UcrUeaDataset(name).split(..., use_predefined_splits=True)`, and passing it to
+`load_dataset()` now raises `TypeError` naming the new home rather than returning a
+dataset that would split the other way. The
 `rel_type_kwargs` key `bubble_size` is now `point_size`, matching the style it
 sizes. `train_model()` and `evaluate_model()` take their training
 hyperparameters as keyword arguments instead of a `hyperparams` dict
@@ -38,6 +43,41 @@ tuple `("points",)` instead of `None`.
 
 ### Changed
 
+- **`use_predefined_splits` is a `split()` parameter, and selects any dataset's**
+	**own splits.** It was a constructor argument of `UcrUeaDataset` alone, read in one
+  place inside `split()` and nowhere else, while every other key that shapes a split
+  - `train_split`, `val_split`, `stratify`, `encode` - is a `DatasetBase.split`
+  parameter. It now joins them, so one signature owns the default and any dataset can
+  build on it. `Synth_Multilabel_Freq` does: with the flag it applies the source
+  project's published partition as before, and without it splits by the configured
+  fractions like any other dataset, scoping its ground-truth regions either way.
+  Previously it applied its own partition unconditionally and the flag never reached
+  it at all. The flag defaults to `True` on that dataset, because its partition is
+  part of the published data it reproduces and already includes a validation split,
+  and to `False` on UCR/UEA, where the archive partition has none. `master.yaml`
+  keeps `false`, so the shipped `example.yaml` and `example_frequency.yaml` now state
+  `use_predefined_splits: true` on the dataset entry and behave exactly as before. A
+  dataset with no partition of its own reports the request and splits normally, which
+  also covers synthetic and custom datasets - the warning used to reach local
+  datasets only.
+- **Sample restriction no longer leaves per-sample metadata behind.**
+  `DatasetBase.split` applied `max_samples` to the data and labels but not to
+  `metadata`, which is one row per sample and paired with the data by position, so a
+  dataset carrying metadata failed with `ValueError: zip() argument 2 is longer than
+  argument 1` - a message naming neither `max_samples` nor metadata. The selected
+  indices now apply to all three. Only `Synth_Multilabel_Freq` escaped it, by
+  restricting in its own override; that override is gone and both share one path.
+- **A predefined-split cache folder names changed holds.** The split-cache key
+  interpolated `train_split`, `val_split` and the seed even under
+	`use_predefined_splits: true`, which ignores all three - so a directory called
+	`GunPoint_tr0.8_v0.1_s42_label_official` held the archive's own 50/150 split,
+	and editing one of those dead keys minted a new key that re-split the data and
+	wrote it back byte-identical. Those folders are now `GunPoint_label_official`.
+	The seed is kept, as `GunPoint_s42_label_…`, when `max_samples` is set, because
+	there it decides which rows were stored. Existing `*_official` caches no longer
+	resolve and are rebuilt once; the old directories are left on disk and can be
+	deleted. Random and stratified split names are unchanged, so every other cache
+	stays valid.
 - **`channels` and `length` are gone from `data_config.default_settings`.** Both
   were declared in `master.yaml` and read by nothing: the channel count is
   detected from the data and the series length comes from the dataset, so setting

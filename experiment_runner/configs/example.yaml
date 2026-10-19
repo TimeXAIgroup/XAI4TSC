@@ -22,11 +22,8 @@ general:
   seed: 2025
   device: "use_available"
 
-# --- Data: synthetic localized wave-packet dataset (no download) ---
-# `Synth_Multilabel_Freq` is generated on first use and cached under the synthetic
-# cache dir; it supplies its own stratified train/test/val partition (0.7/0.15/0.15,
-# seeded by the dataset), so the `train_split`/`val_split` below only have to agree
-# with it. Change the partition through `init_params: {train_ratio, test_ratio}`.
+# The example uses a generated synthetic dataset, a reference can be found in
+# the class documentation.
 data_config:
   default_settings:
     train_split: 0.7
@@ -34,6 +31,7 @@ data_config:
   datasets:
     - dataset: "Synth_Multilabel_Freq"   # SyntheticDataset registry key
       encode: "multihot"                 # collapse multi-hot combos to class indices
+      use_predefined_splits: true        # the dataset's own published splits
 
 # --- Models: two different architectures, both trained ---
 train_config:

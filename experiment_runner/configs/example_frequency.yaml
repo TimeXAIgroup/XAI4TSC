@@ -25,12 +25,8 @@ general:
   seed: 2025
   device: "use_available"
 
-# --- Data: synthetic dataset with ground-truth localization metadata ---
-# `Synth_Multilabel_Freq` is generated on first use and cached under the synthetic
-# cache dir, per-sample ground-truth localization metadata included. It supplies its
-# own stratified partition (0.7/0.15/0.15, seeded by the dataset), so the
-# `train_split`/`val_split` below only have to agree with it; change the partition
-# through `init_params: {train_ratio, test_ratio}`.
+# The example uses a generated synthetic dataset, a reference can be found in
+# the class documentation.
 data_config:
   default_settings:
     train_split: 0.7
@@ -38,6 +34,7 @@ data_config:
   datasets:
     - dataset: "Synth_Multilabel_Freq"
       encode: "multihot"
+      use_predefined_splits: true   # the dataset's own published splits
 
 # --- Model: one architecture (FreqRISE dominates runtime) ---
 train_config:

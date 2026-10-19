@@ -282,7 +282,6 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         sample_strategy=dataset["sample_strategy"],
                         max_series_length=dataset.get("max_series_length"),
                         series_position=dataset["series_position"],
-                        use_predefined_splits=use_predefined_splits,
                         layout=dataset["layout"],
                     )
 
@@ -336,6 +335,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             rng=resolve_rng(split_seed),
                             stratify=dataset["stratify"],
                             class_order=dataset.get("classes") or None,
+                            use_predefined_splits=use_predefined_splits,
                         )
                         if split_cache:
                             logger.info("Saving splits to cache: %s", split_cache)

@@ -596,21 +596,51 @@ class DatasetBase(ABC):
             return idx
         raise ValueError(f"Unknown sample_strategy: '{strategy}'")
 
-    def _restrict_samples_numpy(
-        self, data: np.ndarray, labels: np.ndarray, rng: np.random.Generator
+    def _restrict_samples(
+        self,
+        data: np.ndarray,
+        labels: np.ndarray,
+        metadata: pd.DataFrame | None,
+        rng: np.random.Generator,
     ) -> tuple:
-        """Subsample *data* to at most ``max_samples`` rows."""
+        """
+        Subsample to at most ``max_samples`` rows, metadata included.
+
+        The selected indices are applied to all three, because *metadata* is one
+        row per sample and index-aligned with *data*: restricting the arrays alone
+        would leave it describing the samples that were dropped, and
+        :func:`_split_dataset` pairs the two by position.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Full ``(B, C, T)`` array.
+        labels : np.ndarray
+            Full label array.
+        metadata : pd.DataFrame or None
+            Per-sample metadata, or ``None`` when the dataset carries none.
+        rng : np.random.Generator
+            Stream for the sample selection.
+
+        Returns
+        -------
+        tuple
+            ``(data, labels, metadata)``, restricted and still index-aligned.
+        """
         n = data.shape[0]
         idx = self._select_sample_idx(n, labels, rng)
         if len(idx) == n:
-            return data, labels
+            return data, labels, metadata
         logger.info(
             "Subsampling dataset from %d to %d samples (strategy: %s).",
             n,
             len(idx),
             getattr(self, "_sample_strategy", "random"),
         )
-        return data[idx], labels[idx]
+        restricted = (
+            metadata.iloc[idx].reset_index(drop=True) if metadata is not None else None
+        )
+        return data[idx], labels[idx], restricted
 
     def _restrict_length_numpy(self, data: np.ndarray) -> np.ndarray:
         """Truncate the time axis to at most ``max_series_length`` timesteps."""
@@ -676,6 +706,7 @@ class DatasetBase(ABC):
         rng: np.random.Generator | None = None,
         stratify: bool = True,
         class_order: list | None = None,
+        use_predefined_splits: bool = False,
     ) -> tuple:
         """
         Load and split the dataset into train / test / (optional) val.
@@ -711,6 +742,15 @@ class DatasetBase(ABC):
             Explicit class order for ``encode="ordinal"``, forwarded to
             :func:`_make_encoder`. Needed only for ordered *string* labels, whose
             order is otherwise lexicographic.
+        use_predefined_splits : bool
+            Use the partition the dataset itself defines, where it has one, and
+            ignore *train_split* / *val_split* / *stratify*. Only subclasses that
+            own a partition honour it - the archive's ``_TRAIN``/``_TEST`` files
+            for :class:`~xai4tsc.data.UcrUeaDataset`, the source project's
+            partition for
+            :class:`~xai4tsc.data.datasets.SynthMultilabelFreqDataset`. A dataset
+            with no such partition reports the request and splits normally, since
+            there is no other partition it could have served.
 
         Returns
         -------
@@ -718,6 +758,14 @@ class DatasetBase(ABC):
             ``(splits, fitted_encoder)`` where *splits* is a list of
             ``(X, y, metadata)`` tuples in order ``[train, test, val]``.
         """
+        if use_predefined_splits:
+            logger.warning(
+                "'%s' defines no partition of its own, so "
+                "use_predefined_splits=True is ignored and the data is split by "
+                "the configured fractions. Pre-split data on disk is loaded with "
+                "load_saved_splits() (is_presplit: true in YAML) instead.",
+                getattr(self, "name", type(self).__name__),
+            )
         rng = resolve_rng(random_state, rng)
         sklearn_seed = int(rng.integers(2**31))
 
@@ -729,7 +777,7 @@ class DatasetBase(ABC):
             self._split_rng = None
 
         labels = np.asarray(labels)
-        data, labels = self._restrict_samples_numpy(data, labels, rng)
+        data, labels, metadata = self._restrict_samples(data, labels, metadata, rng)
         data = self._restrict_length_numpy(data)
 
         if np.isnan(data).any():

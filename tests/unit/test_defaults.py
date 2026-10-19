@@ -439,6 +439,16 @@ def test_master_names_no_callable_in_default_settings():
 # ── the split signatures must not drift apart again ───────────────────────────
 
 
+# The one divergence that is deliberate: the synthetic dataset's partition is part
+# of the published dataset its generator reproduces, and it yields a validation
+# split, so nothing is lost by preferring it. The pointer table and `master.yaml`
+# read the base signature, which stays False, because the archive partition gives
+# UCR/UEA no validation split and a config should opt into that.
+_INTENDED_SPLIT_DEFAULTS = {
+    ("SynthMultilabelFreqDataset", "use_predefined_splits"): True,
+}
+
+
 @pytest.mark.unit
 def test_split_signatures_agree():
     """
@@ -446,7 +456,9 @@ def test_split_signatures_agree():
 
     `UcrUeaDataset.split` and the synthetic dataset's own `split` both re-declare
     the base signature, so each is a place a default can quietly diverge from the
-    one the pointer table reads.
+    one the pointer table reads. Divergence is allowed only where
+    `_INTENDED_SPLIT_DEFAULTS` names it, which keeps the guard on every other
+    parameter and makes a new exemption an explicit edit.
     """
     base = inspect.signature(DatasetBase.split).parameters
     for subclass in (UcrUeaDataset, SynthMultilabelFreqDataset):
@@ -455,10 +467,33 @@ def test_split_signatures_agree():
             if name == "self" or param.default is inspect.Parameter.empty:
                 continue
             assert name in base, f"{subclass.__name__}.split adds {name!r}"
-            assert param.default == base[name].default, (
-                f"{subclass.__name__}.split defaults {name} to {param.default!r}, "
-                f"but DatasetBase.split uses {base[name].default!r}"
+            expected = _INTENDED_SPLIT_DEFAULTS.get(
+                (subclass.__name__, name), base[name].default
             )
+            assert param.default == expected, (
+                f"{subclass.__name__}.split defaults {name} to {param.default!r}, "
+                f"but {expected!r} was expected; an intended divergence belongs in "
+                "_INTENDED_SPLIT_DEFAULTS"
+            )
+
+
+@pytest.mark.unit
+def test_every_intended_split_divergence_is_real():
+    """
+    An exemption that stops being needed must not linger as a blank cheque.
+
+    If the subclass ever matches the base again, the entry is dead and silently
+    permits a future drift of the same parameter.
+    """
+    base = inspect.signature(DatasetBase.split).parameters
+    by_name = {c.__name__: c for c in (UcrUeaDataset, SynthMultilabelFreqDataset)}
+    for (subclass_name, name), value in _INTENDED_SPLIT_DEFAULTS.items():
+        overriding = inspect.signature(by_name[subclass_name].split).parameters
+        assert overriding[name].default == value
+        assert value != base[name].default, (
+            f"{subclass_name}.split no longer diverges on {name!r}; "
+            "drop the _INTENDED_SPLIT_DEFAULTS entry"
+        )
 
 
 # ── a mistyped hyperparameter is reported, not silently defaulted ─────────────
@@ -501,7 +536,7 @@ def test_inherited_val_split_is_reported_on_the_archive_path(caplog):
     stopping falls back to training loss. The comparison there is against zero
     rather than against this default, precisely so an inherited value is caught.
     """
-    dataset = UcrUeaDataset("GunPoint", use_predefined_splits=True)
+    dataset = UcrUeaDataset("GunPoint")
     default = package_default("data_config", "val_split")
 
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):

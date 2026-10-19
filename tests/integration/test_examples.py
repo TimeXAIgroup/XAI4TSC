@@ -53,14 +53,15 @@ def test_getting_started_trains_a_model_that_is_not_degenerate(
 @pytest.mark.integration
 def test_official_splits_warn_about_the_fractions_they_ignore(ucr_dataset_path, caplog):
     """The warning must fire on the real predefined-split path, not just in unit."""
-    ds = UcrUeaDataset(
-        "GunPoint",
-        cache_dir=str(ucr_dataset_path.parent),
-        use_predefined_splits=True,
-    )
+    ds = UcrUeaDataset("GunPoint", cache_dir=str(ucr_dataset_path.parent))
 
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
-        splits, _ = ds.split(train_split=0.8, val_split=0.1, random_state=42)
+        splits, _ = ds.split(
+            train_split=0.8,
+            val_split=0.1,
+            random_state=42,
+            use_predefined_splits=True,
+        )
 
     assert "val_split=0.1" in caplog.text
     assert "no validation set" in caplog.text

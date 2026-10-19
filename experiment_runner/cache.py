@@ -92,7 +92,16 @@ def get_split_cache_path(
 
     Folder naming convention::
 
-        {dataset_name}_tr{train_split:.4g}_v{val_split:.4g}_s{random_state}_{encode}[_p][_i][_s{N}{strategy[0]}][_t{T}{position[0]}](_official|_strat|_rand)
+        {dataset_name}_tr{train_split:.4g}_v{val_split:.4g}_s{random_state}_{encode}
+        [_p][_i][_s{N}{strategy[0]}][_t{T}{position[0]}](_strat|_rand)
+        {dataset_name}[_s{random_state}]_{encode}[_p][_i][_s{N}{strategy[0]}]
+        [_t{T}{position[0]}]_official
+
+    The archive partition ignores *train_split*, *val_split* and *stratify*, so
+    the ``_official`` form omits the first two rather than claim a split the
+    folder does not hold.  It keeps ``_s{random_state}`` only when *max_samples*
+    is set, which is the one case where the seed still decides which rows were
+    stored.
 
     Suffixes:
       ``_p``        padding enabled
@@ -105,7 +114,8 @@ def get_split_cache_path(
 
     Examples::
 
-        ECG5000_tr0.8_v0.1_s42_label_official
+        ECG5000_label_official
+        ECG5000_s42_label_s500r_official
         ECG5000_tr0.8_v0.1_s42_label_strat
         AllGestureWiimoteX_tr0.8_v0.1_s42_label_p_strat
         InsectWingbeat_tr0.8_v0.1_s42_label_p_s5000r_t1000f_rand
@@ -119,11 +129,15 @@ def get_split_cache_path(
     dataset_name : str
         Human-readable dataset identifier used in the folder name.
     train_split : float
-        Fraction of data used for training.
+        Fraction of data used for training.  Omitted from the folder name when
+        *use_predefined_splits* is ``True``, which ignores it.
     val_split : float
-        Fraction of data used for validation.
+        Fraction of data used for validation.  Omitted from the folder name when
+        *use_predefined_splits* is ``True``, which ignores it.
     random_state : int
-        Seed used for the split, encoded in the folder name.
+        Seed used for the split.  Encoded in the folder name wherever it shapes
+        the stored data: always on a random split, and on predefined splits
+        only when *max_samples* is set, since it seeds the sample restriction.
     encode : str
         Label encoding scheme (e.g. ``"label"``, ``"onehot"``).
     allow_padding : bool
@@ -163,9 +177,6 @@ def get_split_cache_path(
         suffix += f"_s{max_samples}{sample_strategy[0]}"
     if max_series_length is not None:
         suffix += f"_t{max_series_length}{series_position[0]}"
-    # Both tokens are emitted only when non-default, so every folder name written
-    # by an earlier version stays byte-identical and no existing cache is
-    # invalidated.  ("_p" is already taken by padding, hence "_f"/"_d".)
     if data_format and data_format != "numpy":
         suffix += f"_f{data_format}"
     if path is not None:
@@ -177,8 +188,14 @@ def get_split_cache_path(
         suffix += "_strat"
     else:
         suffix += "_rand"
-    folder = (
-        f"{dataset_name}_tr{train_split:.4g}_v{val_split:.4g}"
-        f"_s{random_state}_{encode}{suffix}"
-    )
+    # Predefined splits ignore train_split, val_split and stratify, so they
+    # ignore parts of the naming rules. random_state is the exception: it
+    # seeds the sample restriction, so it still shapes the stored arrays
+    # whenever max_samples is set.
+    partition = ""
+    if not use_predefined_splits:
+        partition = f"_tr{train_split:.4g}_v{val_split:.4g}_s{random_state}"
+    elif max_samples is not None:
+        partition = f"_s{random_state}"
+    folder = f"{dataset_name}{partition}_{encode}{suffix}"
     return cache_path / "splits" / folder

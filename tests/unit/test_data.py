@@ -1,6 +1,7 @@
 """Unit tests for src/xai4tsc/data/ — no I/O beyond tmp_path, no network."""
 
 import hashlib
+import inspect
 import json
 from itertools import pairwise
 
@@ -352,31 +353,43 @@ def test_load_dataset_without_path_returns_ucr():
 
 @pytest.mark.unit
 def test_load_dataset_with_path_tolerates_runner_only_kwargs(tmp_path):
-    # The runner passes `download` and `use_predefined_splits` on every
-    # non-synthetic dataset, but LocalDataset accepts neither. They must be
-    # stripped here, as the synthetic and UCR branches already do for their own
-    # inapplicable keys, or `path:` is unusable from a config.
+    # The runner passes `download` on every non-synthetic dataset, but
+    # LocalDataset does not accept it. It must be stripped here, as the synthetic
+    # and UCR branches already do for their own inapplicable keys, or `path:` is
+    # unusable from a config.
     _write_numpy_dataset(tmp_path)
     ds = load_dataset(
         name="my_ecg",
         path=str(tmp_path),
         download=True,
-        use_predefined_splits=False,
         data_format="numpy",
     )
     assert isinstance(ds, LocalDataset)
 
 
 @pytest.mark.unit
-def test_load_dataset_with_path_warns_on_use_predefined_splits(tmp_path, caplog):
-    # `use_predefined_splits` is a UCR/UEA concept. Asking for it on a local
-    # dataset cannot work, so say so instead of dropping it silently.
+def test_load_dataset_rejects_the_retired_use_predefined_splits_kwarg(tmp_path):
+    # It selects a partition, so dropping it would hand back the pooled split to
+    # a caller who asked for the predefined one. The message has to name where it
+    # went.
     _write_numpy_dataset(tmp_path)
-    with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
-        ds = load_dataset(name="my_ecg", path=str(tmp_path), use_predefined_splits=True)
-    assert isinstance(ds, LocalDataset)
-    assert "use_predefined_splits" in caplog.text
+    with pytest.raises(TypeError, match="parameter of split"):
+        load_dataset(name="my_ecg", path=str(tmp_path), use_predefined_splits=True)
+
+
+@pytest.mark.unit
+def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, caplog):
+    # `use_predefined_splits` is meaningful only for a dataset that owns a
+    # partition. A local one does not, so say so rather than drop it silently -
+    # and still return a usable split, since there is no other partition that
+    # could have been served.
+    _write_numpy_dataset(tmp_path)
+    ds = load_dataset(name="my_ecg", path=str(tmp_path))
+    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
+        splits, _ = ds.split(train_split=0.8, val_split=0.1, use_predefined_splits=True)
+    assert "defines no partition of its own" in caplog.text
     assert "is_presplit" in caplog.text
+    assert len(splits) == 3
 
 
 @pytest.mark.unit
@@ -775,6 +788,127 @@ def test_split_is_stratified_and_metadata_stays_aligned(published_splits):
             assert int(combo[bit]) == 1 or target not in region["classes"]
 
 
+# ── choosing between the two partitions (use_predefined_splits) ───────────────
+
+
+@pytest.mark.unit
+def test_synthetic_defaults_to_its_own_partition(published_splits):
+    """
+    A bare `split()` must still reproduce the published partition.
+
+    This dataset is the one place the flag defaults to True: its partition is part
+    of the published data the generator reproduces, and it already yields a
+    validation split, so nothing is lost by preferring it. The digest test above
+    calls `split()` without the flag, so its passing is the other half of this.
+    """
+    ds, _splits, _encoder = published_splits
+    assert (
+        inspect.signature(type(ds).split).parameters["use_predefined_splits"].default
+        is True
+    )
+
+
+@pytest.mark.unit
+def test_synthetic_opt_out_honours_the_configured_fractions():
+    """
+    With the flag off it must split like any other dataset.
+
+    Before this it applied its own partition unconditionally, so a caller asking
+    for different fractions was told they were ignored and got the dataset's.
+    """
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20, cache_dir=None)
+    splits, _encoder = ds.split(
+        train_split=0.5,
+        val_split=0.25,
+        encode="multihot",
+        use_predefined_splits=False,
+    )
+    sizes = [len(y) for _x, y, _m in splits]
+    assert sizes == [80, 40, 40], sizes
+
+
+@pytest.mark.unit
+def test_synthetic_opt_out_still_scopes_its_ground_truth():
+    """
+    The delegating path must not lose the region-to-class scoping.
+
+    `DatasetBase.split` cannot do it - the scope depends on the label encoding,
+    which only exists once the labels are encoded - so the subclass applies it
+    afterwards. Without this the localization metrics would score every class
+    against the same mask.
+    """
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20, cache_dir=None)
+    splits, encoder = ds.split(
+        train_split=0.5,
+        val_split=0.25,
+        encode="multihot",
+        use_predefined_splits=False,
+    )
+    _x, y, metadata = splits[0]
+    assert len(metadata) == len(y)
+    # The empty class carries no regions at all, so only the rest can be checked.
+    scoped = [row for row in metadata if row["ground_truth"]]
+    assert scoped, "no sample carried a discriminative region"
+    for row in scoped:
+        for region in row["ground_truth"]:
+            assert "classes" in region
+            bit = (7, 19, 37).index(region["freq"])
+            assert all(int(encoder.classes_[c][bit]) == 1 for c in region["classes"])
+
+
+@pytest.mark.unit
+def test_synthetic_opt_out_keeps_metadata_aligned_under_max_samples():
+    """
+    Restriction plus the delegating path is where alignment used to break.
+
+    `DatasetBase.split` restricted the arrays only, so the metadata still had one
+    row per original sample and `_split_dataset` raised on the length mismatch.
+    The ground truth is matched to samples by position, so a silent misalignment
+    here would score every attribution against another sample's regions.
+    """
+    ds = SynthMultilabelFreqDataset(
+        num_samples_per_pattern=20, cache_dir=None, max_samples=40
+    )
+    splits, _encoder = ds.split(
+        train_split=0.5,
+        val_split=0.25,
+        encode="multihot",
+        use_predefined_splits=False,
+    )
+    assert [len(y) for _x, y, _m in splits] == [20, 10, 10]
+    for x, y, metadata in splits:
+        assert len(metadata) == len(y) == len(x)
+
+
+@pytest.mark.unit
+def test_local_metadata_survives_sample_restriction(tmp_path):
+    """
+    The same restriction defect, reachable with no synthetic dataset involved.
+
+    A local dataset with per-sample metadata and `max_samples` used to raise
+    `ValueError: zip() argument 2 is longer than argument 1`, which names neither
+    `max_samples` nor the metadata it dropped.
+    """
+    _write_numpy_dataset(tmp_path, n=40)
+    (tmp_path / "metadata.json").write_text(
+        json.dumps([{"ground_truth": [{"pos": i, "len": 2}]} for i in range(40)])
+    )
+    ds = load_dataset(name="probe", path=str(tmp_path), max_samples=10)
+    splits, _encoder = ds.split(train_split=0.8, val_split=0.1, random_state=42)
+
+    assert sum(len(y) for _x, y, _m in splits) == 10
+    for x, y, metadata in splits:
+        assert len(metadata) == len(y) == len(x)
+    # The surviving rows must be the selected ones, not the first N.
+    positions = {
+        region["pos"]
+        for _x, _y, metadata in splits
+        for row in metadata
+        for region in row["ground_truth"]
+    }
+    assert len(positions) == 10, "metadata rows were not carried through by index"
+
+
 @pytest.mark.unit
 def test_package_api_generates_and_splits(tmp_path):
     """
@@ -875,7 +1009,7 @@ def test_predefined_splits_report_the_arguments_they_ignore(kwargs, expected, ca
     no effect. Dropping it silently is what let the shipped example ask for a
     validation split and train without one.
     """
-    ds = UcrUeaDataset("GunPoint", use_predefined_splits=True)
+    ds = UcrUeaDataset("GunPoint")
 
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
         ds._report_ignored_split_args(
@@ -894,7 +1028,7 @@ def test_predefined_splits_report_the_arguments_they_ignore(kwargs, expected, ca
 def test_predefined_splits_stay_quiet_when_nothing_was_asked_for(caplog):
     # Warning on the defaults would make every official-split run noisy, and
     # nothing was actually ignored.
-    ds = UcrUeaDataset("GunPoint", use_predefined_splits=True)
+    ds = UcrUeaDataset("GunPoint")
 
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
         ds._report_ignored_split_args(0.8, 0.0, True)

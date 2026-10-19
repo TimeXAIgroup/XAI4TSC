@@ -92,7 +92,12 @@ data_config:
     path: null              # Local path; if set, LocalDataset is used instead of UcrUeaDataset
     is_presplit: false      # true = load directly via load_saved_splits(), bypass cache
     stratify: true          # stratify splits by class label; set to false to opt out
-    use_predefined_splits: false  # use official _TRAIN.ts/_TEST.ts splits; ignores train_split, val_split, stratify
+    use_predefined_splits: false  # use the splits the dataset itself defines, ignoring train_split,
+                                  # val_split and stratify: the official _TRAIN.ts/_TEST.ts files for
+                                  # UCR/UEA (no validation split, so early stopping monitors training
+                                  # loss), or the other published splits of dataset that ship one.
+                                  # A dataset with no splits of its own reports the request
+                                  # and splits by the fractions instead.
     skip_dataset: false     # skip the dataset entirely (no split, train, explain, or evaluate)
     skip_models: false      # split only; skip train, explain, and evaluate
     skip_explainers: false  # split and train only; skip explain and evaluate

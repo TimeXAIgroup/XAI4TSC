@@ -42,7 +42,7 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     ("data_config", "download"): (UcrUeaDataset.__init__, "download"),
     ("data_config", "allow_padding"): (UcrUeaDataset.__init__, "pad_series"),
     ("data_config", "use_predefined_splits"): (
-        UcrUeaDataset.__init__,
+        DatasetBase.split,
         "use_predefined_splits",
     ),
     ("data_config", "format"): (LocalDataset.__init__, "data_format"),

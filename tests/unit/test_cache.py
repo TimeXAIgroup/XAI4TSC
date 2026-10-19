@@ -55,7 +55,9 @@ def test_get_split_cache_path_base_case():
 
 @pytest.mark.unit
 def test_get_split_cache_path_rand_suffix_when_not_stratified():
-    assert _folder_name(stratify=False).endswith("_label_rand")
+    # Pinned against a literal, like the _strat case above: the random-split
+    # names must stay byte-identical so existing caches keep resolving.
+    assert _folder_name(stratify=False) == "GunPoint_tr0.8_v0.1_s42_label_rand"
 
 
 @pytest.mark.unit
@@ -63,6 +65,54 @@ def test_get_split_cache_path_official_overrides_strat_and_rand():
     name = _folder_name(use_predefined_splits=True, stratify=True)
     assert name.endswith("_label_official")
     assert "_strat" not in name and "_rand" not in name
+
+
+# ── the official path names only what shaped it (R46) ─────────────────────────
+
+
+@pytest.mark.unit
+def test_official_path_omits_the_partition_it_does_not_use():
+    # The archive's own TRAIN/TEST files are used as-is, so a name carrying
+    # train_split/val_split would describe a partition the folder does not hold.
+    assert _folder_name(use_predefined_splits=True) == "GunPoint_label_official"
+
+
+@pytest.mark.unit
+def test_official_path_omits_the_seed_when_no_samples_are_dropped():
+    # With max_samples unset the official split is seed-independent:
+    # _select_sample_idx returns arange(n) without drawing.
+    assert "_s42" not in _folder_name(use_predefined_splits=True)
+
+
+@pytest.mark.unit
+def test_official_path_keeps_the_seed_when_samples_are_restricted():
+    # The seed picks which rows survive the restriction, so it does shape the
+    # stored arrays here and must stay in the key.
+    name = _folder_name(use_predefined_splits=True, max_samples=500)
+    assert name == "GunPoint_s42_label_s500r_official"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("train_split", 0.7), ("val_split", 0.3), ("random_state", 7)],
+)
+def test_editing_an_ignored_key_does_not_mint_a_new_official_entry(key, value):
+    # Previously each of these forced a re-split that rewrote byte-identical
+    # data under a new directory.
+    assert _folder_name(use_predefined_splits=True, **{key: value}) == _folder_name(
+        use_predefined_splits=True
+    )
+
+
+@pytest.mark.unit
+def test_two_seeds_stay_apart_on_the_official_path_when_restricted():
+    # The dangerous direction of R40: one entry must never serve two seeds'
+    # subsamples.
+    restricted = {"use_predefined_splits": True, "max_samples": 500}
+    assert _folder_name(**restricted, random_state=7) != _folder_name(
+        **restricted, random_state=42
+    )
 
 
 @pytest.mark.unit

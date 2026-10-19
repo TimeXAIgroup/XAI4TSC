@@ -91,7 +91,6 @@ class UcrUeaDataset(DatasetBase):
         sample_strategy: str = "random",
         max_series_length: int | None = None,
         series_position: str = "first",
-        use_predefined_splits: bool = False,
     ) -> None:
         """
         Instantiate a UCR/UEA dataset.
@@ -123,11 +122,6 @@ class UcrUeaDataset(DatasetBase):
             padding for variable-length datasets.
         series_position : str
             Which end to retain: ``"first"`` or ``"last"``.
-        use_predefined_splits : bool
-            If ``True``, load the official ``_TRAIN.ts`` and ``_TEST.ts`` files
-            directly instead of combining and re-splitting the data.  No
-            validation set is produced.  ``val_split`` and ``stratify`` are
-            ignored.
         """
         super().__init__(
             max_samples=max_samples,
@@ -139,7 +133,6 @@ class UcrUeaDataset(DatasetBase):
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.download = download
         self.pad_series = pad_series
-        self.use_predefined_splits = use_predefined_splits
 
     def _load_one_split(self, split: str, rng: np.random.Generator) -> tuple:
         """
@@ -175,7 +168,7 @@ class UcrUeaDataset(DatasetBase):
                 extract_path=extract_path,
             )
             labels_arr = np.asarray(labels)
-            data, labels_arr = self._restrict_samples_numpy(data, labels_arr, rng)
+            data, labels_arr, _ = self._restrict_samples(data, labels_arr, None, rng)
             data = self._restrict_length_numpy(data)
         except ValueError as exc:
             if "same shape" not in str(exc):
@@ -247,7 +240,7 @@ class UcrUeaDataset(DatasetBase):
                 extract_path=extract_path,
             )
             labels_arr = np.asarray(labels)
-            data, labels_arr = self._restrict_samples_numpy(data, labels_arr, rng)
+            data, labels_arr, _ = self._restrict_samples(data, labels_arr, None, rng)
             data = self._restrict_length_numpy(data)
         except ValueError as exc:
             if "same shape" not in str(exc):
@@ -290,20 +283,24 @@ class UcrUeaDataset(DatasetBase):
         rng: np.random.Generator | None = None,
         stratify: bool = True,
         class_order: list | None = None,
+        use_predefined_splits: bool = False,
     ) -> tuple:
         """
         Load and split the dataset.
 
-        When :attr:`use_predefined_splits` is ``True``, loads the official
+        When *use_predefined_splits* is ``True``, loads the official
         ``_TRAIN.ts`` and ``_TEST.ts`` files directly and ignores
         ``train_split``, ``val_split``, and ``stratify``.  No validation set
         is produced, and passing a non-default value for any of the three is
-        reported rather than silently dropped.
+        reported rather than silently dropped.  It defaults to ``False``
+        because the archive partition has no validation split, so selecting it
+        would silently void the fractions a caller asked for and leave early
+        stopping monitoring training loss.
 
         Otherwise delegates to :meth:`DatasetBase.split` for random /
         stratified splitting.
         """
-        if not self.use_predefined_splits:
+        if not use_predefined_splits:
             return super().split(
                 train_split=train_split,
                 val_split=val_split,
@@ -1113,23 +1110,32 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         rng: np.random.Generator | None = None,
         stratify: bool = True,
         class_order: list | None = None,
+        use_predefined_splits: bool = True,
     ) -> tuple:
         """
-        Generate (or load from cache) and apply this dataset's own partition.
+        Generate (or load from cache) and split, by this dataset's own partition.
 
-        The partition is the source repository's: two chained stratified
-        ``train_test_split`` calls seeded by this dataset's ``seed``, giving
-        ``train_ratio`` / ``test_ratio`` / remainder. It is a property of the
-        dataset rather than of the run, so re-running returns the same rows.
+        With *use_predefined_splits* (the default), the partition is the source
+        repository's: two chained stratified ``train_test_split`` calls seeded by
+        this dataset's ``seed``, giving ``train_ratio`` / ``test_ratio`` /
+        remainder. It is then a property of the dataset rather than of the run, so
+        re-running returns the same rows and the published dataset is reproduced.
+
+        Set it to ``False`` for the framework's ordinary splitting, which honours
+        ``train_split`` / ``val_split`` / ``stratify`` like any other dataset. The
+        ground-truth regions are scoped to their classes on both paths.
 
         Parameters
         ----------
         train_split : float
-            Not used; the partition comes from ``train_ratio``. A value that
-            disagrees with it is reported once.
+            Fraction of samples for training. Ignored under
+            *use_predefined_splits*, where the partition comes from
+            ``train_ratio``; a value that disagrees with it is reported once.
         val_split : float
-            Not used; the validation fraction is ``1 - train_ratio - test_ratio``.
-            A value that disagrees with it is reported once.
+            Fraction of samples for validation. Ignored under
+            *use_predefined_splits*, where it is
+            ``1 - train_ratio - test_ratio``; a value that disagrees with it is
+            reported once.
         random_state : int or None
             Seeds the sample restriction only. The partition uses the dataset's
             own ``seed``.
@@ -1143,10 +1149,16 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         rng : np.random.Generator or None
             Shared generator for the sample restriction; overrides *random_state*.
         stratify : bool
-            Accepted for signature parity. The partition is stratified by class
-            combination by construction.
+            Stratify the splits by class. Ignored under *use_predefined_splits*,
+            where the partition is stratified by class combination by
+            construction.
         class_order : list or None
             Explicit class order, forwarded to the encoder.
+        use_predefined_splits : bool
+            Use this dataset's own partition, the default here because that
+            partition is part of the published dataset this generator reproduces
+            and it already yields a validation split, so nothing is lost by
+            preferring it.
 
         Returns
         -------
@@ -1154,6 +1166,24 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             ``(splits, fitted_encoder)`` where *splits* is a list of
             ``(X, y, metadata)`` tuples in order ``[train, test, val]``.
         """
+        if not use_predefined_splits:
+            splits, encoder = super().split(
+                train_split=train_split,
+                val_split=val_split,
+                random_state=random_state,
+                encode=encode,
+                impute_missing=impute_missing,
+                rng=rng,
+                stratify=stratify,
+                class_order=class_order,
+            )
+            # The base splits the rows but cannot scope the regions: that needs the
+            # fitted encoder, which only exists once the labels are encoded.
+            self._splits = [
+                (x, y, self._scope_metadata(m, encoder)) for x, y, m in splits
+            ]
+            return self._splits, self._encoder
+
         self._report_unused_ratios(train_split, val_split)
         rng = resolve_rng(random_state, rng)
 
@@ -1164,22 +1194,8 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             self._split_rng = None
 
         labels = np.asarray(labels)
-        data, labels, metadata = self._restrict(data, labels, metadata, rng)
-        full_length = data.shape[-1]
+        data, labels, metadata = self._restrict_samples(data, labels, metadata, rng)
         data = self._restrict_length_numpy(data)
-        if data.shape[-1] != full_length:
-            # The regions are positions in the generated series. Truncating it does
-            # not move them, so a region past the cut now describes signal that is
-            # no longer there; the masks clip rather than crash, which is exactly
-            # what makes this worth saying out loud.
-            logger.warning(
-                "'%s' was truncated from %d to %d timesteps, but its ground-truth "
-                "regions still describe the full series. Localization metrics will "
-                "score against regions that may fall outside the truncated signal.",
-                self.name,
-                full_length,
-                data.shape[-1],
-            )
 
         encoder, targets = _fit_label_encoder(labels, encode, class_order)
         splits = _assemble_splits(data, targets, metadata, self._partition(labels))
@@ -1189,6 +1205,39 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             logger.info("%s data shape: %s", name, x.shape)
         self._splits, self._encoder = splits, encoder
         return self._splits, self._encoder
+
+    def _restrict_length_numpy(self, data: np.ndarray) -> np.ndarray:
+        """
+        Truncate the time axis, reporting what it does to the ground truth.
+
+        The regions are positions in the generated series. Truncating it does not
+        move them, so a region past the cut now describes signal that is no longer
+        there; the masks clip rather than crash, which is exactly what makes this
+        worth saying out loud. It lives here rather than in :meth:`split` so both
+        partitions report it.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Full ``(B, C, T)`` array.
+
+        Returns
+        -------
+        np.ndarray
+            The array, truncated to ``max_series_length`` where that is shorter.
+        """
+        full_length = data.shape[-1]
+        data = super()._restrict_length_numpy(data)
+        if data.shape[-1] != full_length:
+            logger.warning(
+                "'%s' was truncated from %d to %d timesteps, but its ground-truth "
+                "regions still describe the full series. Localization metrics will "
+                "score against regions that may fall outside the truncated signal.",
+                self.name,
+                full_length,
+                data.shape[-1],
+            )
+        return data
 
     def _report_unused_ratios(self, train_split: float, val_split: float) -> None:
         """
@@ -1220,53 +1269,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
                 train_split,
                 val_split,
             )
-
-    def _restrict(
-        self,
-        data: np.ndarray,
-        labels: np.ndarray,
-        metadata: pd.DataFrame | None,
-        rng: np.random.Generator,
-    ) -> tuple:
-        """
-        Apply ``max_samples`` to data, labels and metadata together.
-
-        :meth:`~xai4tsc.data.base.DatasetBase._restrict_samples_numpy` drops rows
-        from the arrays only, which would leave the metadata one row per original
-        sample and so no longer aligned. Selecting the indices once and applying
-        them to all three keeps the per-sample alignment the ground truth depends
-        on.
-
-        Parameters
-        ----------
-        data : np.ndarray
-            Full ``(B, C, T)`` array.
-        labels : np.ndarray
-            Full label array.
-        metadata : pd.DataFrame or None
-            Per-sample metadata, or ``None``.
-        rng : np.random.Generator
-            Stream for the sample selection.
-
-        Returns
-        -------
-        tuple
-            ``(data, labels, metadata)``, restricted and still index-aligned.
-        """
-        n = data.shape[0]
-        idx = self._select_sample_idx(n, labels, rng)
-        if len(idx) == n:
-            return data, labels, metadata
-        logger.info(
-            "Subsampling dataset from %d to %d samples (strategy: %s).",
-            n,
-            len(idx),
-            getattr(self, "_sample_strategy", "random"),
-        )
-        restricted = (
-            metadata.iloc[idx].reset_index(drop=True) if metadata is not None else None
-        )
-        return data[idx], labels[idx], restricted
 
     def _partition(self, labels: np.ndarray) -> list[np.ndarray]:
         """
@@ -1543,6 +1545,16 @@ def load_dataset(
         max_series_length=max_series_length,
         series_position=series_position,
     )
+    if "use_predefined_splits" in kwargs:
+        # It selects a partition, so dropping it here would hand back the pooled
+        # split to a caller who asked for the predefined one - a different
+        # partition, silently.
+        raise TypeError(
+            "'use_predefined_splits' is no longer a load_dataset() argument: it "
+            "is a parameter of split(). Build the dataset without it and pass it "
+            "to the split call instead, e.g. "
+            "load_dataset(name).split(..., use_predefined_splits=True)."
+        )
     if data_domain != "time" and path is None:
         logger.warning(
             "'data_domain: %s' is ignored for '%s': UCR/UEA data is always raw "
@@ -1553,7 +1565,7 @@ def load_dataset(
         )
     if name in SYNTHETIC_DATASETS:
         # Generation params arrive as kwargs (the runner forwards `init_params`).
-        for k in ("data_format", "download", "use_predefined_splits"):
+        for k in ("data_format", "download"):
             kwargs.pop(k, None)
         return SYNTHETIC_DATASETS[name](
             name=name,
@@ -1565,13 +1577,6 @@ def load_dataset(
         if name is None:
             raise ValueError("'name' is required when 'path' is provided.")
         kwargs.pop("download", None)
-        if kwargs.pop("use_predefined_splits", False):
-            logger.warning(
-                "'use_predefined_splits' does not apply to the local dataset "
-                "'%s' and is ignored; use 'is_presplit' to load an "
-                "already-split directory.",
-                name,
-            )
         return LocalDataset(
             path,
             name=name,

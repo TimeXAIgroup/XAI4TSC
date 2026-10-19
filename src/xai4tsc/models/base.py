@@ -172,6 +172,34 @@ def _macro(rates: list[dict[str, float]], key: str) -> float:
     return sum(values) / len(values) if values else float("nan")
 
 
+def _macro_auc(class_aucs: list[float], present: np.ndarray) -> float:
+    """
+    Average the one-vs-rest AUCs of the classes present in the data.
+
+    This is the macro-average multiclass AUC, equal to what
+    :func:`sklearn.metrics.roc_auc_score` computes with ``multi_class="ovr"``
+    when every class is present. It is derived here instead so that a class
+    missing from the test split yields a *partial* score, where that call
+    raises: it requires the scores it is given to sum to 1 across their columns,
+    which slicing them down to the present classes breaks.
+
+    Parameters
+    ----------
+    class_aucs : list of float
+        One AUC per class index, ``nan`` where undefined.
+    present : np.ndarray
+        The class indices present in the data.
+
+    Returns
+    -------
+    float
+        The unweighted mean over the present classes, or ``nan`` when none of
+        them has a defined AUC.
+    """
+    values = [class_aucs[int(c)] for c in present if not math.isnan(class_aucs[int(c)])]
+    return sum(values) / len(values) if values else float("nan")
+
+
 def _display_names(names: Sequence[str] | None, n_classes: int) -> list[str]:
     """
     Resolve the display name of every class, falling back to the class index.
@@ -248,7 +276,8 @@ class ModelBase(nn.Module, ABC):
     device: torch.device | None = None
     """Compute device the model lives on."""
     save_path: Path | None = None
-    """Directory for checkpoints and diagnostic plots."""
+    """Directory for checkpoints and diagnostic plots.  Always absolute: it is
+    resolved when set, so it does not move with the working directory."""
     model_path: Path | None = None
     """Path to the best saved checkpoint (set after training)."""
     best_epoch: int | None = None
@@ -313,7 +342,8 @@ class ModelBase(nn.Module, ABC):
         device : str or torch.device, optional
             Compute device.  The model is moved onto it.
         save_path : Path or str, optional
-            Directory for checkpoints and diagnostic plots.
+            Directory for checkpoints and diagnostic plots.  Resolved to an
+            absolute path.
         name : str, optional
             Identifier used in file names and logs.  Overrides the default
             class name, which is how one class registered under two keys writes
@@ -335,24 +365,27 @@ class ModelBase(nn.Module, ABC):
             self.device = torch.device(device) if isinstance(device, str) else device
             self.to(self.device)
         if save_path is not None:
-            self.save_path = Path(save_path)
+            self.save_path = Path(save_path).resolve()
         return self
 
-    def _resolve_save_path(self, save_path: Path | str | None, caller: str) -> Path:
+    def _resolve_save_path(self, save_path: Path | str | None) -> Path:
         """
-        Settle where this call writes, and remember it for later ones.
+        Resolve the supplied path, if none return self.save_path resolved.
+
+        The result is run through :meth:`pathlib.Path.resolve`, so a relative
+        destination does not move with the working directory and every path this
+        class logs is absolute and pasteable.
 
         Parameters
         ----------
         save_path : str or Path or None
-            The destination passed to this call, if any.
-        caller : str
-            Name of the calling method, used in the error message.
+            The destination passed to this call, if any.  Falls back to
+            :attr:`save_path`.
 
         Returns
         -------
         Path
-            The resolved directory, also stored on :attr:`save_path`.
+            The absolute directory. :attr:`save_path` is left alone.
 
         Raises
         ------
@@ -363,11 +396,11 @@ class ModelBase(nn.Module, ABC):
         """
         if save_path is None and self.save_path is None:
             raise ValueError(
-                f"{caller} needs a save_path: pass save_path=... or construct "
-                "via load_model(..., save_path=...)."
+                "No save_path set, so there is nowhere to write: pass "
+                "save_path=... to this call, or set one with "
+                "load_model(..., save_path=...) or configure(save_path=...)."
             )
-        self.save_path = Path(save_path if save_path is not None else self.save_path)
-        return self.save_path
+        return Path(save_path if save_path is not None else self.save_path).resolve()
 
     # ── Abstract ────────────────────────────────────────────────────────────
 
@@ -471,9 +504,13 @@ class ModelBase(nn.Module, ABC):
             Matched case-insensitively.
         data_val : np.ndarray, optional
             Validation data of shape ``(n_samples, n_channels, n_timesteps)``.
-            When provided, validation loss drives early stopping and checkpointing.
+            When provided, validation loss drives early stopping and
+            checkpointing; when omitted, both monitor **training** loss instead.
+            Must be given together with *labels_val*: one without the other raises,
+            rather than falling back to training loss as if nothing had been asked for.
         labels_val : np.ndarray, optional
-            Integer class labels for *data_val*.
+            Integer class labels for *data_val*.  Required when *data_val* is
+            given.
         save_path : str or Path, optional
             Directory for the best checkpoint and training plots.  Takes priority
             over the destination given to
@@ -491,7 +528,7 @@ class ModelBase(nn.Module, ABC):
         ModelBase
             ``self`` after training (best checkpoint restored).
         """
-        self._resolve_save_path(save_path, "train_model")
+        self.save_path = self._resolve_save_path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
 
         data_tensor = torch.from_numpy(
@@ -526,15 +563,7 @@ class ModelBase(nn.Module, ABC):
             batch_size=batchsize,
         )
 
-        val_loader = None
-        if data_val is not None and labels_val is not None:
-            val_loader = DataLoader(
-                TensorDataset(
-                    torch.from_numpy(np.ascontiguousarray(data_val, dtype=np.float32)),
-                    torch.from_numpy(np.ascontiguousarray(labels_val, dtype=np.int64)),
-                ),
-                batch_size=batchsize,
-            )
+        val_loader = self._validation_loader(data_val, labels_val, batchsize, epochs)
 
         best_loss = 1e6
         best_path = None
@@ -614,7 +643,7 @@ class ModelBase(nn.Module, ABC):
                     )
                     break
 
-        self._plot_training_curve(epoch_losses, epoch_accs, start_epoch)
+        self._plot_training_curve(self.save_path, epoch_losses, epoch_accs, start_epoch)
 
         if best_path is None:
             # No epoch improved on the initial loss, so nothing was checkpointed
@@ -631,6 +660,79 @@ class ModelBase(nn.Module, ABC):
 
         self.model_path = best_path
         return self
+
+    def _validation_loader(
+        self,
+        data_val: np.ndarray | None,
+        labels_val: np.ndarray | None,
+        batchsize: int,
+        epochs: int,
+    ) -> DataLoader | None:
+        """
+        Build the validation loader, or report why there will not be one.
+
+        Early stopping and best-checkpoint selection monitor whatever this
+        returns a loss for, so a validation set that goes missing here silently
+        changes which checkpoint is kept. Half of a pair, or an empty one, is a
+        mistake with nothing sensible to fall back to and raises; supplying
+        neither is a documented choice and is logged, so the fallback leaves a
+        trace in the log rather than only an absence.
+
+        Parameters
+        ----------
+        data_val : np.ndarray or None
+            Validation data, if any.
+        labels_val : np.ndarray or None
+            Validation labels, if any.
+        batchsize : int
+            Samples per batch, matching the training loader.
+        epochs : int
+            Epochs this call will run, named in the no-validation message.
+
+        Returns
+        -------
+        DataLoader or None
+            ``None`` when no validation data was supplied at all.
+
+        Raises
+        ------
+        ValueError
+            If exactly one of *data_val* / *labels_val* is given, or if either
+            is empty.
+        """
+        if data_val is None and labels_val is None:
+            logger.info(
+                "No validation data: early stopping and best-checkpoint "
+                "selection monitor TRAINING loss over %d epoch(s). Pass "
+                "data_val and labels_val to select on validation loss instead.",
+                epochs,
+            )
+            return None
+        if data_val is None or labels_val is None:
+            missing, given = (
+                ("data_val", "labels_val")
+                if data_val is None
+                else ("labels_val", "data_val")
+            )
+            raise ValueError(
+                f"train_model got {given} without {missing}. Validation needs "
+                f"both; with only one, early stopping would silently fall back "
+                f"to training loss. Pass {missing} as well, or neither."
+            )
+        if len(data_val) == 0 or len(labels_val) == 0:
+            raise ValueError(
+                f"train_model got an empty validation set "
+                f"(data_val: {len(data_val)}, labels_val: {len(labels_val)}). "
+                "There is nothing to validate on; pass neither argument to "
+                "monitor training loss deliberately."
+            )
+        return DataLoader(
+            TensorDataset(
+                torch.from_numpy(np.ascontiguousarray(data_val, dtype=np.float32)),
+                torch.from_numpy(np.ascontiguousarray(labels_val, dtype=np.int64)),
+            ),
+            batch_size=batchsize,
+        )
 
     def _validation_loss(
         self,
@@ -741,7 +843,7 @@ class ModelBase(nn.Module, ABC):
             config file.  Defaults to :attr:`best_epoch`.
         """
         save_path = Path(save_path) if isinstance(save_path, str) else save_path
-        logger.info("Saving model to %s", str(save_path.absolute()))
+        logger.info("Saving model to %s", save_path.resolve())
         torch.save(self.state_dict(), save_path)
         self._save_checkpoint_config(
             save_path, epoch if epoch is not None else self.best_epoch
@@ -796,7 +898,7 @@ class ModelBase(nn.Module, ABC):
             Metric values keyed by name. The summary only; the per-class counts
             are written to file.
         """
-        self._resolve_save_path(save_path, "evaluate_model")
+        out_dir = self._resolve_save_path(save_path)
         self.eval()
 
         y_true, y_probs_list = [], []
@@ -828,8 +930,11 @@ class ModelBase(nn.Module, ABC):
         is_binary = n_model_classes == 2
 
         if is_binary:
-            pos_cls = unique_classes[1]
-            y_prob = y_probs[:, pos_cls]
+            # The positive class is the model's second output column, which is
+            # class index 1 because labels are encoded 0..K-1. Reading it as
+            # "the second class present in the test labels" means the same thing
+            # whenever both are, and an IndexError when only one is.
+            y_prob = y_probs[:, 1]
             y_pred = (y_prob >= threshold).astype(np.int64)
         else:
             y_pred = np.argmax(y_probs, axis=1).astype(np.int64)
@@ -842,6 +947,19 @@ class ModelBase(nn.Module, ABC):
         cm = confusion_matrix(y_true, y_pred, labels=np.arange(n_model_classes))
         per_class = _confusion_counts(cm)
         class_rates = [_rates(c["tp"], c["tn"], c["fp"], c["fn"]) for c in per_class]
+        # One-vs-rest AUC per class, scored on that class's own probability
+        # column. Averaged over the present classes this is the macro AUC the
+        # multiclass summary reports, and it is also what the OvR curves below
+        # are drawn from, so the number and the picture cannot disagree. A class
+        # absent from the test split, or a split with nothing to separate, has no
+        # AUC and stays nan rather than excluding the rest.
+        class_aucs = [float("nan")] * n_model_classes
+        if len(unique_classes) > 1:
+            for cls in unique_classes:
+                class_aucs[cls] = roc_auc_score(
+                    (y_true == cls).astype(np.int64),
+                    y_probs[:, cls].astype(np.float64),
+                )
 
         results = {"n": n}
         if is_binary:
@@ -853,11 +971,13 @@ class ModelBase(nn.Module, ABC):
         results["accuracy"] = f"{accuracy * 100:.2f}"
 
         auc = float("nan")
-        fpr, tpr = [0, 1], [0, 1]
         fpr_tpr_per_class = None
 
         if len(unique_classes) < 2:
             logger.warning("AUC undefined: only one class present in test labels.")
+            # Recorded as nan rather than omitted, so a degenerate split's row
+            # has the same columns as every other row of the same problem type.
+            results["auc"] = f"{auc:.4f}"
         elif is_binary:
             # Class 1 is the positive class; its one-vs-rest counts are the
             # binary ones, so they come from the same table the CSV reports.
@@ -893,20 +1013,12 @@ class ModelBase(nn.Module, ABC):
                     n_model_classes - len(unique_classes),
                     n_model_classes,
                 )
-            auc = roc_auc_score(
-                y_true,
-                y_probs[:, unique_classes].astype(np.float64),
-                multi_class="ovr",
-                labels=unique_classes,
-            )
+            auc = _macro_auc(class_aucs, unique_classes)
             fpr_tpr_per_class = []
             for cls in unique_classes:
                 y_true_bin = (y_true == cls).astype(np.int64)
-                if len(np.unique(y_true_bin)) < 2:
-                    fpr_tpr_per_class.append(([0, 1], [0, 1]))
-                else:
-                    fpr_cls, tpr_cls, _ = roc_curve(y_true_bin, y_probs[:, cls])
-                    fpr_tpr_per_class.append((fpr_cls, tpr_cls))
+                fpr_cls, tpr_cls, _ = roc_curve(y_true_bin, y_probs[:, cls])
+                fpr_tpr_per_class.append((fpr_cls, tpr_cls))
             if partial:
                 auc_label = (
                     f"{auc:.4f} (partial, "
@@ -924,24 +1036,28 @@ class ModelBase(nn.Module, ABC):
 
         names = _display_names(class_names, n_model_classes)
 
-        self.save_path.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
         if fpr_tpr_per_class is not None:
             self._plot_roc_multiclass(
+                out_dir,
                 fpr_tpr_per_class,
                 auc,
                 self.best_epoch,
                 class_labels=[names[int(cls)] for cls in unique_classes],
                 n_model_classes=n_model_classes,
             )
-        else:
+        elif len(unique_classes) > 1:
             fpr, tpr, _ = roc_curve(y_true, y_prob)
-            self._plot_roc(fpr, tpr, auc, self.best_epoch)
-        self._plot_confusion_matrix(cm, self.best_epoch, display_labels=names)
+            self._plot_roc(out_dir, fpr, tpr, auc, self.best_epoch)
+        else:
+            # Nothing to separate, so there is no curve.
+            logger.warning(
+                "ROC curve not plotted: only one class present in test labels."
+            )
+        self._plot_confusion_matrix(out_dir, cm, self.best_epoch, display_labels=names)
 
         df = pd.DataFrame([results])
-        results_path = (
-            self.save_path / f"{self.name}_e{self.best_epoch}_test_results.csv"
-        )
+        results_path = out_dir / f"{self.name}_e{self.best_epoch}_test_results.csv"
         df.to_csv(results_path, index=False)
         logger.info("Test set results saved to %s", results_path)
 
@@ -952,33 +1068,33 @@ class ModelBase(nn.Module, ABC):
                 "name": names[k],
                 **per_class[k],
                 **{key: f"{value * 100:.2f}" for key, value in class_rates[k].items()},
+                "auc": f"{class_aucs[k]:.4f}",
             }
             for k in range(n_model_classes)
         ]
-        per_class_path = (
-            self.save_path / f"{self.name}_e{self.best_epoch}_test_per_class.csv"
-        )
+        per_class_path = out_dir / f"{self.name}_e{self.best_epoch}_test_per_class.csv"
         pd.DataFrame(per_class_rows).to_csv(per_class_path, index=False)
         logger.info("Per-class test results saved to %s", per_class_path)
 
         if is_binary:
+            counts, rates = per_class[1], class_rates[1]
             logger.info(
                 "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
                 "spec=%.4f auc=%.4f f1=%.4f mcc=%.4f | TP=%d TN=%d FP=%d FN=%d",
                 self.best_epoch,
                 n,
-                per_class[1]["support"],
+                counts["support"],
                 per_class[0]["support"],
                 accuracy,
-                sensitivity,
-                specificity,
+                rates["sensitivity"],
+                rates["specificity"],
                 auc,
-                f1,
-                mcc,
-                tp,
-                tn,
-                fp,
-                fn,
+                rates["f1"],
+                rates["mcc"],
+                counts["tp"],
+                counts["tn"],
+                counts["fp"],
+                counts["fn"],
             )
         else:
             logger.info(
@@ -995,6 +1111,7 @@ class ModelBase(nn.Module, ABC):
 
     def _plot_roc(
         self,
+        save_dir: Path,
         fpr: np.ndarray | list,
         tpr: np.ndarray | list,
         auc: float,
@@ -1010,13 +1127,14 @@ class ModelBase(nn.Module, ABC):
         plt.title("Receiver Operating Characteristic")
         plt.legend(loc="lower right")
         plt.grid(True, linestyle="--", alpha=0.6)
-        path = self.save_path / f"{self.name}_e{best_epoch}_roc.png"
+        path = save_dir / f"{self.name}_e{best_epoch}_roc.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("ROC curve saved to %s", path)
         plt.close()
 
     def _plot_roc_multiclass(
         self,
+        save_dir: Path,
         fpr_tpr_per_class: list[tuple],
         auc: float,
         best_epoch: int | None,
@@ -1039,13 +1157,14 @@ class ModelBase(nn.Module, ABC):
         ax.set_title(title, fontsize=10)
         ax.legend(loc="lower right", fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.6)
-        path = self.save_path / f"{self.name}_e{best_epoch}_roc.png"
+        path = save_dir / f"{self.name}_e{best_epoch}_roc.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("ROC curves saved to %s", path)
         plt.close()
 
     def _plot_confusion_matrix(
         self,
+        save_dir: Path,
         cm: np.ndarray,
         best_epoch: int | None,
         display_labels: Sequence[str] | None = None,
@@ -1053,13 +1172,14 @@ class ModelBase(nn.Module, ABC):
         _fig, ax = plt.subplots(figsize=(5, 5))
         ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(ax=ax)
         ax.set_title(f"Confusion Matrix — Epoch {best_epoch}")
-        path = self.save_path / f"{self.name}_e{best_epoch}_confusion_matrix.png"
+        path = save_dir / f"{self.name}_e{best_epoch}_confusion_matrix.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("Confusion matrix saved to %s", path)
         plt.close()
 
     def _plot_training_curve(
         self,
+        save_dir: Path,
         epoch_losses: list[float],
         epoch_accs: list[float],
         start_epoch: int = 0,
@@ -1077,7 +1197,7 @@ class ModelBase(nn.Module, ABC):
         ax2.set_title("Training Accuracy")
         ax2.grid(True, linestyle="--", alpha=0.6)
         fig.tight_layout()
-        path = self.save_path / f"{self.name}_training_curve.png"
+        path = save_dir / f"{self.name}_training_curve.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("Training curve saved to %s", path)
         plt.close()

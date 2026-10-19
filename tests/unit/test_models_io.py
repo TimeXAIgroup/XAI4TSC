@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from sklearn.metrics import roc_auc_score
 from torch import nn
 
 from xai4tsc.models.base import (
@@ -118,7 +119,7 @@ def test_load_model_registry_sets_operational_attrs(tmp_path):
     model = load_model(_TINY_FCN, device="cpu", save_path=tmp_path)
     assert model.name == "FCN"
     assert model.device == torch.device("cpu")
-    assert model.save_path == tmp_path
+    assert model.save_path == tmp_path.resolve()
     # init_params are filtered against the constructor signature and stored.
     assert model._init_params["in_channels"] == 1
     assert model._init_params["num_classes"] == 2
@@ -1064,7 +1065,9 @@ def test_configure_sets_operational_attrs_and_chains():
 
     assert model.name == "Renamed"
     assert model.device == torch.device("cpu")
-    assert model.save_path == Path("/tmp/does-not-need-to-exist")
+    # save_path is stored absolute, which is not the same string where /tmp is
+    # a symlink (macOS), so compare the resolved form.
+    assert model.save_path == Path("/tmp/does-not-need-to-exist").resolve()
     # Architecture record is the constructor's business, untouched by configure.
     assert model._init_params["in_channels"] == 1
 
@@ -1079,7 +1082,7 @@ def test_configure_leaves_omitted_attrs_alone():
     model.configure(name="Second")
 
     assert model.name == "Second"
-    assert model.save_path == Path("/tmp/first")
+    assert model.save_path == Path("/tmp/first").resolve()
     assert model.device == torch.device("cpu")
 
 
@@ -1116,7 +1119,7 @@ def test_writing_without_a_destination_raises(method):
 
     # evaluate_model takes only the batch size; the rest describes training.
     kwargs = _TRAIN_HP if method == "train_model" else {"batchsize": 8}
-    with pytest.raises(ValueError, match="needs a save_path"):
+    with pytest.raises(ValueError, match="No save_path set"):
         getattr(model, method)(data, labels, **kwargs)
 
 
@@ -1330,3 +1333,155 @@ def test_macro_averages_over_the_classes_that_define_a_rate():
 
     assert _macro(rates, "f1") == pytest.approx(0.75)
     assert np.isnan(_macro([{"f1": float("nan")}], "f1"))
+
+
+# ── the ModelBase contract: validation data, save_path, degenerate splits ─────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kwargs", "missing"),
+    [({"data_val": True}, "labels_val"), ({"labels_val": True}, "data_val")],
+)
+def test_half_a_validation_set_raises(tmp_path, kwargs, missing):
+    # Dropped silently, the run selects its checkpoint on training loss while
+    # the caller believes it is validating - the one thing the method's own
+    # docstring warns against.
+    data, labels = _tiny_batch()
+    supplied = {k: (data if k == "data_val" else labels) for k in kwargs}
+
+    with pytest.raises(ValueError, match=f"without {missing}"):
+        FCN(in_channels=1, num_classes=2).train_model(
+            data, labels, **_TRAIN_HP, save_path=tmp_path, **supplied
+        )
+
+
+@pytest.mark.unit
+def test_an_empty_validation_set_raises(tmp_path):
+    data, labels = _tiny_batch()
+
+    with pytest.raises(ValueError, match="empty validation set"):
+        FCN(in_channels=1, num_classes=2).train_model(
+            data,
+            labels,
+            **_TRAIN_HP,
+            save_path=tmp_path,
+            data_val=data[:0],
+            labels_val=labels[:0],
+        )
+
+
+@pytest.mark.unit
+def test_training_without_validation_data_says_what_it_monitors(tmp_path, caplog):
+    # A deliberate no-validation run is supported; the point is that it leaves a
+    # trace in the log instead of only an absent val_loss.
+    data, labels = _tiny_batch()
+
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        FCN(in_channels=1, num_classes=2).train_model(
+            data, labels, **_TRAIN_HP, save_path=tmp_path
+        )
+
+    assert caplog.text.count("monitor TRAINING loss") == 1
+    assert "val_loss" not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_real_validation_set_still_drives_selection(tmp_path, caplog):
+    data, labels = _tiny_batch()
+
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        FCN(in_channels=1, num_classes=2).train_model(
+            data,
+            labels,
+            **_TRAIN_HP,
+            save_path=tmp_path,
+            data_val=data,
+            labels_val=labels,
+        )
+
+    assert "val_loss" in caplog.text
+    assert "monitor TRAINING loss" not in caplog.text
+
+
+@pytest.mark.unit
+def test_evaluating_elsewhere_does_not_move_the_models_home(tmp_path):
+    # A one-off destination used to become the model's default for every later
+    # call, so evaluating into two directories left it pointing at the second.
+    home, other = tmp_path / "home", tmp_path / "other"
+    data, labels = _tiny_batch()
+    model = FCN(in_channels=1, num_classes=2)
+    model.train_model(data, labels, **_TRAIN_HP, save_path=home)
+    # Resolved, so the comparison holds where the temp dir is reached through a
+    # symlink (macOS /var -> /private/var).
+    assert model.save_path == home.resolve(), "training establishes the home"
+
+    model.evaluate_model(data, labels, batchsize=8, save_path=other)
+
+    assert model.save_path == home.resolve()
+    assert list(other.glob("*_test_results.csv")), "it wrote where it was told"
+    # ...and with no argument at all, back to the home training established.
+    model.evaluate_model(data, labels, batchsize=8)
+    assert list(home.glob("*_test_results.csv"))
+
+
+@pytest.mark.unit
+def test_a_class_absent_from_the_test_split_scores_partially(tmp_path):
+    # The multiclass AUC used to hand sklearn the probability columns of the
+    # present classes only, which no longer sum to 1, so it raised - and the
+    # "(partial, k/K classes)" label the code builds was unreachable.
+    data = np.random.default_rng(3).standard_normal((15, 1, 32)).astype("float32")
+    labels = np.array([0, 1, 2] * 5)  # class 3 never appears
+
+    results = FCN(in_channels=1, num_classes=4).evaluate_model(
+        data, labels, batchsize=5, save_path=tmp_path
+    )
+
+    assert "partial, 3/4 classes" in results["auc"]
+    rows = [
+        line.split(",")
+        for line in next(tmp_path.glob("*_test_per_class.csv")).read_text().splitlines()
+    ]
+    header, body = rows[0], rows[1:]
+    assert len(body) == 4, "one row per model class, present or not"
+    absent = dict(zip(header, body[3], strict=True))
+    assert int(absent["support"]) == 0
+    assert absent["auc"] == "nan", "no AUC for a class with no samples"
+
+
+@pytest.mark.unit
+def test_the_multiclass_auc_is_sklearns_ovr_macro(tmp_path):
+    # The guarantee that replacing the sklearn call moved no recorded number.
+    data = np.random.default_rng(4).standard_normal((18, 1, 32)).astype("float32")
+    labels = np.array([0, 1, 2] * 6)
+    model = FCN(in_channels=1, num_classes=3)
+
+    results = model.evaluate_model(data, labels, batchsize=6, save_path=tmp_path)
+
+    expected = roc_auc_score(
+        labels,
+        predict_probs(model, data).astype(np.float64),
+        multi_class="ovr",
+        labels=np.arange(3),
+    )
+    assert results["auc"] == f"{expected:.4f}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("num_classes", [2, 3])
+def test_a_single_class_test_split_completes_without_a_roc(tmp_path, num_classes):
+    # Both used to crash here: the multiclass path on an unbound y_prob, the
+    # binary one on unique_classes[1]. There is no curve to draw, but the counts
+    # and the matrix are still worth writing.
+    data = np.random.default_rng(5).standard_normal((6, 1, 32)).astype("float32")
+    labels = np.zeros(6, dtype=np.int64)
+
+    results = FCN(in_channels=1, num_classes=num_classes).evaluate_model(
+        data, labels, batchsize=3, save_path=tmp_path
+    )
+
+    assert results["auc"] == "nan"
+    assert list(tmp_path.glob("*_test_results.csv"))
+    assert list(tmp_path.glob("*_test_per_class.csv"))
+    assert list(tmp_path.glob("*_confusion_matrix.png"))
+    assert not list(tmp_path.glob("*_roc.png")), "no curve exists to plot"

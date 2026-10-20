@@ -348,7 +348,7 @@ explanation_config:
                             #   num_cells: 8               coarse mask-grid resolution;
                             #     num_cells//2 MUST be < the smallest transform dim
                             #     (n_freq, and n_time for stft)
-                            #   probability_of_drop: 0.5   Bernoulli keep probability, = E[M]
+                            #   probability_of_keep: 0.5   Bernoulli keep probability, = E[M]
                             #     in the relevance normalisation
                             #   seed: 0xDEADBEEF           seed for the mask draw, rebuilt per call
                             #     from a local generator; the global torch stream is never touched.

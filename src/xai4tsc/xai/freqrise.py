@@ -3,7 +3,7 @@ FreqRISE — explaining time series by random frequency masking.
 
 Perturbation-based attribution that masks coefficients in the frequency (real
 FFT) or time-frequency (STFT) domain and measures the effect on the model's
-predicted class probability. Univariate series (``C == 1``) are the validated
+score for the target class. Univariate series (``C == 1``) are the validated
 path; multivariate inputs are masked with a shared coefficient mask broadcast
 across channels.
 
@@ -16,10 +16,18 @@ gives the per-coefficient relevance for class ``c`` (Brüsch et al., Eq. 3):
 
     R_c = 1 / (N · E[M]) · Σ_n  ŷ_c(x̂(M_n)) · M_n
 
-where ``N`` is the number of masks, ``ŷ_c`` is the softmax probability of the
+where ``N`` is the number of masks, ``ŷ_c`` is the model's **logit** for the
 target class, and ``E[M]`` is the Bernoulli keep probability. Masks are sampled
 on a coarse ``num_cells`` grid and interpolated up to the coefficient grid to
 make them smooth.
+
+The logit is the paper's choice, "since these show higher sensitivity to changes
+in the input": softmax saturates, so on a confident model masking a genuinely
+important coefficient barely moves the probability while it moves the logit a
+lot, which compresses exactly the signal being measured. A logit is signed and
+unbounded, so the accumulated relevance may be negative; :meth:`_rescale` min-max
+scales each map to ``[0, 1]`` at the end, which is order-preserving, so the
+ranking a metric or plot reads is unaffected by the offset.
 
 Reference
 ---------
@@ -81,7 +89,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         coefficient grid, by default ``8``. ``num_cells // 2`` must be smaller
         than the smallest transform dimension, so the default is deliberately
         coarse: a finer grid fails on any small STFT.
-    probability_of_drop : float
+    probability_of_keep : float
         Bernoulli probability that a coarse cell is kept; equals ``E[M]`` in the
         relevance normalisation (default 0.5, as in the paper).
     seed : int or None
@@ -112,7 +120,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         domain: str = "stft",
         transform: DomainTransform | dict | None = None,
         num_cells: int = 8,
-        probability_of_drop: float = 0.5,
+        probability_of_keep: float = 0.5,
         seed: int | None = DEFAULT_SEED,
     ) -> None:
         if domain not in ("fft", "stft"):
@@ -133,7 +141,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         if domain == "fft" and self.transform is None:
             self.transform = RFFTransform()
         self.num_cells = num_cells
-        self.probability_of_drop = probability_of_drop
+        self.probability_of_keep = probability_of_keep
         self.seed = seed
 
     def explain(
@@ -210,12 +218,14 @@ class FreqRISEExplainer(PerturbationExplainer):
             )  # (B, *grid)
             masked = coeffs * masks.unsqueeze(1)  # broadcast over channels
             recon = self._from_spectral(masked, timesteps)  # (B, C, T)
-            logits = model(recon.float())
-            probs = torch.softmax(logits, dim=1)[:, target]  # ŷ_c per mask
-            importance += torch.tensordot(probs, masks, dims=([0], [0]))
+            # Raw logits, not softmax probabilities: the paper weights each mask
+            # by the pre-activation score, which stays sensitive where the
+            # probability has saturated. Models here emit logits by contract.
+            logits = model(recon.float())[:, target]  # ŷ_c per mask
+            importance += torch.tensordot(logits, masks, dims=([0], [0]))
 
         total_masks = self.num_batches * self.batch_size
-        return importance / (total_masks * self.probability_of_drop)
+        return importance / (total_masks * self.probability_of_keep)
 
     def _to_spectral(self, x: torch.Tensor) -> torch.Tensor:
         """Transform a time-domain signal to the masking (coefficient) domain."""
@@ -247,7 +257,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         spatial = len(grid)
         coarse = (
             torch.rand(batch, 1, *((self.num_cells,) * spatial), generator=generator)
-            < self.probability_of_drop
+            < self.probability_of_keep
         ).float()
         if spatial == 1:
             smooth = interpolate(

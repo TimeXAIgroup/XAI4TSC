@@ -69,7 +69,7 @@ explanation_config:
       num_batches: 50               # small for a fast demo; raise for real runs
       batch_size: 8
       num_cells: 8                  # keep num_cells//2 < smallest STFT dim
-      probability_of_drop: 0.5
+      probability_of_keep: 0.5
       seed: 0
     # Explanation-space wrapper: lift Integrated Gradients into the FFT domain.
     # (transform must be given explicitly; omitting it would inherit master's

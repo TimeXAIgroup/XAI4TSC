@@ -192,6 +192,20 @@ tuple `("points",)` instead of `None`.
 
 ### Fixed
 
+- **FreqRISE follows its paper: the estimator weights each mask by the logit**
+  , not the softmax probability. Brüsch et al. specify the score "prior to the softmax
+  activation, since these show higher sensitivity to changes in the input" -
+  softmax saturates, so on a confident model masking a genuinely important
+  coefficient barely moves the probability while it moves the logit a lot, which
+  compresses exactly the signal the method measures. The relevance is therefore
+  signed now; that is harmless, because each map is min-max scaled to `[0, 1]`
+  before it is returned and min-max is order-preserving, so the ranking metrics and
+  plots read is unchanged.
+- **`FreqRISE.probability_of_drop` is renamed `probability_of_keep`.** It always
+  named the opposite of what it did: a coefficient is *kept* with that probability,
+  and the estimator divides by the same value as `E[M]`. Invisible at the 0.5
+  default, so a user asking to drop 90% of coefficients was keeping 90% of them
+  instead.
 - **The runner's own entry keys no longer reach an explainer's constructor.** An
   explainer takes its parameters at the entry's top level, so the dict handed to
   `build_explainer` is the whole resolved entry. `dict_to_args` filtered the

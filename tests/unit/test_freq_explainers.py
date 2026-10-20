@@ -432,3 +432,123 @@ def test_random_baselines_are_pure_and_input_independent(cls, kwargs):
     assert not np.array_equal(
         first, cls(**kwargs, seed=123).explain(model, _make_exp(data), "cpu", [0, 1])
     )
+
+
+# ── R41: the estimator weights by the logit, not the probability ─────────────
+
+
+class _SoftmaxWeighted(FreqRISEExplainer):
+    """
+    The pre-R41 estimator: identical except that it weights by ``softmax(logits)``.
+
+    A mirror of :meth:`FreqRISEExplainer._relevance` kept deliberately, so the
+    shipped estimator can be asserted *different* from it. It is the only way to
+    pin "we weight by the pre-activation score" without re-deriving Eq. 3 in the
+    test and asserting a tautology.
+    """
+
+    def _relevance(self, model, sample, target, device, spatial_dims, generator=None):
+        timesteps = sample.shape[-1]
+        coeffs = self._to_spectral(sample.unsqueeze(0))
+        grid = tuple(coeffs.shape[-spatial_dims:])
+        importance = torch.zeros(grid, device=device)
+        for _ in range(self.num_batches):
+            masks = self._sample_masks(self.batch_size, grid, device, generator)
+            recon = self._from_spectral(coeffs * masks.unsqueeze(1), timesteps)
+            probs = torch.softmax(model(recon.float()), dim=1)[:, target]
+            importance += torch.tensordot(probs, masks, dims=([0], [0]))
+        total = self.num_batches * self.batch_size
+        return importance / (total * self.probability_of_keep)
+
+
+def _bin_signal(k0: int = 12, timesteps: int = 64) -> np.ndarray:
+    return np.sin(2 * np.pi * k0 * np.arange(timesteps) / timesteps).astype(np.float32)[
+        None, None, :
+    ]
+
+
+@pytest.mark.unit
+def test_estimator_weights_by_the_logit_not_the_probability():
+    """
+    Weight each mask by the logit, as Brüsch et al. specify.
+
+    The paper uses the score "prior to the softmax activation, since these show
+    higher sensitivity to changes in the input".
+
+    This pins the method, not its quality: on this single-bin toy the two
+    weightings localise comparably, because the model's logit range sits in
+    softmax's sensitive region instead of saturating. The difference the paper
+    argues for needs a trained multi-class model, which is what the sandbox
+    re-baseline measures.
+    """
+    data = _bin_signal()
+    model = _FFTBinModel(12)
+    kwargs = dict(domain="fft", num_batches=50, batch_size=8, num_cells=16, seed=0)
+
+    shipped = FreqRISEExplainer(**kwargs).explain(model, _make_exp(data), "cpu", [1])
+    softmaxed = _SoftmaxWeighted(**kwargs).explain(model, _make_exp(data), "cpu", [1])
+
+    assert not np.allclose(shipped, softmaxed), (
+        "the shipped estimator must not reduce to the softmax-weighted one"
+    )
+
+
+# ── R42: probability_of_keep, with the old spelling deprecated ───────────────
+
+
+@pytest.mark.unit
+def test_keep_probability_is_the_mask_keep_rate():
+    """The value is the probability a cell is kept, which is what E[M] divides by."""
+    explainer = FreqRISEExplainer(domain="fft", probability_of_keep=0.9, seed=0)
+    masks = explainer._sample_masks(
+        2000, (32,), "cpu", torch.Generator().manual_seed(0)
+    )
+
+    assert masks.mean().item() == pytest.approx(0.9, abs=0.02)
+
+
+@pytest.mark.unit
+def test_deprecated_probability_of_drop_still_works_and_warns(caplog):
+    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
+        explainer = FreqRISEExplainer(domain="fft", probability_of_drop=0.7)
+
+    assert explainer.probability_of_keep == 0.7
+    assert "deprecated" in caplog.text
+    assert "probability_of_keep" in caplog.text
+
+
+@pytest.mark.unit
+def test_the_new_name_warns_about_nothing(caplog):
+    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
+        explainer = FreqRISEExplainer(domain="fft", probability_of_keep=0.7)
+
+    assert explainer.probability_of_keep == 0.7
+    assert "deprecated" not in caplog.text
+
+
+@pytest.mark.unit
+def test_the_rename_is_only_a_rename():
+    """Both spellings must produce byte-identical attributions at the same seed."""
+    data = _bin_signal()
+    model = _FFTBinModel(12)
+    common = dict(domain="fft", num_batches=20, batch_size=8, num_cells=16, seed=0)
+
+    old = FreqRISEExplainer(**common, probability_of_drop=0.7).explain(
+        model, _make_exp(data), "cpu", [1]
+    )
+    new = FreqRISEExplainer(**common, probability_of_keep=0.7).explain(
+        model, _make_exp(data), "cpu", [1]
+    )
+
+    assert np.array_equal(old, new)
+
+
+@pytest.mark.unit
+def test_conflicting_spellings_report_which_one_wins(caplog):
+    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
+        explainer = FreqRISEExplainer(
+            domain="fft", probability_of_keep=0.5, probability_of_drop=0.8
+        )
+
+    assert explainer.probability_of_keep == 0.8, "the explicit old spelling wins"
+    assert "disagree" in caplog.text

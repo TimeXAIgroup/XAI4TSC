@@ -222,7 +222,10 @@ one from :attr:`xai4tsc.Explanation.explainer` and
 :attr:`xai4tsc.Explanation.explainer_params`, which is why the explanation records
 how it was produced: a re-explanation has to use the *same* method with the *same*
 settings, or the metric measures a configuration difference instead of the property
-it claims to.
+it claims to. :attr:`xai4tsc.Explanation.explainer_call_params` closes the same gap
+for options a method takes per call rather than at construction: the adapter
+replays them, and the ``explain_func_kwargs`` Quantus itself injects cannot
+override them.
 
 Seven metrics across the groups are refused rather than scored, each with its
 reason in :data:`~xai4tsc.evaluation.quantus_groups.BLOCKED_BY_BACKEND`. Six of them

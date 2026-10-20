@@ -528,7 +528,7 @@ class ConfigIssues:
 _ENTRY_EXTRAS = {
     "dataset": frozenset({"init_params", "overrides"}),
     "model": frozenset({"init_params", "model_ckpt_path", "class_name", "class_path"}),
-    "method": frozenset({"class_name", "class_path"}),
+    "method": frozenset({"call_params", "class_name", "class_path"}),
     "metric": frozenset(
         {"animate", "animate_sample", "animate_fps", "class_name", "class_path"}
     ),
@@ -601,15 +601,340 @@ def _check_component_name(
     return None
 
 
+# Parameter names the framework supplies positionally at an explainer's call site,
+# so a `call_params` block must never set them (the splat would raise).
+_EXPLAIN_OWNED = frozenset({"model", "exp", "device", "targets"})
+
+
+def strip_runner_keys(
+    params: dict, method: str, config: dict | None = None, nested: bool = False
+) -> dict:
+    """
+    Drop the runner's own entry keys from an explainer's construction parameters.
+
+    An explainer takes its parameters at the entry's top level, so the dict handed
+    to :func:`~xai4tsc.xai.explain.build_explainer` is the whole resolved entry:
+    the identity key, the ``default_settings`` the runner reads itself, and the
+    structural extras. :func:`~xai4tsc.utils.utils.dict_to_args` filters those out
+    against a named signature, but it returns the dict **unchanged** for a
+    constructor declaring ``**kwargs``, which would then receive ``method``,
+    ``target``, ``samples`` and the rest as if they had been configured for it.
+
+    A key the class itself names is kept, so an explainer that genuinely takes a
+    parameter called ``samples`` still gets it; for every component that declares a
+    named signature this function therefore changes nothing at all.
+
+    The owned names are derived, never listed: the identity key, the resolved
+    ``explanation_config.default_settings`` (which master's key whitelist produced)
+    and :data:`_ENTRY_EXTRAS`. A wrapper's nested ``base`` is stripped the same way
+    with one exception: ``method`` stays, because there it is not an identity key
+    the runner reads but an input
+    :class:`~xai4tsc.xai.base.WrapperExplainer` itself consumes - it pops that key
+    to build the method it wraps, and raises ``KeyError`` without it.
+
+    Parameters
+    ----------
+    params : dict
+        The entry copy about to be used as construction parameters.
+    method : str
+        The explainer's registry name, used to look up what it declares.
+    config : dict, optional
+        The resolved config, read for the ``default_settings`` names. Without it
+        only the identity key and the structural extras are stripped.
+    nested : bool, optional
+        ``True`` for a wrapper's ``base`` sub-dict, which keeps its ``method``.
+
+    Returns
+    -------
+    dict
+        A copy of *params* without the keys the runner owns.
+    """
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    owned = set(_ENTRY_EXTRAS["method"])
+    if not nested:
+        owned.add("method")
+    if config:
+        owned |= set(
+            (config.get("explanation_config") or {}).get("default_settings") or {}
+        )
+
+    cls = EXPLAINERS.get(str(method).lower())
+    named: set[str] = set()
+    if cls is not None and "__init__" in cls.__dict__:
+        named = set(inspect.signature(cls.__init__).parameters)
+
+    stripped = {
+        key: value for key, value in params.items() if key not in owned or key in named
+    }
+    base = stripped.get("base")
+    if isinstance(base, dict):
+        stripped["base"] = strip_runner_keys(
+            base, base.get("method", ""), config, nested=True
+        )
+    return stripped
+
+
+def _has_catch_all(func: object) -> bool:
+    """
+    Report whether *func* declares ``**kwargs``.
+
+    Parameters
+    ----------
+    func : callable
+        The signature to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` when a ``VAR_KEYWORD`` parameter is declared.
+    """
+    return any(
+        param.kind == param.VAR_KEYWORD
+        for param in inspect.signature(func).parameters.values()
+    )
+
+
+def _classify_params(
+    block: dict, func: object, owned: frozenset[str] = frozenset()
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Split a config parameter block's keys by what the target's signature says.
+
+    The oracle is the set of **named** parameters, never the presence of
+    ``**kwargs``. A catch-all sits beside named parameters often enough that
+    conflating the two would reject keys that plainly work: every Quantus metric
+    declares ``**kwargs`` *and* names between ten and nineteen parameters, so
+    ``disable_warnings`` is verifiable even though the signature ends in a
+    catch-all.
+
+    Parameters
+    ----------
+    block : dict
+        The parameter block as configured.
+    func : callable
+        The signature the block is handed to.
+    owned : frozenset of str, optional
+        Names the framework supplies itself, which a user must not set.
+
+    Returns
+    -------
+    tuple of (list, list, list)
+        ``(unverifiable, unknown, reserved)``. *unverifiable* keys match no named
+        parameter but the target declares ``**kwargs``, so nothing can say whether
+        they are read; *unknown* keys match nothing and there is no catch-all to
+        absorb them; *reserved* keys collide with *owned*.
+    """
+    sig = inspect.signature(func)
+    named = {
+        param.name
+        for param in sig.parameters.values()
+        if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+    } - {"self"}
+    catch_all = _has_catch_all(func)
+
+    reserved = [key for key in block if key in owned]
+    unmatched = [key for key in block if key not in named and key not in owned]
+    if catch_all:
+        return unmatched, [], reserved
+    return [], unmatched, reserved
+
+
+def _report_param_block(
+    block: object,
+    func: object,
+    where: str,
+    label: str,
+    allow_kwargs: bool,
+    issues: ConfigIssues,
+    owned: frozenset[str] = frozenset(),
+    dropped: bool = True,
+    inherited: frozenset[str] = frozenset(),
+) -> None:
+    """
+    Report the keys in one parameter block that the target will not read.
+
+    Three outcomes, split by what the key would actually do:
+
+    * **reserved** - the framework passes this itself, so setting it raises at the
+      call site. Always an error.
+    * **unverifiable** - the target's signature ends in ``**kwargs``, so no
+      inspection can tell whether the key is read. An error naming
+      ``general.allow_kwargs`` while that flag is false, and passed through in
+      silence once it is true: a config that wants to reach a catch-all has to say
+      so, because nothing can be promised about it afterwards.
+    * **unknown** - nothing named matches and there is no catch-all. An error when
+      the block is splatted straight in (it would raise), a warning when the value
+      is filtered out first and the component falls back to its own default.
+
+    Parameters
+    ----------
+    block : object
+        The configured block, which need not be a mapping.
+    func : callable
+        The signature the block is handed to.
+    where : str
+        Config location, for the message.
+    label : str
+        How to name the target in a message, e.g. ``"this explainer's explain()"``.
+    allow_kwargs : bool
+        ``general.allow_kwargs``.
+    issues : ConfigIssues
+        Collector to append to.
+    owned : frozenset of str, optional
+        Names the framework supplies itself.
+    dropped : bool, optional
+        ``True`` when an unreadable key is filtered out before the call, which
+        decides whether *unknown* is a warning or an error.
+    inherited : frozenset of str, optional
+        Keys this entry inherited from its section's ``default_settings``, which
+        are not this entry's to answer for.
+    """
+    if block is None:
+        # A documented-but-empty block, as master writes it. Nothing to check.
+        return
+    if not isinstance(block, dict):
+        issues.error(
+            where,
+            f"expected a mapping of parameters, got "
+            f"{type(block).__name__}; remove it or give it key/value pairs.",
+        )
+        return
+    # Only what this entry itself declares. A key inherited from the section's
+    # `default_settings` is a global choice, already checked against master's key
+    # whitelist, and is deliberately absorbed by the entries it does not apply to:
+    # `softmax` reaches every metric although only the perturbation ones read it.
+    own = {key: value for key, value in block.items() if key not in inherited}
+    if not own:
+        return
+
+    unverifiable, unknown, reserved = _classify_params(own, func, owned)
+    accepted = set(inspect.signature(func).parameters) - {"self"} - owned
+
+    for key in reserved:
+        issues.error(
+            where,
+            f"'{key}' is supplied by the framework and must not be set here.",
+        )
+    for key in unknown:
+        message = f"'{key}' is not a parameter of {label}.{_suggest(key, accepted)}"
+        (issues.error if not dropped else issues.warn)(where, message)
+    if allow_kwargs:
+        return
+    for key in unverifiable:
+        issues.error(
+            where,
+            f"'{key}' cannot be verified: {label} declares **kwargs, so no "
+            f"signature says whether it is read.{_suggest(key, accepted)} Set "
+            "general.allow_kwargs: true to pass unchecked parameters through, or "
+            "declare it as a named argument.",
+        )
+
+
+def _param_blocks(
+    kind: str, name: str, cls: type | None, entry: dict
+) -> list[tuple[str, object, str, frozenset[str], bool]]:
+    """
+    Return the parameter blocks of one entry, each with the signature it reaches.
+
+    One table so every component type is checked the same way. Each row is
+    ``(block key, callable, label, owned names, dropped)``; see
+    :func:`_report_param_block` for what the last two decide. A block whose
+    oracle cannot be resolved is left out rather than guessed at.
+
+    The oracle is the signature the value actually arrives at, which for a Quantus
+    metric is the library class rather than the adapter: ``QuantusEvaluator``
+    declares ``**kwargs`` and re-filters per metric, so checking the adapter would
+    verify nothing.
+
+    Parameters
+    ----------
+    kind : str
+        Entry identity key: ``"dataset"``, ``"model"``, ``"method"`` or
+        ``"metric"``.
+    name : str
+        The component's configured name.
+    cls : type or None
+        The registry class, where the registry has one.
+    entry : dict
+        The resolved entry.
+
+    Returns
+    -------
+    list of tuple
+        One row per parameter block present on *entry*.
+    """
+    blocks: list[tuple[str, object, str, frozenset[str], bool]] = []
+    if kind == "method" and cls is not None:
+        if "call_params" in entry:
+            blocks.append(
+                (
+                    "call_params",
+                    cls.explain,
+                    "this explainer's explain()",
+                    _EXPLAIN_OWNED,
+                    False,
+                )
+            )
+    elif kind == "model" and cls is not None and "init_params" in entry:
+        blocks.append(
+            ("init_params", cls.__init__, "this model's constructor", frozenset(), True)
+        )
+    elif kind == "dataset":
+        from xai4tsc.data.datasets import SYNTHETIC_DATASETS
+
+        synthetic = SYNTHETIC_DATASETS.get(name)
+        if synthetic is not None and "init_params" in entry:
+            blocks.append(
+                (
+                    "init_params",
+                    synthetic.__init__,
+                    "this dataset's constructor",
+                    frozenset(),
+                    False,
+                )
+            )
+    elif kind == "metric":
+        from xai4tsc.evaluation.evaluate import METRICS, QUANTUS_METRICS
+
+        quantus = QUANTUS_METRICS.get(name)
+        target = quantus if quantus is not None else METRICS.get(name)
+        if isinstance(target, type):
+            if "metric_class_params" in entry:
+                blocks.append(
+                    (
+                        "metric_class_params",
+                        target.__init__,
+                        "this metric's constructor",
+                        frozenset(),
+                        True,
+                    )
+                )
+            if "metric_call_params" in entry:
+                call = target.__call__ if quantus is not None else target.evaluate
+                blocks.append(
+                    (
+                        "metric_call_params",
+                        call,
+                        "this metric at call time",
+                        frozenset(),
+                        True,
+                    )
+                )
+    return blocks
+
+
 def _validate_entry(
     entry: dict,
     kind: str,
     where: str,
-    overridable: set[str],
+    defaults: dict,
     registry: dict | None,
     issues: ConfigIssues,
+    allow_kwargs: bool = False,
 ) -> None:
     """Check one list entry's name and keys; see :func:`config_sanity_check`."""
+    overridable = set(defaults)
     name = entry.get(kind)
     where = f"{where} ({name})"
     cls = None
@@ -626,6 +951,19 @@ def _validate_entry(
     if kind == "method":
         accepted |= params
 
+    # An explainer takes its construction parameters at the entry's top level, so a
+    # catch-all __init__ makes an unmatched key unverifiable rather than unknown:
+    # dict_to_args hands the whole entry to a VAR_KEYWORD constructor.
+    # `build_explainer` passes params only when the class defines its own
+    # __init__; for one that does not, nothing is handed over and an unmatched key
+    # is plainly unknown rather than unverifiable.
+    catch_all_init = (
+        kind == "method"
+        and cls is not None
+        and "__init__" in cls.__dict__
+        and _has_catch_all(cls.__init__)
+    )
+
     for key in entry:
         if key in accepted:
             continue
@@ -635,16 +973,45 @@ def _validate_entry(
                 f"'{key}' is not read at an entry's top level; "
                 f"{'parameters of this ' + kind} go under {_PARAM_HOME[kind]}.",
             )
-        else:
+        elif catch_all_init and not allow_kwargs:
+            issues.error(
+                where,
+                f"'{key}' cannot be verified: this explainer's constructor declares "
+                f"**kwargs, so no signature says whether it is read."
+                f"{_suggest(key, accepted)} Set general.allow_kwargs: true to pass "
+                "unchecked parameters through, or declare it as a named argument.",
+            )
+        elif not catch_all_init:
             label = _ENTRY_LABEL[kind]
             issues.warn(
                 where, f"'{key}' is not a known {label}.{_suggest(key, accepted)}"
             )
 
+    for block_key, func, label, owned, dropped in _param_blocks(
+        kind, name if isinstance(name, str) else "", cls, entry
+    ):
+        _report_param_block(
+            entry[block_key],
+            func,
+            f"{where}.{block_key}",
+            label,
+            allow_kwargs,
+            issues,
+            owned,
+            dropped,
+            frozenset(defaults.get(block_key) or ()),
+        )
+
     # A wrapper explainer nests the method it wraps, with its own parameters.
     if kind == "method" and isinstance(entry.get("base"), dict):
         _validate_entry(
-            entry["base"], kind, f"{where}.base", overridable, registry, issues
+            entry["base"],
+            kind,
+            f"{where}.base",
+            defaults,
+            registry,
+            issues,
+            allow_kwargs,
         )
 
 
@@ -655,12 +1022,13 @@ def _validate_entries(config: dict, issues: ConfigIssues) -> None:
     from xai4tsc.xai.explain import EXPLAINERS
 
     registries = {"model": MODELS, "method": EXPLAINERS, "metric": METRICS}
+    allow_kwargs = bool((config.get("general") or {}).get("allow_kwargs", False))
     for kind, (section, list_key) in _ENTRY_SECTIONS.items():
         block = config.get(section) or {}
         # The resolved default_settings is exactly the set of keys an entry may
         # override: _merge_warn_drop has already dropped anything master
         # does not declare.
-        overridable = set(block.get("default_settings") or {})
+        defaults = block.get("default_settings") or {}
         for index, entry in enumerate(block.get(list_key) or []):
             if not isinstance(entry, dict):
                 issues.error(
@@ -672,9 +1040,10 @@ def _validate_entries(config: dict, issues: ConfigIssues) -> None:
                 entry,
                 kind,
                 f"{section}.{list_key}[{index}]",
-                overridable,
+                defaults,
                 registries.get(kind),
                 issues,
+                allow_kwargs,
             )
 
 

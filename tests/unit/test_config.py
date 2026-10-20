@@ -8,11 +8,15 @@ import pytest
 import yaml
 from experiment_runner.config import (
     ConfigIssues,
+    _classify_params,
     _merge_warn_drop,
     _normalize_train_switch,
+    _report_param_block,
+    _validate_entry,
     config_resolve,
     config_sanity_check,
     result_identities,
+    strip_runner_keys,
     validate_user_config,
 )
 
@@ -1136,3 +1140,345 @@ def test_split_and_sample_problems_share_one_report(caplog):
 
     assert "leaves nothing for the test split" in caplog.text
     assert "indx" in caplog.text
+
+
+# ── unverifiable parameters and general.allow_kwargs ─────────────────────────
+
+
+def _named_only(a, b=1, *, c=2):
+    """Stand in for a target that declares no catch-all."""
+
+
+def _catch_all(a, b=1, **kwargs):
+    """Stand in for named parameters beside a catch-all, as Quantus metrics have."""
+
+
+@pytest.mark.unit
+def test_classify_params_splits_the_three_buckets():
+    unverifiable, unknown, reserved = _classify_params(
+        {"a": 1, "stray": 2}, _named_only
+    )
+    assert (unverifiable, unknown, reserved) == ([], ["stray"], [])
+
+    unverifiable, unknown, reserved = _classify_params({"a": 1, "stray": 2}, _catch_all)
+    assert (unverifiable, unknown, reserved) == (["stray"], [], [])
+
+
+@pytest.mark.unit
+def test_a_named_parameter_beside_a_catch_all_is_verified():
+    """
+    The oracle is named parameters, not the presence of **kwargs.
+
+    Quantus metrics declare both, so conflating them would reject
+    `disable_warnings` and break every shipped config.
+    """
+    assert _classify_params({"a": 1, "b": 2}, _catch_all) == ([], [], [])
+
+
+@pytest.mark.unit
+def test_owned_names_are_reserved():
+    _, _, reserved = _classify_params({"a": 1}, _catch_all, frozenset({"a"}))
+    assert reserved == ["a"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("allow", [False, True])
+def test_allow_kwargs_gates_only_the_unverifiable_bucket(allow):
+    issues = ConfigIssues()
+    _report_param_block(
+        {"a": 1, "stray": 2}, _catch_all, "where", "the target", allow, issues
+    )
+
+    assert issues.warnings == []
+    if allow:
+        assert issues.errors == []
+    else:
+        assert len(issues.errors) == 1
+        assert "cannot be verified" in issues.errors[0]
+        assert "general.allow_kwargs" in issues.errors[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("allow", [False, True])
+def test_the_flag_never_silences_a_verifiable_mistake(allow):
+    """A narrowed signature stays checked however the flag is set."""
+    issues = ConfigIssues()
+    _report_param_block(
+        {"stray": 2}, _named_only, "where", "the target", allow, issues, dropped=False
+    )
+    assert len(issues.errors) == 1
+    assert "is not a parameter of" in issues.errors[0]
+
+
+@pytest.mark.unit
+def test_unknown_is_a_warning_when_the_value_is_filtered_out():
+    """Dropped before the call means the run proceeds on a default, not a crash."""
+    issues = ConfigIssues()
+    _report_param_block(
+        {"stray": 2}, _named_only, "where", "the target", False, issues, dropped=True
+    )
+    assert not issues.errors
+    assert len(issues.warnings) == 1
+
+
+@pytest.mark.unit
+def test_a_non_mapping_param_block_is_an_error():
+    issues = ConfigIssues()
+    _report_param_block(["stray", 2], _catch_all, "where", "the target", True, issues)
+    assert len(issues.errors) == 1
+    assert "expected a mapping" in issues.errors[0]
+
+
+@pytest.mark.unit
+def test_reserved_call_params_key_is_rejected():
+    """`device` is already explain()'s third positional; setting it would raise."""
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    entry = {"method": "Integrated_Gradients", "call_params": {"device": "cuda"}}
+    issues = ConfigIssues()
+    _validate_entry(entry, "method", "e[0]", {}, EXPLAINERS, issues, True)
+
+    assert any("supplied by the framework" in e for e in issues.errors)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("allow", [False, True])
+def test_call_params_on_a_catch_all_explain_needs_the_flag(allow):
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    entry = {"method": "Integrated_Gradients", "call_params": {"scale": 3}}
+    issues = ConfigIssues()
+    _validate_entry(entry, "method", "e[0]", {}, EXPLAINERS, issues, allow)
+
+    assert bool(issues.errors) is (not allow)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("allow", [False, True])
+def test_a_catch_all_explainer_constructor_needs_the_flag(allow):
+    """The pre-existing hole: dict_to_args hands a VAR_KEYWORD __init__ everything."""
+    from xai4tsc.xai.base import ExplainerBase
+
+    class _KwargsInit(ExplainerBase):
+        explanation_type = "feature_attribution"
+
+        def __init__(self, **kwargs):
+            self.seen = kwargs
+
+        def explain(self, model, exp, device, targets, **kwargs):
+            return None
+
+    issues = ConfigIssues()
+    _validate_entry(
+        {"method": "K", "foo": 7},
+        "method",
+        "e[0]",
+        {},
+        {"k": _KwargsInit},
+        issues,
+        allow,
+    )
+
+    assert bool(issues.errors) is (not allow)
+    assert not issues.warnings, "a key that does arrive must not be called unknown"
+
+
+@pytest.mark.unit
+def test_metric_params_are_checked_against_the_quantus_class():
+    """Not against QuantusEvaluator, which declares **kwargs and verifies nothing."""
+    from xai4tsc.evaluation.evaluate import METRICS
+
+    issues = ConfigIssues()
+    _validate_entry(
+        {"metric": "Complexity", "metric_class_params": {"disable_warnings": True}},
+        "metric",
+        "m[0]",
+        {"metric_class_params": {}},
+        METRICS,
+        issues,
+        False,
+    )
+    assert not issues.errors, "disable_warnings is a named Quantus parameter"
+
+    issues = ConfigIssues()
+    _validate_entry(
+        {"metric": "Complexity", "metric_class_params": {"disable_warnigns": True}},
+        "metric",
+        "m[0]",
+        {"metric_class_params": {}},
+        METRICS,
+        issues,
+        False,
+    )
+    assert any("cannot be verified" in e for e in issues.errors)
+
+
+@pytest.mark.unit
+def test_model_init_params_are_checked():
+    from xai4tsc.models.models import MODELS
+
+    issues = ConfigIssues()
+    _validate_entry(
+        {"model": "FCN", "init_params": {"in_channels": 1, "nope": 2}},
+        "model",
+        "m[0]",
+        {"init_params": {}},
+        MODELS,
+        issues,
+        False,
+    )
+    assert any("'nope'" in w for w in issues.warnings + issues.errors)
+
+
+@pytest.mark.unit
+def test_dataset_init_params_are_checked_against_the_synthetic_class():
+    issues = ConfigIssues()
+    _validate_entry(
+        {"dataset": "Synth_Multilabel_Freq", "init_params": {"nope": 2}},
+        "dataset",
+        "d[0]",
+        {"init_params": {}},
+        None,
+        issues,
+        False,
+    )
+    assert any("'nope'" in e for e in issues.errors), (
+        "a synthetic dataset is splatted straight into its constructor"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cfg_path", sorted(_RUNNER.glob("configs/*.yaml")))
+def test_every_shipped_config_is_free_of_unverifiable_parameters(cfg_path):
+    """
+    The guard that keeps this honest as components are added.
+
+    Every shipped config must pass with the flag at its default, so a new
+    component whose signature ends in **kwargs cannot quietly make one of them
+    require `allow_kwargs: true`.
+    """
+    cfg = config_resolve(yaml.safe_load(cfg_path.read_text()), MASTER_CONFIG)
+    cfg.setdefault("general", {})["allow_kwargs"] = False
+    issues = ConfigIssues()
+    from experiment_runner.config import _validate_entries
+
+    _validate_entries(cfg, issues)
+    assert not issues.errors, f"{cfg_path.name}: {issues.errors}"
+
+
+# ── the runner's own entry keys never reach a constructor ─────────────────────
+
+
+@pytest.mark.unit
+def test_strip_runner_keys_removes_the_structural_keys():
+    cfg = config_resolve(
+        yaml.safe_load((_RUNNER / "configs/example.yaml").read_text()), MASTER_CONFIG
+    )
+    entry = dict(cfg["explanation_config"]["explainers"][0], seed=12345)
+
+    stripped = strip_runner_keys(entry, entry["method"], cfg)
+
+    assert set(stripped) == {"seed"}, (
+        "only the derived seed is a constructor parameter here"
+    )
+
+
+@pytest.mark.unit
+def test_strip_runner_keys_keeps_a_key_the_class_declares():
+    """An explainer may legitimately name a parameter the runner also uses."""
+    from xai4tsc.xai.base import ExplainerBase
+    from xai4tsc.xai.explain import EXPLAINERS
+
+    class _TakesSamples(ExplainerBase):
+        explanation_type = "feature_attribution"
+
+        def __init__(self, samples=None):
+            self.samples = samples
+
+        def explain(self, model, exp, device, targets, **kwargs):
+            return None
+
+    EXPLAINERS["takessamples"] = _TakesSamples
+    try:
+        cfg = {"explanation_config": {"default_settings": {"samples": {}}}}
+        stripped = strip_runner_keys(
+            {"method": "TakesSamples", "samples": {"type": "index"}},
+            "TakesSamples",
+            cfg,
+        )
+    finally:
+        EXPLAINERS.pop("takessamples", None)
+
+    assert "samples" in stripped
+    assert "method" not in stripped
+
+
+@pytest.mark.unit
+def test_strip_runner_keys_descends_into_a_wrapper_base():
+    cfg = {"explanation_config": {"default_settings": {"target": None}}}
+    stripped = strip_runner_keys(
+        {
+            "method": "SIGN",
+            "target": "predicted",
+            "seed": 7,
+            "base": {
+                "method": "Integrated_Gradients",
+                "target": "predicted",
+                "n_steps": 8,
+            },
+        },
+        "SIGN",
+        cfg,
+    )
+
+    assert stripped == {
+        "seed": 7,
+        "base": {"method": "Integrated_Gradients", "n_steps": 8},
+    }, "a wrapper pops `method` off its base to build it, so that one stays"
+
+
+@pytest.mark.unit
+def test_a_catch_all_constructor_receives_only_configured_parameters():
+    """
+    What R57 was: `dict_to_args` hands a VAR_KEYWORD constructor the whole entry.
+
+    Without the strip this explainer would be built with `method`, `target` and
+    `samples` as if they had been configured for it.
+    """
+    from xai4tsc.xai.base import ExplainerBase
+    from xai4tsc.xai.explain import EXPLAINERS, build_explainer
+
+    class _KwargsInit(ExplainerBase):
+        explanation_type = "feature_attribution"
+
+        def __init__(self, **kwargs):
+            self.seen = kwargs
+
+        def explain(self, model, exp, device, targets, **kwargs):
+            return None
+
+    EXPLAINERS["kwargsinit"] = _KwargsInit
+    try:
+        entry = {
+            "method": "KwargsInit",
+            "target": "predicted",
+            "samples": {"type": "index"},
+            "save_exp_values": False,
+            "my_option": 7,
+        }
+        cfg = {
+            "explanation_config": {
+                "default_settings": {
+                    "target": None,
+                    "samples": None,
+                    "save_exp_values": None,
+                }
+            }
+        }
+        instance = build_explainer(
+            "KwargsInit", strip_runner_keys(entry, "KwargsInit", cfg)
+        )
+    finally:
+        EXPLAINERS.pop("kwargsinit", None)
+
+    assert instance.seen == {"my_option": 7}

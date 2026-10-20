@@ -634,10 +634,19 @@ class QuantusEvaluator(EvaluatorBase):
         explanation's own record rather than reused, so each evaluation starts from
         a clean instance.
 
+        The explanation's record is authoritative for *how* the explainer is
+        called: its ``explainer_call_params`` are replayed, so a re-explanation is
+        produced the same way as the attribution being scored. Quantus stamps
+        ``device`` into its own ``explain_func_kwargs`` and forwards it, which
+        this consumes from the enclosing scope instead; any other key there is
+        ignored with a warning, because letting it override the record is exactly
+        the divergence the record exists to prevent.
+
         Parameters
         ----------
         explanation : Explanation
-            Supplies the explainer's registry key and its parameters.
+            Supplies the explainer's registry key, its construction parameters and
+            the per-call parameters to replay.
         device : str
             Compute device for the re-explanations.
 
@@ -682,7 +691,23 @@ class QuantusEvaluator(EvaluatorBase):
                 if targets is None
                 else [int(t) for t in np.asarray(targets).ravel()]
             )
-            values = explainer.explain(model, probe, device, class_targets)
+            # `device` is Quantus' own injection and is already bound above; the
+            # explanation's record is what decides the rest of the call.
+            ignored = sorted(set(kwargs) - {"device"})
+            if ignored:
+                logger.warning(
+                    "Ignoring explain_func_kwargs %s: explainer call options are "
+                    "taken from the explanation's record (call_params), so that a "
+                    "re-explanation matches the attribution being scored.",
+                    ignored,
+                )
+            values = explainer.explain(
+                model,
+                probe,
+                device,
+                class_targets,
+                **explanation.explainer_call_params,
+            )
             return QuantusEvaluator.real_attribution(values)
 
         return explain_func

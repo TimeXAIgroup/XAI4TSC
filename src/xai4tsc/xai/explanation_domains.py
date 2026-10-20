@@ -75,7 +75,7 @@ class FrequencyExplainer(WrapperExplainer):
         **kwargs: object,
     ) -> np.ndarray:
         """Run the base method, then map its relevance to the frequency domain."""
-        relevance_time = self._run_base(model, exp, device, targets)
+        relevance_time = self._run_base(model, exp, device, targets, **kwargs)
         relevance_freq = self.transform.forward(
             torch.as_tensor(relevance_time, dtype=torch.float32)
         )
@@ -131,7 +131,7 @@ class TimeFrequencyExplainer(WrapperExplainer):
         **kwargs: object,
     ) -> np.ndarray:
         """Run the base method, then map its relevance to time-frequency space."""
-        relevance_time = self._run_base(model, exp, device, targets)
+        relevance_time = self._run_base(model, exp, device, targets, **kwargs)
         relevance_tf = self.transform.forward(
             torch.as_tensor(relevance_time, dtype=torch.float32)
         )

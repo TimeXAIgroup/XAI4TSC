@@ -163,6 +163,14 @@ documentation) add it to the fitting registry `MODELS`/`EXPLAINERS`/`METRICS`.
   (a `DataType` set), and `explanation_domains` (a `Domain` set).
 - Implement `explain(...)`, returning an array shaped `(n_samples, C, T)` — or
   `(n_classes, n_samples, C, T)` when explaining all classes.
+- Declare options that configure the method as `__init__` arguments; they are
+  recorded on `Explanation.explainer_params` and the explainer is rebuilt from
+  them when a metric re-explains. Options a method takes per call go in
+  `explain`'s `**kwargs`, which callers supply via `generate_explanation`'s
+  `call_params` (a `call_params` block on a runner entry) and which are recorded
+  on `Explanation.explainer_call_params` and replayed on re-explanation. Prefer
+  named parameters: the runner can verify those, while a key reaching a `**kwargs`
+  catch-all cannot be checked and so requires `general.allow_kwargs: true`.
 - Register it: `register_explainer("my_method", MyExplainer)` — keyed lowercase
   in the `EXPLAINERS` registry (`src/xai4tsc/xai/explain.py`).
 

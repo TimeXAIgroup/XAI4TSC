@@ -19,7 +19,13 @@ from xai4tsc.evaluation.quantus_groups import (
     quantus_requires_explain_func,
 )
 from xai4tsc.xai._types import Domain
-from xai4tsc.xai.explain import _get_explanation, build_explainer
+from xai4tsc.xai.base import ExplainerBase
+from xai4tsc.xai.explain import (
+    EXPLAINERS,
+    _get_explanation,
+    build_explainer,
+    register_explainer,
+)
 
 _RE_EXPLAIN = sorted(
     n for n, g in QUANTUS_GROUPS.items() if g is QuantusGroup.RE_EXPLAIN
@@ -107,7 +113,7 @@ def test_closure_reproduces_a_direct_explain(setup):
 
 @pytest.mark.unit
 def test_closure_accepts_the_device_kwarg_quantus_injects(setup):
-    """Quantus writes `device` into explain_func_kwargs and splats it in."""
+    """Quantus writes `device` into explain_func_kwargs and forwards it."""
     model, exp = setup
     f = QuantusEvaluator._make_explain_func(exp, "cpu")
 
@@ -428,3 +434,132 @@ def test_seed_is_offered_only_to_metrics_that_declare_it(setup):
         seed=12345,
     )
     assert accepting is not None
+
+
+# ── per-call options are recorded and replayed ────────────────────────────────
+
+
+class _Scaling(ExplainerBase):
+    """Reads a per-call option, so a dropped one is visible in the output."""
+
+    explanation_type = "feature_attribution"
+
+    def explain(self, model, exp, device, targets, **kwargs):
+        return np.full(exp.data.shape, float(kwargs.get("scale", 1.0)), np.float32)
+
+
+@pytest.fixture
+def scaling():
+    """Register the scaling explainer for the duration of one test."""
+    register_explainer("ScalingXAI", _Scaling)
+    try:
+        yield
+    finally:
+        EXPLAINERS.pop("scalingxai", None)
+
+
+def _scaled_explanation(call_params):
+    """Explain four tiny samples with *call_params*, returning the Explanation."""
+    labels = np.array([0, 1, 0, 1])
+    return _get_explanation(
+        method="ScalingXAI",
+        model=_Tiny().eval(),
+        data=np.zeros((4, 1, 24), dtype=np.float32),
+        labels=labels,
+        encoder=LabelEncoder().fit(labels),
+        params={},
+        call_params=call_params,
+        targets="label",
+        orig_indices=np.arange(4),
+        device="cpu",
+    )
+
+
+@pytest.mark.unit
+def test_call_params_are_recorded(scaling):
+    exp = _scaled_explanation({"scale": 3})
+
+    assert exp.explainer_call_params == {"scale": 3}
+    assert exp.explainer_params == {}
+
+
+@pytest.mark.unit
+def test_call_params_default_to_empty(scaling):
+    assert _scaled_explanation(None).explainer_call_params == {}
+
+
+@pytest.mark.unit
+def test_call_params_reach_the_explainer(scaling):
+    """Without the splat the option would be ignored and every value be 1.0."""
+    exp = _scaled_explanation({"scale": 3})
+
+    assert np.allclose(exp.exp_values, 3.0)
+    assert not np.allclose(exp.exp_values, 1.0), (
+        "the explainer default must differ, or the replay test cannot fail"
+    )
+
+
+@pytest.mark.unit
+def test_closure_replays_the_recorded_call_params(scaling):
+    """
+    The invariant R43 protects: re-explaining reproduces what was scored.
+
+    A closure that dropped the call params would return the explainer's default
+    (1.0) while the attribution being scored holds 3.0, and the metric would
+    report that configuration difference as a property of the explainer.
+    """
+    exp = _scaled_explanation({"scale": 3})
+    model = _Tiny().eval()
+
+    again = QuantusEvaluator._make_explain_func(exp, "cpu")(
+        model, exp.data, np.array([0, 1, 0, 1])
+    )
+
+    assert np.allclose(again, exp.exp_values)
+
+
+@pytest.mark.unit
+def test_closure_replays_call_params_alongside_quantus_device(scaling):
+    """`device` is already a positional of explain(); forwarding it would raise."""
+    exp = _scaled_explanation({"scale": 3})
+
+    again = QuantusEvaluator._make_explain_func(exp, "cpu")(
+        _Tiny().eval(), exp.data, np.array([0, 1, 0, 1]), device="cpu"
+    )
+
+    assert np.allclose(again, exp.exp_values)
+
+
+@pytest.mark.unit
+def test_closure_warns_on_other_explain_func_kwargs(scaling, caplog):
+    """A user's own explain_func_kwargs must not quietly override the record."""
+    exp = _scaled_explanation({"scale": 3})
+
+    with caplog.at_level("WARNING", logger="xai4tsc.evaluation.base"):
+        again = QuantusEvaluator._make_explain_func(exp, "cpu")(
+            _Tiny().eval(), exp.data, np.array([0, 1, 0, 1]), scale=99
+        )
+
+    assert "scale" in caplog.text
+    assert np.allclose(again, 3.0), "the record wins over explain_func_kwargs"
+
+
+@pytest.mark.unit
+def test_multi_target_forwards_call_params_on_every_class(scaling):
+    """The targets="all" loop calls explain() once per class; each must get them."""
+    labels = np.array([0, 1, 0, 1])
+    exp = _get_explanation(
+        method="ScalingXAI",
+        model=_Tiny().eval(),
+        data=np.zeros((4, 1, 24), dtype=np.float32),
+        labels=labels,
+        encoder=LabelEncoder().fit(labels),
+        params={},
+        call_params={"scale": 3},
+        targets="all",
+        orig_indices=np.arange(4),
+        device="cpu",
+    )
+
+    assert exp.exp_values.shape == (2, 4, 1, 24)
+    assert np.allclose(exp.exp_values, 3.0)

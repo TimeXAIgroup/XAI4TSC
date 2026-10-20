@@ -124,6 +124,38 @@ tuple `("points",)` instead of `None`.
 
 ### Added
 
+- **Per-call explainer options, recorded and replayed.** `ExplainerBase.explain`
+  had declared a `**kwargs` bag documented as "additional explainer-specific
+  options" since the first release, but nothing could ever reach it: no call site
+  passed one, `generate_explanation` had no parameter to carry one, and the
+  runner's entry validation accepted only constructor arguments. A contributor
+  who declared a per-call option could therefore never receive a value for it.
+  `generate_explanation` now takes `call_params`, an explainer entry takes a
+  nested `call_params` block, wrapper explainers forward them to the method they
+  wrap, and `Explanation` records them in the new `explainer_call_params` field.
+  The re-explaining metrics replay that record, so an attribution is re-computed
+  exactly as it was produced: without this, the first use of a call option would
+  have made MPRT, Smooth MPRT, Random Logit and the rest silently compare two
+  differently-configured runs of the same explainer and report the difference as
+  a property of the method. Construction options stay where they are, at an
+  entry's top level and in `explainer_params`. Nothing shipped reads a call
+  option, so no existing result moves.
+- **`general.allow_kwargs`, and parameter checking for every component.** A
+  component whose signature ends in `**kwargs` accepts any key, so no inspection
+  can say whether one is read: a misspelled explainer option was swallowed in
+  silence and the attribution computed with a default, while a misspelled Quantus
+  parameter raised inside the dataset loop after the model had trained. Such a key
+  is now reported before the run starts, and `general.allow_kwargs: true` passes
+  them through unchecked for configs that need to reach a catch-all. The check is
+  keyed on **named** parameters rather than the presence of `**kwargs`, because
+  every Quantus metric declares both, and it reaches blocks that had no validation
+  at all: `init_params` on a model or synthetic dataset, and
+  `metric_class_params` / `metric_call_params`, the last two checked against the
+  Quantus class rather than the adapter that wraps it. Keys inherited from a
+  section's `default_settings` are not blamed on the entries they do not apply to,
+  which is how `softmax` reaches every metric although only the perturbation ones
+  read it. Every shipped config passes with the flag at its default, and a test
+  holds that.
 - **The runner is executable by its package name.** `python -m experiment_runner`
   failed with `No module named experiment_runner.__main__`, so the only working
   form was the longer `python -m experiment_runner.main`, which is what every
@@ -160,6 +192,23 @@ tuple `("points",)` instead of `None`.
 
 ### Fixed
 
+- **The runner's own entry keys no longer reach an explainer's constructor.** An
+  explainer takes its parameters at the entry's top level, so the dict handed to
+  `build_explainer` is the whole resolved entry. `dict_to_args` filtered the
+  runner's keys out against a named signature but returns the dict unchanged for a
+  constructor declaring `**kwargs`, which then received `method`, `target`,
+  `samples`, `visualization_type`, `save_exp_values` and the derived seed as if
+  they had been configured for it. Latent, since no built-in explainer declares a
+  catch-all constructor, but the new `allow_kwargs` would otherwise have made it
+  arrive silently where an unknown-key warning used to hint at it. The keys the
+  runner owns are now removed first, derived from the identity key, the structural
+  extras and the resolved `default_settings` rather than listed; a key the class
+  itself names is kept, and a wrapper's nested `base` keeps its `method`, which
+  `WrapperExplainer` pops to build the method it wraps.
+  `Explanation.explainer_params` consequently records the parameters the explainer
+  was built with rather than the entry it came from, which is what it always
+  documented. No score moves: the shipped explainers all declare named signatures,
+  so those keys were already being dropped.
 - **Three leftovers from the `bubbles` -> `points` rename.**
   `generate_explanation` still defaulted `visualization_type` to `["bubbles"]`
   while its own docstring, `plot_exp`, `_get_explanation` and the runner all said

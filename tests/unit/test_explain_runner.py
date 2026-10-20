@@ -221,3 +221,46 @@ def test_save_path_overrides_config_base(tmp_path, monkeypatch):
     assert (
         calls["save_path"] == alt / "explanations" / "explanations_integrated_gradients"
     )
+
+
+# ── the runner's own entry keys are not construction parameters ───────────────
+
+
+@pytest.mark.unit
+def test_adapter_strips_its_own_keys_before_building_the_explainer(
+    tmp_path, monkeypatch
+):
+    """
+    Keep the runner's own keys out of the explainer's constructor.
+
+    The entry doubles as the construction params, so they must come off:
+    `dict_to_args` drops them for a named signature but hands the whole dict to a
+    constructor declaring `**kwargs`.
+    """
+    calls = _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
+    cfg = _explainer_config("index")
+    cfg["samples"]["indices"] = [0]
+
+    runner_explain._generate_explanation(
+        model=object(),
+        data=np.zeros((4, 1, 4), dtype=np.float32),
+        labels=np.array([0, 1, 0, 1]),
+        encoder=_OkEncoder(),
+        config={
+            "results_rel_path": tmp_path,
+            "explanation_config": {
+                "default_settings": {
+                    "target": None,
+                    "samples": None,
+                    "visualization_type": None,
+                    "save_exp_values": None,
+                }
+            },
+        },
+        explainer_config=cfg,
+        seed=11,
+    )
+
+    assert calls["params"] == {"seed": 11}, (
+        "only real constructor parameters may reach the explainer"
+    )

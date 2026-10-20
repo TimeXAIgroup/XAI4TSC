@@ -50,6 +50,15 @@ general:
                             #   user-supplied source files (class_name + class_path
                             #   on a model/explainer/metric entry). Executes arbitrary
                             #   Python; opt in explicitly. See the entries below.
+  allow_kwargs: false       # allow passing parameters the runner cannot verify. A
+                            #   component whose signature ends in **kwargs accepts any
+                            #   key, so no inspection can say whether one is read: a
+                            #   misspelled name is then either swallowed in silence
+                            #   or raised mid-run. While false, such a key is
+                            #   reported before the run starts; set it true to pass
+                            #   them through unchecked and accept that a typo is
+                            #   invisible. Keys matching a named parameter are always
+                            #   verified and unaffected by this flag.
 
 data_config:
   default_settings:
@@ -272,6 +281,11 @@ explanation_config:
                             # Each method's parameters are listed below with the default the
                             # class itself uses; give only what you want to change. Wrapper
                             # methods nest their base method under 'base'.
+                            # An entry's top-level keys are the explainer's constructor
+                            # arguments. Options a method takes per call instead go in a
+                            # nested 'call_params' block: these are passed to explain() and
+                            # recorded on the explanation, so the metrics that re-explain
+                            # reproduce the same call. No built-in explainer reads one.
     - method: Guided_Backpropagation
     - method: Deconvolution
     - method: Integrated_Gradients

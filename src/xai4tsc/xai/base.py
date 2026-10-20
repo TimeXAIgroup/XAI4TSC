@@ -97,7 +97,12 @@ class ExplainerBase(ABC):
         targets :
             Target class indices to explain, or ``None`` for all classes.
         **kwargs :
-            Additional explainer-specific options.
+            Additional explainer-specific options, supplied per call.
+            :func:`~xai4tsc.xai.explain.generate_explanation` takes them as
+            ``call_params``; they are recorded on
+            :attr:`~xai4tsc.Explanation.explainer_call_params` so the
+            re-explaining metrics replay the same call. Options that configure the
+            method rather than one call belong in ``__init__`` instead.
 
         Returns
         -------
@@ -234,6 +239,7 @@ class WrapperExplainer(ExplainerBase, ABC):
         exp: Explanation,
         device: str | torch.device,
         targets: list | None,
+        **kwargs: object,
     ) -> np.ndarray:
         """
         Run the wrapped base explainer and return its relevance array.
@@ -248,10 +254,14 @@ class WrapperExplainer(ExplainerBase, ABC):
             Compute device.
         targets : list | None
             Target class indices, or ``None`` for all classes.
+        **kwargs :
+            Per-call options to forward to the base method. A wrapper passes on
+            whatever its own :meth:`explain` was given, so one recorded
+            ``call_params`` reaches the method that consumes it.
 
         Returns
         -------
         np.ndarray
             The base method's explanation values.
         """
-        return self._base.explain(model, exp, device, targets)
+        return self._base.explain(model, exp, device, targets, **kwargs)

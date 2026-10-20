@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -37,6 +37,12 @@ class Explanation:
         rebuild an equivalently configured explainer via
         :func:`~xai4tsc.xai.explain.build_explainer`, which is what the
         re-explaining evaluation metrics need. Empty when none were given.
+    explainer_call_params : dict
+        Per-call options ``explain()`` was called with, beside the construction
+        options in ``explainer_params``. Recorded so the re-explaining metrics
+        replay the same call: an attribution scored with one set of call options
+        and re-computed with another would make the metric report a configuration
+        difference as a property of the explainer. Empty when none were given.
     explanation_type : str
         Category of explanation, e.g. ``"feature_attribution"``.
     exp_values : np.ndarray
@@ -98,6 +104,7 @@ class Explanation:
     transform: DomainTransform | None = None
     metadata: list | None = None
     explained_targets: np.ndarray | None = None
+    explainer_call_params: dict = field(default_factory=dict)
 
 
 # Rank of a *single-target* ``exp_values`` array per explanation domain. Frequency

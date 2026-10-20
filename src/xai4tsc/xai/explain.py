@@ -33,6 +33,7 @@ def generate_explanation(
     labels: np.ndarray | None = None,
     targets: str = "predicted",
     params: dict | None = None,
+    call_params: dict | None = None,
     encoder: OneHotEncoder | LabelEncoder | OrdinalEncoder | None = None,
     indices: list | None = None,
     n_samples: int = 5,
@@ -62,6 +63,11 @@ def generate_explanation(
         (ground truth), or ``"all"`` (one explanation per class).
     params : dict, optional
         Parameters for the explanation method, by default None
+    call_params : dict, optional
+        Per-call options given into the explainer's ``explain()`` as keyword
+        arguments, by default None. Construction options go in *params*; use this
+        for options an explainer takes per call. Recorded on the returned
+        explanation so the re-explaining metrics replay the same call.
     encoder : OneHotEncoder | LabelEncoder | OrdinalEncoder, optional
         Encoder used to encode the labels, by default None
     indices : list, optional
@@ -127,6 +133,7 @@ def generate_explanation(
         labels=labels[indices],
         encoder=encoder,
         params=params,
+        call_params=call_params,
         targets=targets,
         device=device,
         orig_indices=indices,
@@ -144,6 +151,7 @@ def _get_explanation(
     labels: np.ndarray,
     encoder: OneHotEncoder | LabelEncoder | OrdinalEncoder,
     params: dict,
+    call_params: dict | None = None,
     targets: str = "predicted",
     device: str = "cpu",
     orig_indices: np.ndarray | None = None,
@@ -168,6 +176,11 @@ def _get_explanation(
         Encoder for the labels
     params : dict
         Parameters for the explanation method
+    call_params : dict, optional
+        Per-call options given into the explainer's ``explain()`` as keyword
+        arguments, by default None. Construction options go in *params*; use this
+        for options an explainer takes per call. Recorded on the returned
+        explanation so the re-explaining metrics replay the same call.
     targets : str, optional
         Whether to explain predictions for all classes or only the
         predicted class, by default "predicted"
@@ -230,6 +243,7 @@ def _get_explanation(
     exp = Explanation(
         explainer=explainer_key,
         explainer_params=dict(params or {}),
+        explainer_call_params=dict(call_params or {}),
         explanation_type=explainer_instance.explanation_type,
         exp_values=None,
         data=data,
@@ -252,7 +266,7 @@ def _get_explanation(
         exp_values = None
         for ind in range(len(classes)):
             relevance = explainer_instance.explain(
-                model, exp, device, [ind] * len(data)
+                model, exp, device, [ind] * len(data), **exp.explainer_call_params
             )
             if exp_values is None:
                 exp_values = np.empty(
@@ -271,12 +285,16 @@ def _get_explanation(
                 else label_arr.ravel()
             )
         method_targets = label_arr.astype(int).tolist()
-        exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
+        exp.exp_values = explainer_instance.explain(
+            model, exp, device, method_targets, **exp.explainer_call_params
+        )
         exp.explained_targets = np.asarray(method_targets, dtype=int)
     else:
         # Explain the model's predicted class for each sample.
         method_targets = predict_probs(model, exp.data).argmax(axis=1).tolist()
-        exp.exp_values = explainer_instance.explain(model, exp, device, method_targets)
+        exp.exp_values = explainer_instance.explain(
+            model, exp, device, method_targets, **exp.explainer_call_params
+        )
         exp.explained_targets = np.asarray(method_targets, dtype=int)
 
     # Save results as specified

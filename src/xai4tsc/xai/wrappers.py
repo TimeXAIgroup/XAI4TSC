@@ -87,6 +87,6 @@ class SignExplainer(WrapperExplainer):
         **kwargs: object,
     ) -> np.ndarray:
         """Run the base method, then weight it by ``sign(input - mu)``."""
-        relevance = self._run_base(model, exp, device, targets)
+        relevance = self._run_base(model, exp, device, targets, **kwargs)
         sign = np.where(exp.data < self.mu, -1.0, 1.0).astype(relevance.dtype)
         return relevance * sign

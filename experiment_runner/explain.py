@@ -18,6 +18,8 @@ import numpy as np
 from xai4tsc.data.base import decode_labels
 from xai4tsc.xai.explain import generate_explanation
 
+from .config import strip_runner_keys
+
 if TYPE_CHECKING:
     from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
@@ -195,9 +197,30 @@ def _generate_explanation(
     -------
     Explanation
         An object of the Explanation dataclass.
+
+    Notes
+    -----
+    An entry's top-level keys are the explainer's construction parameters; a
+    nested ``call_params`` block holds per-call options, which are passed to
+    ``explain()`` and recorded on ``Explanation.explainer_call_params`` so the
+    re-explaining metrics replay the same call. The keys the runner reads itself
+    are removed first (:func:`~experiment_runner.config.strip_runner_keys`), so
+    they cannot arrive as construction parameters.
     """
     # Resolve runtime-only params into a copy; never mutate explainer_config.
     params = _inject_seed(dict(explainer_config), seed)
+    # Popped, not read: `params` is recorded verbatim as `Explanation`
+    # `explainer_params` and filtered against the __init__ at rebuild time, and
+    # `dict_to_args` passes the whole dict to a constructor declaring **kwargs - so
+    # a `call_params` left in would arrive as a construction argument.
+    call_params = params.pop("call_params", None)
+    # A non-mapping is reported by the config check; coerce rather than hand it to
+    # `dict()`, which would raise an error naming neither the key nor the entry.
+    call_params = call_params if isinstance(call_params, dict) else {}
+    # The entry doubles as the construction params, so the keys the runner reads
+    # itself have to come off before the explainer sees them: `dict_to_args` drops
+    # them for a named signature but hands the lot to a `**kwargs` constructor.
+    params = strip_runner_keys(params, explainer_config["method"], config)
     if "background_data" in explainer_config:
         params["background_data"] = _resolve_background_data(
             explainer_config["background_data"], splits
@@ -221,6 +244,7 @@ def _generate_explanation(
             labels=labels,
             targets=explainer_config["target"],
             params=params,
+            call_params=call_params,
             encoder=encoder,
             indices=explainer_config["samples"]["indices"],
             prng=prng,
@@ -238,6 +262,7 @@ def _generate_explanation(
             labels=labels,
             targets=explainer_config["target"],
             params=params,
+            call_params=call_params,
             encoder=encoder,
             indices=None,
             n_samples=explainer_config["samples"]["count"],
@@ -256,6 +281,7 @@ def _generate_explanation(
             labels=labels,
             targets=explainer_config["target"],
             params=params,
+            call_params=call_params,
             encoder=encoder,
             indices=list(np.arange(len(data)).tolist()),
             prng=prng,

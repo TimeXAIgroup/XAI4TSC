@@ -31,10 +31,8 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     # (section, key within default_settings) -> (owning callable, parameter name)
     ("data_config", "train_split"): (DatasetBase.split, "train_split"),
     ("data_config", "val_split"): (DatasetBase.split, "val_split"),
-    ("data_config", "encode"): (DatasetBase.split, "encode"),
     ("data_config", "stratify"): (DatasetBase.split, "stratify"),
     ("data_config", "allow_imputation"): (DatasetBase.split, "impute_missing"),
-    ("data_config", "classes"): (DatasetBase.split, "class_order"),
     ("data_config", "max_samples"): (DatasetBase.__init__, "max_samples"),
     ("data_config", "sample_strategy"): (DatasetBase.__init__, "sample_strategy"),
     ("data_config", "max_series_length"): (DatasetBase.__init__, "max_series_length"),
@@ -76,6 +74,10 @@ _RUNNER_OWNED: frozenset[tuple[str, str]] = frozenset(
         ("data_config", "skip_metrics"),
         ("data_config", "path"),
         ("data_config", "is_presplit"),
+        # The encoder is an object in the package signature, so there is no
+        # parameter default to read: the string is the runner's own, and it also
+        # names the split-cache folder.
+        ("data_config", "encode"),
         ("explanation_config", "save_exp_values"),
         ("train_config", "train"),
         # Which of `indices` / `count` applies is a runner dispatch, and the

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.preprocessing import LabelEncoder
 
 from xai4tsc.data.datasets import LocalDataset, UcrUeaDataset
 from xai4tsc.models.models import load_model
@@ -66,14 +67,14 @@ def split_dataset(ucr_dataset_path):
     split_dir = split_cache / "splits"
     if split_dir.exists():
         logger.info("Loading cached splits from %s", split_dir)
-        splits, encoder = ds.load_saved_splits(split_dir, encode="label")
+        splits, encoder = ds.load_saved_splits(split_dir, encoder=LabelEncoder())
     else:
         logger.info("Splitting GunPoint and caching to %s", split_cache)
         splits, encoder = ds.split(
             train_split=0.8,
             val_split=0.1,
             random_state=42,
-            encode="label",
+            encoder=LabelEncoder(),
         )
         ds.save_splits(split_cache)
 

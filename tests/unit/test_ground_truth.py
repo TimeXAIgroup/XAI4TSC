@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 
+from xai4tsc.data import MultiHotLabelEncoder
 from xai4tsc.evaluation._ground_truth import (
     GroundTruthRegion,
     coefficient_mask,
@@ -27,7 +28,9 @@ def published_test_split():
     from xai4tsc.data.datasets import SynthMultilabelFreqDataset
 
     ds = SynthMultilabelFreqDataset()
-    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    splits, encoder = ds.split(
+        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+    )
     return ds, splits[1], encoder
 
 

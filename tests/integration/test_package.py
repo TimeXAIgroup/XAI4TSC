@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import torch
+from sklearn.preprocessing import LabelEncoder
 
 import xai4tsc
 from xai4tsc.data.datasets import LocalDataset
@@ -17,12 +18,14 @@ def test_dataset_split_and_reload(ucr_dataset_path, tmp_path):
     """Split → save → reload produces numerically identical arrays."""
     ds = LocalDataset(ucr_dataset_path, name="GunPoint")
     splits_orig, _ = ds.split(
-        train_split=0.8, val_split=0.1, random_state=42, encode="label"
+        train_split=0.8, val_split=0.1, random_state=42, encoder=LabelEncoder()
     )
     ds.save_splits(tmp_path)
 
     ds2 = LocalDataset(ucr_dataset_path, name="GunPoint")
-    splits_loaded, _ = ds2.load_saved_splits(tmp_path / "splits", encode="label")
+    splits_loaded, _ = ds2.load_saved_splits(
+        tmp_path / "splits", encoder=LabelEncoder()
+    )
 
     np.testing.assert_array_equal(splits_orig[0][0], splits_loaded[0][0])
     np.testing.assert_array_equal(splits_orig[1][0], splits_loaded[1][0])

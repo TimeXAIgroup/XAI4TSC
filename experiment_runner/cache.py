@@ -36,7 +36,7 @@ two independent sub-trees:
     tr…        Training fraction (e.g. ``tr0.8``)
     v…         Validation fraction (e.g. ``v0.1``)
     s…         Integer random seed used for the split (e.g. ``s42``)
-    encode     Label encoding scheme: ``label``, ``onehot``, ``ordinal``
+    encode     Label encoding scheme: ``label``, ``multihot``
     _p         Suffix: variable-length series were zero-padded
     _i         Suffix: NaN values were imputed before splitting
     _s{N}{c}   Suffix: dataset was subsampled to N samples; c = first char

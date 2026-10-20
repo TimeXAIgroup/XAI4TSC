@@ -1,5 +1,6 @@
 """``DatasetBase`` ABC: splitting, label encoding, saving, loading pre-split data."""
 
+import inspect
 import logging
 import math
 from abc import ABC, abstractmethod
@@ -9,7 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
+from sklearn.preprocessing import LabelEncoder
 
 from .._domains import Domain
 from .._random import DEFAULT_SEED, resolve_rng
@@ -139,63 +140,61 @@ class MultiHotLabelEncoder:
         return self.classes_[np.asarray(indices, dtype=np.int64)]
 
 
-def _make_encoder(
-    encode: str,
-    class_order: list | None = None,
-) -> LabelEncoder | OneHotEncoder | OrdinalEncoder | MultiHotLabelEncoder:
+def _resolve_encoder(encoder: object | None) -> object:
     """
-    Return a fresh encoder for the given *encode* key.
-
-    The encoders are stock scikit-learn classes, configured so their output can be
-    reduced to the pipeline's target contract (1-D ``int64`` class indices) by
-    :func:`_class_index_view`, and so their class names stay recoverable by
-    :func:`class_names`.
+    Return the label encoder to use, defaulting to scikit-learn's.
 
     Parameters
     ----------
-    encode : str
-        One of ``"label"``, ``"ordinal"``, ``"onehot"`` or ``"multihot"``.
-        Any other value falls back to ``"label"``.
-    class_order : list, optional
-        Explicit class order for ``encode="ordinal"``. Without it both
-        ``LabelEncoder`` and ``OrdinalEncoder`` order classes lexicographically,
-        which is wrong for ordered string labels (``low`` / ``medium`` / ``high``
-        becomes ``high < low < medium``). Numeric labels need no order: their
-        sorted order is already the meaningful one, and scikit-learn rejects any
-        other.
+    encoder : object or None
+        A target encoder supplied by the caller, or ``None`` for the default.
 
     Returns
     -------
-    LabelEncoder or OneHotEncoder or OrdinalEncoder or MultiHotLabelEncoder
-        An unfitted encoder.
+    object
+        *encoder* itself, or a fresh :class:`~sklearn.preprocessing.LabelEncoder`.
     """
-    if encode == "onehot":
-        # Dense, so the target never becomes a scipy sparse matrix.
-        return OneHotEncoder(sparse_output=False)
-    if encode == "ordinal":
-        categories = [list(class_order)] if class_order else "auto"
-        return OrdinalEncoder(categories=categories)
-    if encode == "multihot":
-        return MultiHotLabelEncoder()
-    return LabelEncoder()
+    if encoder is None:
+        return LabelEncoder()
+    _reject_feature_encoder(encoder)
+    return encoder
 
 
-def _fitted_classes(encoder: object) -> np.ndarray | None:
+def _reject_feature_encoder(encoder: object) -> None:
     """
-    Return a fitted encoder's classes, whichever attribute holds them.
+    Raise when a scikit-learn *feature* encoder was passed as a label encoder.
 
-    The scikit-learn target encoders (``LabelEncoder``) expose ``classes_``, a
-    single array, while the feature encoders (``OneHotEncoder``,
-    ``OrdinalEncoder``) expose ``categories_``, a list with one array per input
-    column. Labels are always a single column, so the first entry is the one.
+    Labels are a target, so the encoder belongs to scikit-learn's target family
+    (``LabelEncoder``, ``LabelBinarizer``, ``MultiLabelBinarizer``), which takes
+    labels as given and exposes ``classes_``. A feature encoder encodes columns of
+    ``X``: in this slot it misreads rather than fails, so it is refused here.
+
+    Parameters
+    ----------
+    encoder : object
+        The encoder a caller supplied.
+
+    Raises
+    ------
+    TypeError
+        If *encoder* is a scikit-learn feature encoder.
     """
-    classes = getattr(encoder, "classes_", None)
-    if classes is not None:
-        return np.asarray(classes)
-    categories = getattr(encoder, "categories_", None)
-    if categories is not None and len(categories):
-        return np.asarray(categories[0])
-    return None
+    fit = getattr(encoder, "fit", None)
+    first = ""
+    if fit is not None:
+        try:
+            params = list(inspect.signature(fit).parameters)
+        except (TypeError, ValueError):  # a callable without an inspectable signature
+            params = []
+        first = params[0] if params else ""
+    if first == "X" or hasattr(encoder, "categories_"):
+        raise TypeError(
+            f"{type(encoder).__name__} is a scikit-learn feature encoder (it encodes "
+            "columns of X and exposes 'categories_'), but labels are a target. Pass a "
+            "target encoder instead: LabelEncoder for class indices, LabelBinarizer "
+            "or MultiLabelBinarizer for one column per output, or "
+            "MultiHotLabelEncoder for the label-powerset reduction."
+        )
 
 
 def class_names(encoder: object) -> list[str]:
@@ -217,11 +216,11 @@ def class_names(encoder: object) -> list[str]:
 
 def decode_labels(encoder: object, indices: np.ndarray) -> np.ndarray:
     """
-    Map 1-D class indices back to their original label values.
+    Map class indices back to their original label values.
 
     The pipeline carries ``int64`` class indices, so this is the inverse every
-    consumer needs. It is not simply ``encoder.inverse_transform``: that expects
-    the encoder's own output, which for ``OneHotEncoder`` is an ``(n, K)`` matrix
+    consumer needs. It indexes ``classes_`` directly rather than calling
+    ``inverse_transform``, which for a binarizer expects its own indicator matrix
     rather than indices.
 
     Parameters
@@ -234,114 +233,100 @@ def decode_labels(encoder: object, indices: np.ndarray) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Original label values, one per index. Multi-hot encoders return 2-D rows.
+        Original label values, one per index. A powerset encoder returns 2-D rows.
     """
     idx = np.asarray(indices, dtype=np.int64)
-    if isinstance(encoder, MultiHotLabelEncoder):
-        return encoder.inverse_transform(idx)
-    classes = _fitted_classes(encoder)
+    classes = getattr(encoder, "classes_", None)
     if classes is not None:
-        # Index straight into the classes rather than calling inverse_transform,
-        # which for OneHotEncoder expects its own (n, K) matrix, not indices.
-        return classes[idx]
+        return np.asarray(classes)[idx]
     if hasattr(encoder, "inverse_transform"):
         # A custom encoder that exposes no classes but can still decode.
         return np.asarray(encoder.inverse_transform(idx))
     return idx
 
 
-def _warn_unordered_ordinal(
-    encode: str, class_order: list | None, encoder: object
-) -> None:
-    """
-    Warn when ``encode="ordinal"`` was used on string labels with no order given.
-
-    Ordinal encoding exists to preserve a meaningful class order, but without an
-    explicit order scikit-learn falls back to lexicographic sorting, which for
-    labels like ``low`` / ``medium`` / ``high`` is not the intended order. Numeric
-    labels are exempt: their sorted order is the meaningful one.
-    """
-    if encode != "ordinal" or class_order:
-        return
-    classes = _fitted_classes(encoder)
-    if classes is None or np.issubdtype(classes.dtype, np.number):
-        return
-    logger.warning(
-        "encode='ordinal' on non-numeric labels without 'class_order': classes are "
-        "ordered lexicographically (%s), which is probably not the intended order. "
-        "Set 'class_order' to declare it.",
-        _class_name_map(encoder),
-    )
-
-
 def _class_name_map(encoder: object) -> dict[int, str]:
     """Return an ``{index: name}`` map from a fitted encoder."""
-    classes = _fitted_classes(encoder)
+    classes = getattr(encoder, "classes_", None)
     if classes is None:
         return {}
     names = []
-    for cls in classes:
+    for cls in np.asarray(classes):
         arr = np.asarray(cls)
         names.append("-".join(map(str, arr.tolist())) if arr.ndim else str(cls))
     return dict(enumerate(names))
 
 
-def _class_index_view(encoded: np.ndarray) -> np.ndarray:
+def _encoded_targets(encoder: object, labels: np.ndarray) -> np.ndarray:
     """
-    Collapse encoded labels to a 1-D array of integer class indices.
+    Transform *labels* with a fitted *encoder* and check the target contract.
 
-    ``train_test_split(stratify=...)`` needs 1-D class labels, but one-hot and
-    ordinal encoders produce 2-D arrays (one-hot may even be a scipy sparse
-    matrix).  This maps any encoding back to class indices so stratification
-    works regardless of *encode*.
+    1-D means one class index per sample (what :class:`~torch.nn.CrossEntropyLoss`
+    consumes), 2-D means one column per model output. The dtype is checked rather
+    than cast, because casting a float output would silently truncate it.
+
+    Parameters
+    ----------
+    encoder : object
+        A fitted target encoder.
+    labels : np.ndarray
+        Labels in the form the encoder was fitted on.
+
+    Returns
+    -------
+    np.ndarray
+        The encoded targets as ``int64``, 1-D or 2-D.
+
+    Raises
+    ------
+    ValueError
+        If the encoder returns a non-integer dtype, or more than two dimensions.
     """
-    if hasattr(encoded, "toarray"):  # scipy sparse one-hot
-        return np.asarray(encoded.argmax(axis=1)).ravel()
-    arr = np.asarray(encoded)
-    if arr.ndim == 1:
-        return arr
-    if arr.shape[1] > 1:  # dense one-hot
-        return arr.argmax(axis=1)
-    return arr.ravel()  # ordinal (n, 1)
+    targets = np.asarray(encoder.transform(labels))
+    if targets.ndim > 2:
+        raise ValueError(
+            f"{type(encoder).__name__}.transform returned a {targets.ndim}-D array; "
+            "labels must encode to class indices (1-D) or one column per output (2-D)."
+        )
+    if not np.issubdtype(targets.dtype, np.integer):
+        raise ValueError(
+            f"{type(encoder).__name__}.transform returned dtype {targets.dtype}; "
+            "labels must encode to integer class codes. A float output is not cast "
+            "here because truncating it would change the labels silently."
+        )
+    return targets.astype(np.int64, copy=False)
 
 
-def _fit_label_encoder(
-    labels: np.ndarray,
-    encode: str = "label",
-    class_order: list | None = None,
-) -> tuple:
+def _fit_label_encoder(labels: np.ndarray, encoder: object | None = None) -> tuple:
     """
-    Fit the encoder for *encode* and return it with the encoded class indices.
+    Fit *encoder* on *labels* and return it with the encoded targets.
 
     Shared by :func:`_split_dataset` and by datasets that compute their own
     partition (see :meth:`~xai4tsc.data.base.DatasetBase.split` overrides), so the
-    encoder choice, the 1-D ``int64`` target contract and the class-name log line
-    are written once.
+    default encoder, the target contract and the class-name log line are written
+    once.
 
     Parameters
     ----------
     labels : np.ndarray
-        Raw labels: scalars, or multi-hot rows for ``encode="multihot"``.
-    encode : str
-        Label encoding scheme.
-    class_order : list or None
-        Explicit class order for the ordinal encoder.
+        Raw labels in the form the encoder consumes: scalars for
+        :class:`~sklearn.preprocessing.LabelEncoder`, multi-hot rows for
+        :class:`MultiHotLabelEncoder`.
+    encoder : object or None
+        An sklearn-style target encoder. ``None`` uses
+        :class:`~sklearn.preprocessing.LabelEncoder`.
 
     Returns
     -------
     tuple[object, np.ndarray]
-        The fitted encoder and the labels as 1-D ``int64`` class indices.
+        The fitted encoder and the encoded targets (1-D class indices, or 2-D with
+        one column per model output).
     """
-    encoder = _make_encoder(encode, class_order=class_order)
-    # OneHot/Ordinal need a 2-D column; LabelEncoder (1-D) and MultiHotLabelEncoder
-    # (already 2-D multi-hot rows) consume their input shape directly.
-    if isinstance(encoder, (OneHotEncoder, OrdinalEncoder)):
-        labels = np.array(labels).reshape(-1, 1)
+    encoder = _resolve_encoder(encoder)
     encoder.fit(labels)
-    indices = _class_index_view(encoder.transform(labels)).astype(np.int64)
-    _warn_unordered_ordinal(encode, class_order, encoder)
+    targets = _encoded_targets(encoder, labels)
     logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
-    return encoder, indices
+    return encoder, targets
 
 
 def _assemble_splits(
@@ -364,7 +349,7 @@ def _assemble_splits(
     data : np.ndarray
         Full ``(B, C, T)`` array.
     labels : np.ndarray
-        Full label array, already encoded to 1-D ``int64`` class indices.
+        Full label array, already encoded by :func:`_fit_label_encoder`.
     metadata : pd.DataFrame or None
         Per-sample metadata, one row per sample, index-aligned with *data*.
     index_sets : list of np.ndarray
@@ -383,7 +368,7 @@ def _assemble_splits(
         splits.append(
             (
                 np.asarray(data[idx], dtype=np.float32),
-                np.asarray(labels)[idx].astype(np.int64),
+                np.asarray(labels)[idx],
                 meta,
             )
         )
@@ -397,12 +382,11 @@ def _split_dataset(
     train_split: float = 0.8,
     val_split: float = 0.1,
     random_state: int | None = DEFAULT_SEED,
-    encode: str = "label",
+    encoder: object | None = None,
     stratify: bool = True,
-    class_order: list | None = None,
 ) -> tuple:
     """Split data into train / test / (optional) val with label encoding."""
-    encoder, labels = _fit_label_encoder(labels, encode, class_order)
+    encoder, labels = _fit_label_encoder(labels, encoder)
 
     val_set = not math.isclose(val_split, 0.0)
     # Fraction held out of training (validation + test combined).
@@ -413,7 +397,7 @@ def _split_dataset(
     else:
         all_data = data
 
-    strat_full = _class_index_view(labels) if stratify else None
+    strat_full = labels if stratify else None
     try:
         x_train, x_test, y_train, y_test = train_test_split(
             all_data,
@@ -436,7 +420,7 @@ def _split_dataset(
         # Within the holdout, the test portion is (1 - train - val) / (1 - train);
         # the remainder becomes the validation set.
         rel_test = (1 - train_split - val_split) / (1 - train_split)
-        strat_holdout = _class_index_view(y_test) if stratify else None
+        strat_holdout = y_test if stratify else None
         try:
             x_val, x_test, y_val, y_test = train_test_split(
                 x_test,
@@ -701,11 +685,10 @@ class DatasetBase(ABC):
         train_split: float = 0.8,
         val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
-        encode: str = "label",
+        encoder: object | None = None,
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
         stratify: bool = True,
-        class_order: list | None = None,
         use_predefined_splits: bool = False,
     ) -> tuple:
         """
@@ -721,9 +704,15 @@ class DatasetBase(ABC):
             Seed for reproducible splits, :data:`~xai4tsc.DEFAULT_SEED` by
             default.  ``None`` draws from OS entropy and is not reproducible.
             Ignored when *rng* is provided.
-        encode : str
-            Label encoding scheme: ``"label"`` (default), ``"onehot"``, or
-            ``"ordinal"``.
+        encoder : object, optional
+            An sklearn-style target encoder (``fit`` / ``transform`` /
+            ``classes_``), used to turn the stored labels into model targets and
+            retained so class indices can be mapped back to names. ``None``
+            (default) uses :class:`~sklearn.preprocessing.LabelEncoder`. The
+            encoded rank is the formulation: 1-D gives one class index per sample,
+            2-D gives one column per model output. scikit-learn *feature*
+            encoders (``OneHotEncoder``, ``OrdinalEncoder``) are rejected - see
+            :func:`_reject_feature_encoder`.
         impute_missing : bool
             If ``True``, NaN values are replaced with the per-channel mean
             before splitting.  If ``False`` (default), a :class:`ValueError`
@@ -738,10 +727,6 @@ class DatasetBase(ABC):
             every class is proportionally represented in each split.  Falls back
             to random splitting with a warning when a class has too few samples
             to stratify.
-        class_order : list, optional
-            Explicit class order for ``encode="ordinal"``, forwarded to
-            :func:`_make_encoder`. Needed only for ordered *string* labels, whose
-            order is otherwise lexicographic.
         use_predefined_splits : bool
             Use the partition the dataset itself defines, where it has one, and
             ignore *train_split* / *val_split* / *stratify*. Only subclasses that
@@ -797,9 +782,8 @@ class DatasetBase(ABC):
             train_split,
             val_split,
             sklearn_seed,
-            encode,
+            encoder,
             stratify=stratify,
-            class_order=class_order,
         )
         return self._splits, self._encoder
 
@@ -852,6 +836,17 @@ class DatasetBase(ABC):
         for split, name in zip(splits, split_names, strict=True):
             labels_arr = split[1]
             metadata = split[2] if len(split) > 2 else None
+            if np.ndim(labels_arr) > 1:
+                # A 2-D target is one column per model output, and what gets
+                # persisted here is the *decoded* label column, which has no form
+                # for that yet: reloading would re-fit the encoder on decoded rows
+                # and quietly derive a different class set. Fail instead.
+                raise NotImplementedError(
+                    f"{type(self._encoder).__name__} produced a "
+                    f"{np.shape(labels_arr)} target (one column per model output), "
+                    "which the split cache cannot persist yet. Run with "
+                    "reproducible: false, or save the splits yourself."
+                )
             decoded = decode_labels(self._encoder, labels_arr)
             if np.ndim(decoded) > 1:  # multi-hot rows
                 label_col = [row.tolist() for row in decoded]
@@ -868,7 +863,9 @@ class DatasetBase(ABC):
 
         logger.info("Splits saved to %s", splits_dir)
 
-    def load_saved_splits(self, directory: Path | str, encode: str = "label") -> tuple:
+    def load_saved_splits(
+        self, directory: Path | str, encoder: object | None = None
+    ) -> tuple:
         """
         Load pre-split files from *directory*.
 
@@ -879,8 +876,11 @@ class DatasetBase(ABC):
         ----------
         directory : Path or str
             Directory containing the split files.
-        encode : str
-            Label encoding scheme.
+        encoder : object, optional
+            An sklearn-style target encoder, as in :meth:`split`. ``None`` uses
+            :class:`~sklearn.preprocessing.LabelEncoder`. It is fitted on the union
+            of the splits so every class is represented even when one split lacks
+            it.
 
         Returns
         -------
@@ -937,26 +937,21 @@ class DatasetBase(ABC):
         if y_val is not None:
             y_val = np.array(y_val.tolist())
 
-        encoder = _make_encoder(encode)
+        encoder = _resolve_encoder(encoder)
         present = [a for a in [y_train, y_test, y_val] if a is not None]
-        if isinstance(encoder, MultiHotLabelEncoder):
-            all_labels = np.vstack(present)
-        else:
-            all_labels = np.concatenate(present)
-            if isinstance(encoder, (OneHotEncoder, OrdinalEncoder)):
-                all_labels = all_labels.reshape(-1, 1)
-                y_train = y_train.reshape(-1, 1)
-                y_test = y_test.reshape(-1, 1)
-                if y_val is not None:
-                    y_val = y_val.reshape(-1, 1)
+        # Stacking follows the stored label layout, not the encoder: rows stay rows
+        # (multi-hot) and scalars stay scalars.
+        all_labels = (
+            np.vstack(present) if present[0].ndim == 2 else np.concatenate(present)
+        )
         encoder.fit(all_labels)
         logger.info("Label classes (index -> name): %s", _class_name_map(encoder))
 
-        # Same target contract as _split_dataset: always 1-D int64 indices.
-        y_train = _class_index_view(encoder.transform(y_train)).astype(np.int64)
-        y_test = _class_index_view(encoder.transform(y_test)).astype(np.int64)
+        # Same target contract as _split_dataset.
+        y_train = _encoded_targets(encoder, y_train)
+        y_test = _encoded_targets(encoder, y_test)
         if y_val is not None:
-            y_val = _class_index_view(encoder.transform(y_val)).astype(np.int64)
+            y_val = _encoded_targets(encoder, y_val)
 
         if x_val is not None and y_val is not None:
             splits = [

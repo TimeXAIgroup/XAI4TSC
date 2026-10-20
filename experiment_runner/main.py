@@ -48,6 +48,7 @@ from .config import (
     validate_user_config,
 )
 from .download_datasets import ensure_datasets_cached
+from .encoders import build_encoder
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
 from .log_setup import _add_file_logging, _setup_console_logging
@@ -249,11 +250,13 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             dataset_path = Path(config["results_rel_path"]) / dataset_id
             dataset_path.mkdir(parents=True, exist_ok=True)
 
+            label_encoder = build_encoder(dataset["encode"])
+
             if dataset.get("is_presplit"):
                 # Pre-split local data: load directly, skip split() and cache entirely
                 ds = LocalDataset(dataset["path"], name=dataset["dataset"])
                 splits, encoder = ds.load_saved_splits(
-                    Path(dataset["path"]), encode=dataset["encode"]
+                    Path(dataset["path"]), encoder=label_encoder
                 )
             else:
                 use_predefined_splits = dataset["use_predefined_splits"]
@@ -299,7 +302,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         "Loading pre-split synthetic dataset from %s", synth_dir
                     )
                     splits, encoder = ds.load_saved_splits(
-                        synth_dir, encode=dataset["encode"]
+                        synth_dir, encoder=label_encoder
                     )
                 else:
                     split_cache = get_split_cache_path(
@@ -324,17 +327,16 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                     if split_dir and split_dir.exists():
                         logger.info("Loading cached splits from %s", split_dir)
                         splits, encoder = ds.load_saved_splits(
-                            split_dir, encode=dataset["encode"]
+                            split_dir, encoder=label_encoder
                         )
                     else:
                         splits, encoder = ds.split(
                             train_split=dataset["train_split"],
                             val_split=dataset["val_split"],
-                            encode=dataset["encode"],
+                            encoder=label_encoder,
                             impute_missing=dataset["allow_imputation"],
                             rng=resolve_rng(split_seed),
                             stratify=dataset["stratify"],
-                            class_order=dataset.get("classes") or None,
                             use_predefined_splits=use_predefined_splits,
                         )
                         if split_cache:

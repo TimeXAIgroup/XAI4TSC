@@ -16,6 +16,7 @@ import yaml
 from xai4tsc.utils.utils import merge_dicts
 
 from .defaults import apply_package_defaults, hyperparam_names
+from .encoders import build_encoder
 
 logger = logging.getLogger("xai4tsc.runner.config")
 
@@ -1167,6 +1168,36 @@ def _validate_data_splits(config: dict, issues: ConfigIssues) -> None:
             issues.error(where, f"val_split cannot be negative, got {val_split!r}.")
 
 
+def _validate_encoders(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check that each dataset's ``encode`` names an encoder that can be built.
+
+    Resolving it here means a retired or misspelled name fails before anything is
+    downloaded. It used to fall back to ``LabelEncoder`` in silence, which for
+    ``encode: "multhot"`` trained a different problem and reported plausible
+    numbers for it.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    section = config.get("data_config") or {}
+    for index, entry in enumerate(section.get("datasets") or []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("encode")
+        try:
+            build_encoder(name)
+        except ValueError as exc:
+            issues.error(
+                f"data_config.datasets[{index}] ('{entry.get('dataset', '?')}')",
+                str(exc),
+            )
+
+
 def _validate_explanation_samples(config: dict, issues: ConfigIssues) -> None:
     """
     Check each explainer's ``samples`` block as far as the data allows.
@@ -1327,6 +1358,7 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     _normalize_train_switch(config["train_config"], issues)
     _validate_general_seeding(config.get("general", {}), issues)
     _validate_data_splits(config, issues)
+    _validate_encoders(config, issues)
     _validate_explanation_samples(config, issues)
     _validate_hyperparams(config, issues)
 

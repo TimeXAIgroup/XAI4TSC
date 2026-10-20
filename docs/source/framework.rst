@@ -102,13 +102,19 @@ Getting Started
    suffix in config order, so their results and artifacts stay separate. Names
    that occur once are used unchanged.
 
-   **Labels.** Whatever ``encode`` is set to, a split carries 1-D ``int64`` class
-   indices, and the fitted encoder is kept only to map those indices back to class
-   names. ``encode`` therefore describes how to *read* the label column:
-   ``"label"`` for unordered categories, ``"ordinal"`` for ordered ones (declare
-   the order with ``classes``), ``"onehot"`` for a column of one-hot rows, and
-   ``"multihot"`` for multi-hot rows, which collapse to one index per distinct
-   combination.
+   **Labels.** ``encode`` names the label encoder: ``"label"`` for
+   :class:`~sklearn.preprocessing.LabelEncoder` (the default, one ``int64`` class
+   index per sample), ``"multihot"`` for multi-hot rows, which collapse to one
+   index per distinct combination, or a dotted path to any encoder class taking no
+   constructor arguments, e.g. ``"sklearn.preprocessing.LabelBinarizer"``. An
+   unknown name is an error rather than a silent fall-back to ``"label"``.
+
+   The runner builds the object and the package takes it: ``split(encoder=...)``
+   and ``load_saved_splits(encoder=...)`` accept any scikit-learn-style *target*
+   encoder, so an importing user can supply their own. The output rank is the
+   formulation - 1-D is one class index per sample, 2-D is one column per model
+   output - and the fitted encoder is kept so indices map back to class names.
+   Feature encoders (``OneHotEncoder``, ``OrdinalEncoder``) are refused.
 
    **Required settings.** ``experiment_name``, ``results_rel_path`` and the four
    component lists -- ``data_config.datasets``, ``train_config.models``,

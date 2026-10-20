@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 import yaml
 from experiment_runner.main import main
+from sklearn.preprocessing import LabelEncoder
 
 from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
 from xai4tsc.models.base import ModelBase
@@ -1429,7 +1430,7 @@ def test_a_logged_result_is_reproducible_through_the_package(
     splits, encoder = ds.split(
         train_split=0.8,
         val_split=0.1,
-        encode="label",
+        encoder=LabelEncoder(),
         rng=resolve_rng(seeds[("split", "GunPoint")]),
     )
     test_data, test_labels = splits[1][0], splits[1][1]

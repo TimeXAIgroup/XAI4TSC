@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Experiment-runner reliability release. The `metrics.csv` schema changes and
-`xai4tsc.Explanation` gains a required field, so this is a minor version bump with
-one breaking change to the importable API.
+Experiment-runner reliability release. The `metrics.csv` schema changes,
+`xai4tsc.Explanation` gains a required field and label encoding now takes an
+encoder object, so this is a minor version bump with breaking changes to the
+importable API.
 
 **Results from earlier versions will not reproduce exactly.** Randomness is now
 derived per result rather than once per run, so model weight init, the split and
@@ -39,10 +40,43 @@ hyperparameters as keyword arguments instead of a `hyperparams` dict
 is removed with them - the defaults are now the signature. YAML configs keep
 their `hyperparams:` block, which the runner unpacks. `generate_explanation()`
 renames `samples` to `n_samples`, and `visualization_type` now defaults to the
-tuple `("points",)` instead of `None`.
+tuple `("points",)` instead of `None`. `split()` and `load_saved_splits()` take
+an `encoder` object in place of the `encode` string and `class_order`:
+`split(encode="label")` becomes `split(encoder=LabelEncoder())`, or
+`split()` - the default is unchanged. In YAML, `encode: "onehot"` and
+`encode: "ordinal"` become `encode: "label"`, which reproduces their results, and
+`data_config.classes` is removed.
 
 ### Changed
 
+- **Label encoding takes a scikit-learn encoder object, not a string.**
+  `DatasetBase.split(encode="label", class_order=None)` becomes
+  `split(encoder=None)`, and `load_saved_splits(directory, encode=...)` becomes
+  `load_saved_splits(directory, encoder=...)`. `None` keeps the previous default
+  (`LabelEncoder`), so behaviour is unchanged. The string stays a runner concept:
+  `experiment_runner/encoders.py` maps `encode` to an object through a small table
+  plus a dotted-path escape hatch, so `encode:
+  "sklearn.preprocessing.LabelBinarizer"` works with no table entry, and an
+  importing user can pass any encoder at all - which was previously impossible,
+  since the four schemes were hard-coded in the package. `MultiHotLabelEncoder` is
+  now exported from `xai4tsc` and `xai4tsc.data`.
+  The encoder's output rank is now the target contract: 1-D means one class index
+  per sample, 2-D means one column per model output. The integer dtype is
+  checked rather than cast, so an encoder emitting floats is refused instead of
+  silently truncated.
+- **`encode: "onehot"` and `encode: "ordinal"` are removed**, and both raise with a
+  message naming `"label"`. They put scikit-learn's *feature* encoders in the
+  label slot, which the library separates deliberately (`LabelEncoder`,
+  `LabelBinarizer` and `MultiLabelBinarizer` are "not intended to be used on
+  features, only on supervised learning targets"). `"onehot"` was also broken on
+  the input it documented - a column of one-hot rows gave three class indices per
+  sample - and on the scalar labels it actually received it produced codes
+  identical to `"label"`, verified on ECG200, so `"label"` reproduces every result
+  either of them produced.
+- **An unknown `encode` is an error.** It used to fall back to `LabelEncoder` in
+  silence, so `encode: "multhot"` trained a different problem and reported
+  plausible numbers for it. The name is now resolved during the config sanity
+  check, before anything is downloaded, and the message lists the available keys.
 - **`use_predefined_splits` is a `split()` parameter, and selects any dataset's**
 	**own splits.** It was a constructor argument of `UcrUeaDataset` alone, read in one
   place inside `split()` and nowhere else, while every other key that shapes a split

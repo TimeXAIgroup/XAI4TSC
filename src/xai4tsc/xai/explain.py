@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
 from .._random import DEFAULT_SEED, resolve_rng
 from ..data.base import class_names
@@ -34,7 +33,7 @@ def generate_explanation(
     targets: str = "predicted",
     params: dict | None = None,
     call_params: dict | None = None,
-    encoder: OneHotEncoder | LabelEncoder | OrdinalEncoder | None = None,
+    encoder: object | None = None,
     indices: list | None = None,
     n_samples: int = 5,
     prng: np.random.Generator | None = None,
@@ -68,8 +67,9 @@ def generate_explanation(
         arguments, by default None. Construction options go in *params*; use this
         for options an explainer takes per call. Recorded on the returned
         explanation so the re-explaining metrics replay the same call.
-    encoder : OneHotEncoder | LabelEncoder | OrdinalEncoder, optional
-        Encoder used to encode the labels, by default None
+    encoder : object, optional
+        Fitted label encoder, used to name the explained classes. ``None`` by
+        default.
     indices : list, optional
         Indices of samples to explain, by default None
     n_samples : int, optional
@@ -149,7 +149,7 @@ def _get_explanation(
     model: ModelBase,
     data: np.ndarray,
     labels: np.ndarray,
-    encoder: OneHotEncoder | LabelEncoder | OrdinalEncoder,
+    encoder: object,
     params: dict,
     call_params: dict | None = None,
     targets: str = "predicted",
@@ -172,8 +172,8 @@ def _get_explanation(
         Samples to use.
     labels : np.ndarray
         Target labels.
-    encoder : OneHotEncoder | LabelEncoder | OrdinalEncoder
-        Encoder for the labels
+    encoder : object
+        Fitted label encoder for the labels
     params : dict
         Parameters for the explanation method
     call_params : dict, optional

@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
 from .._domains import DATA_DOMAINS, DataType, Domain, resolve_data_domain
 
@@ -60,8 +59,8 @@ class Explanation:
         Class labels for each sample in ``data``.
     indices : np.ndarray
         Indices into the test set from which ``data`` was drawn.
-    encoder : LabelEncoder or OneHotEncoder or OrdinalEncoder
-        Label encoder used during dataset preparation.
+    encoder : object
+        Fitted label encoder used during dataset preparation.
     meta : dict
         Any extra metadata returned by the explainer.
     data_domain : Domain
@@ -97,7 +96,7 @@ class Explanation:
     data: np.ndarray
     labels: np.ndarray
     indices: np.ndarray
-    encoder: LabelEncoder | OneHotEncoder | OrdinalEncoder
+    encoder: object
     meta: dict
     data_domain: Domain = Domain.TIME
     explanation_domain: Domain = Domain.TIME

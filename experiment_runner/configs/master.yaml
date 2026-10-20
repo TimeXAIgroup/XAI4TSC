@@ -68,19 +68,16 @@ data_config:
                             # leaves. 0 produces no validation split, and early stopping
                             # then monitors training loss instead of validation loss.
                             # Ignored by `use_predefined_splits` and `is_presplit`.
-    encode: "label"         # how to read the label column; the pipeline always carries 1-D
-                            # int64 class indices, and the encoder is kept only to map those
-                            # indices back to class names:
-                            #   "label":    unordered categories (default)
-                            #   "ordinal":  ordered categories; see `classes` below
-                            #   "onehot":   the column holds one-hot rows -> hot position
-                            #   "multihot": the column holds multi-hot rows (e.g. [0,1,1]) ->
-                            #               one index per distinct combo, combo kept as the name
-    classes: null           # explicit class order, only for encode: "ordinal", e.g.
-                            # ["low", "medium", "high"]. Without it classes are ordered
-                            # lexicographically, which for ordered string labels is wrong
-                            # (low/medium/high becomes high < low < medium) and is warned about.
-                            # Numeric labels need no order.
+    encode: "label"         # which label encoder turns the label column into model targets.
+                            # The runner builds the object, the package takes it, and the
+                            # fitted encoder maps class indices back to names:
+                            #   "label":    one int64 class index per sample (default)
+                            #   "multihot": multi-hot rows (e.g. [0,1,1]) -> one index per
+                            #               distinct combo, i.e. the label-powerset reduction
+                            #   a dotted path to an encoder class taking no constructor
+                            #   arguments, e.g. "sklearn.preprocessing.LabelBinarizer"
+                            # An unknown name is an error, never a silent fallback.
+                            # "onehot" and "ordinal" were removed - use "label".
     format: "numpy"         # "numpy", "arff", "csv", "wfdb"
     layout: "auto"          # axis order of a local array (ignored for UCR/UEA and synthetic):
                             #   "auto": transpose when axis 1 > axis 2, with a warning

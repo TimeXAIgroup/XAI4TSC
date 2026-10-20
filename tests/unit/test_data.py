@@ -8,7 +8,7 @@ from itertools import pairwise
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
+from sklearn.preprocessing import LabelBinarizer, LabelEncoder, OrdinalEncoder
 
 from xai4tsc.data import load_dataset
 from xai4tsc.data.base import (
@@ -17,7 +17,6 @@ from xai4tsc.data.base import (
     _class_name_map,
     _ensure_bct,
     _impute_data,
-    _make_encoder,
     _split_dataset,
 )
 from xai4tsc.data.data_loaders import load_json, load_metadata
@@ -121,86 +120,85 @@ def test_split_different_seeds_differ():
     assert not np.array_equal(splits1[0][0], splits2[0][0])
 
 
-# The target contract: whatever `encode` reads, the split carries 1-D int64 class
-# indices, and the encoder is kept only to map those indices back to class names.
-# Before this, the two sklearn FEATURE encoders leaked their own shapes - a sparse
-# (n, K) matrix for onehot, an (n, 1) float column for ordinal - which no
-# CrossEntropy target, np.unique() or fancy-indexing consumer could use.
+# The target contract: the encoder's output rank IS the formulation - 1-D is one
+# class index per sample, 2-D is one column per model output - and the dtype is
+# checked rather than cast. Before this, two sklearn FEATURE encoders sat in the
+# slot and leaked their own shapes (a sparse (n, K) matrix, an (n, 1) float
+# column), which a shape-guessing helper then had to collapse back to indices.
 @pytest.mark.unit
-@pytest.mark.parametrize("encode", ["label", "onehot", "ordinal", "multihot"])
-def test_split_always_yields_1d_int64_class_indices(encode):
+@pytest.mark.parametrize(
+    ("factory", "multi_hot_labels"),
+    [(LabelEncoder, False), (MultiHotLabelEncoder, True)],
+)
+def test_split_yields_int64_class_indices(factory, multi_hot_labels):
     n_classes = 3
     data, labels = _make_data(100, n_classes=n_classes)
-    if encode == "multihot":
-        # multihot reads multi-hot rows, so give it rows rather than scalars.
+    if multi_hot_labels:
+        # The powerset encoder reads rows, so give it rows rather than scalars.
         labels = np.eye(n_classes, dtype=int)[np.asarray(labels, dtype=int)]
-    splits, encoder = _split_dataset(data, labels, encode=encode)
+    splits, encoder = _split_dataset(data, labels, encoder=factory())
     y = splits[0][1]
-    assert y.ndim == 1, f"{encode} leaked a {y.ndim}-D target"
+    assert y.ndim == 1, f"{factory.__name__} leaked a {y.ndim}-D target"
     assert y.dtype == np.int64
     assert set(np.unique(y)) <= set(range(n_classes))
     # The encoder must still be able to name the classes it collapsed.
-    assert _class_name_map(encoder), f"{encode} exposes no index-to-name map"
+    assert _class_name_map(encoder), f"{factory.__name__} exposes no index-to-name map"
 
 
 @pytest.mark.unit
-def test_split_encode_onehot_reads_the_hot_index():
-    # A one-hot label column resolves to the index of its hot position.
-    data, _ = _make_data(6, n_classes=3)
-    splits, _ = _split_dataset(
-        data,
-        np.array([0, 1, 2, 0, 1, 2]),
-        encode="onehot",
-        train_split=0.5,
-        val_split=0.0,
-        stratify=False,
+def test_split_defaults_to_label_encoder():
+    # `encoder=None` must keep today's behaviour exactly.
+    data, labels = _make_data(60, n_classes=3)
+    splits_default, encoder = _split_dataset(data, labels, train_split=0.7)
+    splits_explicit, _ = _split_dataset(
+        data, labels, train_split=0.7, encoder=LabelEncoder()
     )
-    assert set(np.unique(splits[0][1])) <= {0, 1, 2}
+    assert isinstance(encoder, LabelEncoder)
+    np.testing.assert_array_equal(splits_default[0][1], splits_explicit[0][1])
 
 
 @pytest.mark.unit
-def test_split_encode_ordinal_without_order_warns_for_string_labels(caplog):
-    # Ordinal exists to preserve a class order; lexicographic is the silent trap.
-    data, _ = _make_data(6, n_classes=3)
-    y = np.array(["low", "medium", "high", "low", "medium", "high"])
-    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
-        _, encoder = _split_dataset(
-            data, y, encode="ordinal", train_split=0.5, val_split=0.0, stratify=False
+def test_split_rejects_a_feature_encoder():
+    # OrdinalEncoder returns an (n, 1) float column, which the target contract
+    # would read as a single-output multi-label target. sklearn separates the
+    # families deliberately; this is the guard that keeps us on the target side.
+    data, labels = _make_data(6, n_classes=3)
+    with pytest.raises(TypeError, match="feature encoder"):
+        _split_dataset(
+            data, labels, encoder=OrdinalEncoder(), train_split=0.5, val_split=0.0
         )
-    assert "class_order" in caplog.text
-    assert _class_name_map(encoder) == {0: "high", 1: "low", 2: "medium"}
 
 
 @pytest.mark.unit
-def test_split_encode_ordinal_honours_class_order():
-    data, _ = _make_data(6, n_classes=3)
-    y = np.array(["low", "medium", "high", "low", "medium", "high"])
-    _, encoder = _split_dataset(
-        data,
-        y,
-        encode="ordinal",
-        train_split=0.5,
-        val_split=0.0,
-        stratify=False,
-        class_order=["low", "medium", "high"],
-    )
-    assert _class_name_map(encoder) == {0: "low", 1: "medium", 2: "high"}
+def test_split_rejects_a_float_emitting_encoder():
+    # Casting a float output would truncate it silently, so it is refused.
+    class _FloatEncoder:
+        def fit(self, y):
+            self.classes_ = np.unique(y)
+            return self
+
+        def transform(self, y):
+            return np.asarray(y, dtype=np.float64) + 0.5
+
+    data, labels = _make_data(6, n_classes=3)
+    with pytest.raises(ValueError, match="integer class codes"):
+        _split_dataset(
+            data, labels, encoder=_FloatEncoder(), train_split=0.5, val_split=0.0
+        )
 
 
 @pytest.mark.unit
-def test_split_encode_ordinal_numeric_labels_need_no_order():
-    # sklearn refuses non-sorted numeric categories, and sorted is already the
-    # meaningful order for numbers, so no class_order is required.
-    data, _ = _make_data(6, n_classes=3)
-    _, encoder = _split_dataset(
-        data,
-        np.array([10, 20, 30, 10, 20, 30]),
-        encode="ordinal",
-        train_split=0.5,
-        val_split=0.0,
-        stratify=False,
+def test_split_keeps_a_two_dimensional_target():
+    # A binarizer gives one column per output. Nothing collapses it - that rank is
+    # what tells `train_model` the formulation and the loss it needs.
+    data, labels = _make_data(60, n_classes=3)
+    splits, encoder = _split_dataset(
+        data, labels, encoder=LabelBinarizer(), train_split=0.7, val_split=0.0
     )
-    assert _class_name_map(encoder) == {0: "10", 1: "20", 2: "30"}
+    y = splits[0][1]
+    assert y.shape == (42, 3)
+    assert y.dtype == np.int64
+    assert _class_name_map(encoder) == {0: "0", 1: "1", 2: "2"}
 
 
 # ── save_splits / load_saved_splits ───────────────────────────────────────────
@@ -216,7 +214,9 @@ def test_save_load_round_trip(tmp_path):
     ds.save_splits(save_dir)
 
     ds2 = _Dummy(data, labels)
-    splits_loaded, _ = ds2.load_saved_splits(save_dir / "splits", encode="label")
+    splits_loaded, _ = ds2.load_saved_splits(
+        save_dir / "splits", encoder=LabelEncoder()
+    )
 
     np.testing.assert_array_equal(splits_orig[0][0], splits_loaded[0][0])
     np.testing.assert_array_equal(splits_orig[1][0], splits_loaded[1][0])
@@ -236,7 +236,7 @@ def test_load_saved_splits_missing_dir_raises(tmp_path):
     data, labels = _make_data(50)
     ds = _Dummy(data, labels)
     with pytest.raises(ValueError):
-        ds.load_saved_splits(tmp_path / "nonexistent", encode="label")
+        ds.load_saved_splits(tmp_path / "nonexistent", encoder=LabelEncoder())
 
 
 # ── load_json ─────────────────────────────────────────────────────────────────
@@ -479,41 +479,7 @@ def test_impute_data_replaces_nan_with_column_mean():
     assert out[1, 0, 2] == pytest.approx(3.0)
 
 
-# ── _make_encoder ───────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("encode", "expected_type"),
-    [
-        ("label", LabelEncoder),
-        ("onehot", OneHotEncoder),
-        ("ordinal", OrdinalEncoder),
-        ("unknown_key", LabelEncoder),  # anything unrecognised falls back to label
-    ],
-)
-def test_make_encoder_returns_expected_types(encode, expected_type):
-    assert isinstance(_make_encoder(encode), expected_type)
-
-
-# ── LocalDataset unknown (unregistered) format ──────────────────────────────────
-
-
-@pytest.mark.unit
-def test_local_dataset_unregistered_format_raises_value_error(tmp_path):
-    # A format key absent from FORMAT_LOADERS raises ValueError (vs. the
-    # registered-but-unimplemented "csv" which raises NotImplementedError).
-    ds = LocalDataset(tmp_path, name="test", data_format="bogus")
-    with pytest.raises(ValueError, match="Unknown data_format"):
-        ds.load()
-
-
-# ── MultiHotLabelEncoder ────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_make_encoder_multihot_returns_multihot_encoder():
-    assert isinstance(_make_encoder("multihot"), MultiHotLabelEncoder)
+# ── MultiHotLabelEncoder ──────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
@@ -541,7 +507,12 @@ def test_split_dataset_multihot_logs_class_names(caplog):
     labels = np.array([[a, b, c] for a in (0, 1) for b in (0, 1) for c in (0, 1)])
     with caplog.at_level("INFO", logger="xai4tsc.data.base"):
         splits, encoder = _split_dataset(
-            data, labels, None, train_split=0.5, val_split=0.0, encode="multihot"
+            data,
+            labels,
+            None,
+            train_split=0.5,
+            val_split=0.0,
+            encoder=MultiHotLabelEncoder(),
         )
     assert isinstance(encoder, MultiHotLabelEncoder)
     assert len(encoder.classes_) == 8
@@ -703,7 +674,9 @@ def _published_form(row):
 def published_splits():
     """Generate the dataset at its shipped defaults, once for the module."""
     ds = SynthMultilabelFreqDataset()
-    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    splits, encoder = ds.split(
+        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+    )
     return ds, splits, encoder
 
 
@@ -820,7 +793,7 @@ def test_synthetic_opt_out_honours_the_configured_fractions():
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encode="multihot",
+        encoder=MultiHotLabelEncoder(),
         use_predefined_splits=False,
     )
     sizes = [len(y) for _x, y, _m in splits]
@@ -841,7 +814,7 @@ def test_synthetic_opt_out_still_scopes_its_ground_truth():
     splits, encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encode="multihot",
+        encoder=MultiHotLabelEncoder(),
         use_predefined_splits=False,
     )
     _x, y, metadata = splits[0]
@@ -872,7 +845,7 @@ def test_synthetic_opt_out_keeps_metadata_aligned_under_max_samples():
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encode="multihot",
+        encoder=MultiHotLabelEncoder(),
         use_predefined_splits=False,
     )
     assert [len(y) for _x, y, _m in splits] == [20, 10, 10]
@@ -927,7 +900,9 @@ def test_package_api_generates_and_splits(tmp_path):
         frequency_window_length=16,
         discriminative_frequencies=(3, 7, 11),
     )
-    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    splits, encoder = ds.split(
+        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+    )
 
     assert len(splits) == 3
     assert sum(len(y) for _, y, _ in splits) == 64
@@ -985,7 +960,9 @@ def test_configured_split_fractions_are_reported_not_obeyed(caplog):
         num_samples_per_pattern=8, sample_length=32, frequency_window_length=8
     )
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
-        splits, _ = ds.split(train_split=0.9, val_split=0.05, encode="multihot")
+        splits, _ = ds.split(
+            train_split=0.9, val_split=0.05, encoder=MultiHotLabelEncoder()
+        )
     assert "supplies its own partition" in caplog.text
     # The partition is the dataset's own regardless of what was asked for: 0.7 of
     # 64 samples, then the remaining 19 divided in [train, test, val] order.
@@ -1050,7 +1027,9 @@ def test_sample_restriction_keeps_metadata_aligned():
         frequency_window_length=8,
         max_samples=16,
     )
-    splits, _ = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+    splits, _ = ds.split(
+        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+    )
     assert sum(len(y) for _, y, _ in splits) == 16
     for x, y, metadata in splits:
         assert len(metadata) == len(y) == len(x)
@@ -1071,7 +1050,9 @@ def test_truncating_the_series_warns_that_the_ground_truth_no_longer_fits(caplog
         max_series_length=32,
     )
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
-        splits, _ = ds.split(train_split=0.7, val_split=0.15, encode="multihot")
+        splits, _ = ds.split(
+            train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+        )
     assert "still describe the full series" in caplog.text
     assert all(x.shape[-1] == 32 for x, _, _ in splits)
 
@@ -1139,7 +1120,7 @@ def test_loads_a_saved_presplit_layout(tmp_path):
             )
         )
     assert SyntheticDataset.is_split_layout(cache)
-    splits, encoder = ds.load_saved_splits(cache, encode="multihot")
+    splits, encoder = ds.load_saved_splits(cache, encoder=MultiHotLabelEncoder())
     assert len(splits) == 3
     assert splits[0][0].shape == (4, 1, 16)
     assert isinstance(encoder, MultiHotLabelEncoder)
@@ -1179,14 +1160,16 @@ def test_synthetic_first_look_cache_skips_regeneration(tmp_path):
 def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
     ds = _SynthStub(cache_dir=tmp_path, n=24, t=8, multihot=True, seed=4)
     _splits, encoder = ds.split(
-        train_split=0.75, val_split=0.0, encode="multihot", stratify=False
+        train_split=0.75, val_split=0.0, encoder=MultiHotLabelEncoder(), stratify=False
     )
     ds.save_splits(tmp_path)
     # Separate metadata.json is written, not embedded in labels.json.
     assert (tmp_path / "splits" / "train_metadata.json").exists()
 
     ds2 = _SynthStub(cache_dir=tmp_path)
-    splits2, encoder2 = ds2.load_saved_splits(tmp_path / "splits", encode="multihot")
+    splits2, encoder2 = ds2.load_saved_splits(
+        tmp_path / "splits", encoder=MultiHotLabelEncoder()
+    )
     # Combo class names survive the round-trip.
     np.testing.assert_array_equal(encoder.classes_, encoder2.classes_)
     # Per-class ground-truth metadata survives.
@@ -1276,20 +1259,84 @@ def test_local_dataset_honours_layout(tmp_path, layout):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("encode", ["label", "onehot", "ordinal"])
-def test_save_load_round_trip_per_encode(tmp_path, encode):
-    # save_splits persists DECODED labels and load_saved_splits re-encodes, so the
-    # codes and the index-to-name map must survive a cache round-trip. Before this,
-    # onehot and ordinal raised in save_splits.
+def test_save_splits_refuses_a_multi_output_target(tmp_path):
+    # The cache persists the DECODED label column, which has no form for one
+    # column per output yet. Writing it anyway would reload as a different class
+    # set, so this fails loudly until the multi-label formulation lands.
     data, labels = _make_data(60, n_classes=3)
     ds = _Dummy(data, labels)
-    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encode=encode)
+    ds.split(train_split=0.7, val_split=0.0, encoder=LabelBinarizer())
+    with pytest.raises(NotImplementedError, match="one column per model output"):
+        ds.save_splits(tmp_path / "out")
+
+
+@pytest.mark.unit
+def test_save_load_round_trip_re_encodes(tmp_path):
+    # save_splits persists DECODED labels and load_saved_splits re-encodes, so the
+    # codes and the index-to-name map must survive a cache round-trip. The runner
+    # builds one encoder and hands the same object to both calls, which is what
+    # keeps the two paths from diverging.
+    data, labels = _make_data(60, n_classes=3)
+    ds = _Dummy(data, labels)
+    encoder_obj = LabelEncoder()
+    splits, encoder = ds.split(train_split=0.7, val_split=0.15, encoder=encoder_obj)
 
     save_dir = tmp_path / "out"
     ds.save_splits(save_dir)
     reloaded, encoder2 = _Dummy(data, labels).load_saved_splits(
-        save_dir / "splits", encode=encode
+        save_dir / "splits", encoder=LabelEncoder()
     )
     for original, restored in zip(splits, reloaded, strict=True):
         np.testing.assert_array_equal(original[1], restored[1])
     assert _class_name_map(encoder2) == _class_name_map(encoder)
+
+
+class _OrderedEncoder:
+    """A target encoder that indexes the classes in a caller-given order."""
+
+    def __init__(self, order):
+        self.order = list(order)
+
+    def fit(self, y):
+        self.classes_ = np.array(self.order, dtype=object)
+        self._index = {cls: i for i, cls in enumerate(self.order)}
+        return self
+
+    def transform(self, y):
+        return np.array(
+            [self._index[v] for v in np.asarray(y).tolist()], dtype=np.int64
+        )
+
+    def inverse_transform(self, indices):
+        return self.classes_[np.asarray(indices, dtype=np.int64)]
+
+
+@pytest.mark.unit
+def test_both_paths_use_the_encoder_they_are_given(tmp_path):
+    # The defect this closes: load_saved_splits used to build its own encoder from
+    # the `encode` string and so silently dropped the explicit class order that
+    # split() had been given. Taking the object means there is no second
+    # construction site to forget - and it is the whole point of the dual-use API,
+    # so a user-supplied encoder has to work on both paths.
+    data, codes = _make_data(60, n_classes=3)
+    # Ordered string labels, the case an explicit order exists for: lexicographic
+    # would give high < low < medium, which is not the order a user means.
+    order = ["low", "medium", "high"]
+    labels = np.array(order, dtype=object)[np.asarray(codes, dtype=int)]
+    expected_names = {0: "low", 1: "medium", 2: "high"}
+
+    ds = _Dummy(data, labels)
+    chosen = _OrderedEncoder(order)
+    splits, returned = ds.split(train_split=0.7, val_split=0.15, encoder=chosen)
+    assert returned is chosen, "split() must fit the object it was given"
+    assert _class_name_map(returned) == expected_names
+
+    ds.save_splits(tmp_path / "out")
+    reload_encoder = _OrderedEncoder(order)
+    reloaded, returned2 = _Dummy(data, labels).load_saved_splits(
+        tmp_path / "out" / "splits", encoder=reload_encoder
+    )
+    assert returned2 is reload_encoder
+    assert _class_name_map(returned2) == expected_names
+    for original, restored in zip(splits, reloaded, strict=True):
+        np.testing.assert_array_equal(original[1], restored[1])

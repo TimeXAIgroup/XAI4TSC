@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from sktime.datasets import load_UCR_UEA_dataset
 
 from .._domains import Domain, resolve_data_domain
@@ -17,11 +16,11 @@ from .._random import DEFAULT_SEED, resolve_rng
 from .base import (
     DatasetBase,
     _assemble_splits,
-    _class_index_view,
+    _encoded_targets,
     _ensure_bct,
     _fit_label_encoder,
     _impute_data,
-    _make_encoder,
+    _resolve_encoder,
 )
 from .data_loaders import FORMAT_LOADERS
 
@@ -278,11 +277,10 @@ class UcrUeaDataset(DatasetBase):
         train_split: float = 0.8,
         val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
-        encode: str = "label",
+        encoder: object | None = None,
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
         stratify: bool = True,
-        class_order: list | None = None,
         use_predefined_splits: bool = False,
     ) -> tuple:
         """
@@ -305,11 +303,10 @@ class UcrUeaDataset(DatasetBase):
                 train_split=train_split,
                 val_split=val_split,
                 random_state=random_state,
-                encode=encode,
+                encoder=encoder,
                 impute_missing=impute_missing,
                 rng=rng,
                 stratify=stratify,
-                class_order=class_order,
             )
 
         self._report_ignored_split_args(train_split, val_split, stratify)
@@ -331,19 +328,10 @@ class UcrUeaDataset(DatasetBase):
             data_test = _impute_data(data_test)
 
         # Fit encoder on union of both splits so all classes are represented
-        encoder = _make_encoder(encode, class_order=class_order)
-        all_labels = np.concatenate([labels_train, labels_test])
-        if not isinstance(encoder, LabelEncoder):
-            all_labels = all_labels.reshape(-1, 1)
-        encoder.fit(all_labels)
-
-        def _transform(enc: object, arr: np.ndarray) -> np.ndarray:
-            needs_2d = not isinstance(enc, LabelEncoder)
-            encoded = enc.transform(arr.reshape(-1, 1) if needs_2d else arr)
-            return _class_index_view(encoded).astype(np.int64)
-
-        y_train = _transform(encoder, labels_train)
-        y_test = _transform(encoder, labels_test)
+        encoder = _resolve_encoder(encoder)
+        encoder.fit(np.concatenate([labels_train, labels_test]))
+        y_train = _encoded_targets(encoder, labels_train)
+        y_test = _encoded_targets(encoder, labels_test)
 
         logger.info("Predefined TRAIN split shape: %s", data_train.shape)
         logger.info("Predefined TEST split shape: %s", data_test.shape)
@@ -1105,11 +1093,10 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         train_split: float = 0.8,
         val_split: float = 0.1,
         random_state: int | None = DEFAULT_SEED,
-        encode: str = "label",
+        encoder: object | None = None,
         impute_missing: bool = False,
         rng: np.random.Generator | None = None,
         stratify: bool = True,
-        class_order: list | None = None,
         use_predefined_splits: bool = True,
     ) -> tuple:
         """
@@ -1139,10 +1126,11 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         random_state : int or None
             Seeds the sample restriction only. The partition uses the dataset's
             own ``seed``.
-        encode : str
-            Label encoding scheme; ``"multihot"`` is the fitting choice for this
-            dataset's multi-hot labels and the one that lets a region be scoped to
-            the classes it discriminates.
+        encoder : object, optional
+            An sklearn-style target encoder.
+            :class:`~xai4tsc.data.base.MultiHotLabelEncoder` is the fitting choice
+            for this dataset's multi-hot labels and the one that lets a region be
+            scoped to the classes it discriminates.
         impute_missing : bool
             Accepted for signature parity. Generated data holds no NaN, so there
             is nothing to impute.
@@ -1152,8 +1140,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             Stratify the splits by class. Ignored under *use_predefined_splits*,
             where the partition is stratified by class combination by
             construction.
-        class_order : list or None
-            Explicit class order, forwarded to the encoder.
         use_predefined_splits : bool
             Use this dataset's own partition, the default here because that
             partition is part of the published dataset this generator reproduces
@@ -1171,11 +1157,10 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
                 train_split=train_split,
                 val_split=val_split,
                 random_state=random_state,
-                encode=encode,
+                encoder=encoder,
                 impute_missing=impute_missing,
                 rng=rng,
                 stratify=stratify,
-                class_order=class_order,
             )
             # The base splits the rows but cannot scope the regions: that needs the
             # fitted encoder, which only exists once the labels are encoded.
@@ -1197,7 +1182,7 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         data, labels, metadata = self._restrict_samples(data, labels, metadata, rng)
         data = self._restrict_length_numpy(data)
 
-        encoder, targets = _fit_label_encoder(labels, encode, class_order)
+        encoder, targets = _fit_label_encoder(labels, encoder)
         splits = _assemble_splits(data, targets, metadata, self._partition(labels))
         splits = [(x, y, self._scope_metadata(m, encoder)) for x, y, m in splits]
         names = ("Training", "Test", "Validation")
@@ -1345,7 +1330,9 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
 
     # ── Ground-truth class scoping ─────────────────────────────────────────────
 
-    def load_saved_splits(self, directory: Path | str, encode: str = "label") -> tuple:
+    def load_saved_splits(
+        self, directory: Path | str, encoder: object | None = None
+    ) -> tuple:
         """
         Load the saved splits and scope each region to the classes it marks.
 
@@ -1353,8 +1340,8 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         ----------
         directory : Path or str
             Directory containing the split files.
-        encode : str
-            Label encoding scheme.
+        encoder : object, optional
+            An sklearn-style target encoder, as in :meth:`split`.
 
         Returns
         -------
@@ -1362,7 +1349,7 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             As :meth:`~xai4tsc.data.base.DatasetBase.load_saved_splits`, with
             ``classes`` added to every ground-truth region.
         """
-        splits, encoder = super().load_saved_splits(directory, encode=encode)
+        splits, encoder = super().load_saved_splits(directory, encoder=encoder)
         scoped = [
             (x, y, self._scope_metadata(metadata, encoder)) for x, y, metadata in splits
         ]

@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -19,9 +19,68 @@ from sklearn.metrics import (
     roc_curve,
 )
 from torch import nn, optim
+from torch.optim import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _target_tensor(labels: np.ndarray) -> torch.Tensor:
+    """
+    Return *labels* as the tensor their loss expects, decided by their rank.
+
+    The rank is the formulation, which the label encoder already settled (see
+    :func:`~xai4tsc.data.base._encoded_targets`): 1-D is one class index per
+    sample, 2-D is one column per model output. The dtype follows from it, and
+    torch is strict about both - :class:`~torch.nn.CrossEntropyLoss` takes
+    ``int64`` indices and rejects ``int32`` and ``float32``, while
+    :class:`~torch.nn.BCEWithLogitsLoss` needs float targets and rejects
+    ``int64``.
+
+    Parameters
+    ----------
+    labels : np.ndarray
+        Encoded labels, 1-D class indices or a 2-D indicator array.
+
+    Returns
+    -------
+    torch.Tensor
+        ``int64`` for 1-D labels, ``float32`` for 2-D.
+    """
+    arr = np.asarray(labels)
+    dtype = np.float32 if arr.ndim > 1 else np.int64
+    return torch.from_numpy(np.ascontiguousarray(arr, dtype=dtype))
+
+
+def _batch_accuracy_counts(
+    outputs: torch.Tensor, targets: torch.Tensor
+) -> tuple[int, int]:
+    """
+    Return ``(correct, total)`` for one batch, by the rank of *targets*.
+
+    1-D targets are class indices, so this is argmax accuracy. For 2-D targets
+    argmax is meaningless, and comparing it against the rows is worse than
+    useless: it raises when the batch size differs from the column count and
+    silently reports above 100% when they happen to match. Those are scored per
+    output instead, which for a multi-label head is ``1 - Hamming loss``.
+
+    Parameters
+    ----------
+    outputs : torch.Tensor
+        Raw logits of shape ``(batch, n_outputs)``.
+    targets : torch.Tensor
+        The batch's targets, 1-D indices or a 2-D indicator array.
+
+    Returns
+    -------
+    tuple[int, int]
+        Correct predictions and the number compared.
+    """
+    if targets.ndim > 1:
+        preds = (outputs > 0).to(targets.dtype)
+        return int((preds == targets).sum().item()), int(targets.numel())
+    preds = torch.max(outputs.data, 1)[1]
+    return int((preds == targets).sum().item()), int(targets.size(0))
 
 
 def _json_safe(value: object) -> bool:
@@ -463,8 +522,8 @@ class ModelBase(nn.Module, ABC):
         learn_rate: float = 1e-3,
         patience: int = 3,
         save_best: bool = True,
-        loss_func: str = "crossentropy",
-        optimizer: str = "adam",
+        loss_func: nn.Module | None = None,
+        optimizer: Callable[..., Optimizer] | Optimizer | None = None,
         data_val: np.ndarray | None = None,
         labels_val: np.ndarray | None = None,
         save_path: Path | str | None = None,
@@ -496,12 +555,25 @@ class ModelBase(nn.Module, ABC):
         save_best : bool
             Whether to write a checkpoint whenever the monitored loss improves,
             ``True`` by default.
-        loss_func : str
-            Loss function name, ``"crossentropy"`` by default (the only
-            supported value).  Matched case-insensitively.
-        optimizer : str
-            Optimizer name, ``"adam"`` by default (the only supported value).
-            Matched case-insensitively.
+        loss_func : torch.nn.Module, optional
+            The loss, as an object: any module whose call is
+            ``(logits, targets) -> scalar tensor``, with its own arguments
+            already applied (``nn.CrossEntropyLoss(weight=w)``,
+            ``nn.BCEWithLogitsLoss(pos_weight=w)``, or a custom module). It is
+            moved to this model's device, so a weight built on the CPU travels
+            with it. ``None`` (default) uses
+            :class:`~torch.nn.CrossEntropyLoss`. Losses needing more than the
+            final logits - contrastive, triplet, distillation - are out of scope:
+            the contract is the two-argument call above.
+        optimizer : callable or torch.optim.Optimizer, optional
+            The optimizer, in one of three forms. A **class**
+            (``torch.optim.AdamW``) or any **callable** returning an optimizer (a
+            :func:`functools.partial` carrying constructor arguments) is called
+            as ``optimizer(self.parameters(), lr=learn_rate)``. An **instance**
+            built over specific parameter groups is used as given, and
+            *learn_rate* then does not apply, which is reported rather than
+            silently ignored. ``None`` (default) uses
+            :class:`~torch.optim.Adam`.
         data_val : np.ndarray, optional
             Validation data of shape ``(n_samples, n_channels, n_timesteps)``.
             When provided, validation loss drives early stopping and
@@ -534,29 +606,15 @@ class ModelBase(nn.Module, ABC):
         data_tensor = torch.from_numpy(
             np.ascontiguousarray(data_train, dtype=np.float32)
         )
-        labels_tensor = torch.from_numpy(
-            np.ascontiguousarray(labels_train, dtype=np.int64)
-        )
+        labels_tensor = _target_tensor(labels_train)
 
         start_epoch = start_epoch if start_epoch is not None else (self.best_epoch or 0)
         final_epoch = start_epoch + epochs
 
-        loss_func_name = loss_func.lower()
-        if loss_func_name == "crossentropy":
-            loss_function = nn.CrossEntropyLoss()
-        else:
-            raise ValueError(
-                f"Unsupported loss function '{loss_func_name}'. "
-                "Supported: 'crossentropy'."
-            )
-
-        optimizer_name = optimizer.lower()
-        if optimizer_name == "adam":
-            optimizer_instance = optim.Adam(self.parameters(), lr=learn_rate)
-        else:
-            raise ValueError(
-                f"Unsupported optimizer '{optimizer_name}'. Supported: 'adam'."
-            )
+        loss_function = (nn.CrossEntropyLoss() if loss_func is None else loss_func).to(
+            self.device
+        )
+        optimizer_instance = self._resolve_optimizer(optimizer, learn_rate)
 
         loader = DataLoader(
             TensorDataset(data_tensor, labels_tensor),
@@ -564,7 +622,11 @@ class ModelBase(nn.Module, ABC):
         )
 
         val_loader = self._validation_loader(data_val, labels_val, batchsize, epochs)
+        self._check_loss(
+            loss_function, data_tensor[:batchsize], labels_tensor[:batchsize]
+        )
 
+        acc_name = "bit_acc" if labels_tensor.ndim > 1 else "acc"
         best_loss = 1e6
         best_path = None
         cur_patience = 0
@@ -590,9 +652,9 @@ class ModelBase(nn.Module, ABC):
                 optimizer_instance.step()
 
                 running_loss += loss.item()
-                preds = torch.max(outputs.data, 1)[1]
-                total += y_batch.size(0)
-                correct += (preds == y_batch).sum().item()
+                batch_correct, batch_total = _batch_accuracy_counts(outputs, y_batch)
+                correct += batch_correct
+                total += batch_total
 
             epoch_loss = running_loss / len(loader)
             epoch_acc = 100 * correct / total
@@ -604,19 +666,21 @@ class ModelBase(nn.Module, ABC):
             monitor_loss = val_loss if val_loss is not None else epoch_loss
             if val_loss is not None:
                 logger.info(
-                    "Epoch %2d/%d  loss: %.4f  acc: %.2f  val_loss: %.4f",
+                    "Epoch %2d/%d  loss: %.4f  %s: %.2f  val_loss: %.4f",
                     epoch + 1,
                     final_epoch,
                     epoch_loss,
+                    acc_name,
                     epoch_acc,
                     val_loss,
                 )
             else:
                 logger.info(
-                    "Epoch %2d/%d  loss: %.4f  acc: %.2f",
+                    "Epoch %2d/%d  loss: %.4f  %s: %.2f",
                     epoch + 1,
                     final_epoch,
                     epoch_loss,
+                    acc_name,
                     epoch_acc,
                 )
 
@@ -660,6 +724,121 @@ class ModelBase(nn.Module, ABC):
 
         self.model_path = best_path
         return self
+
+    _INDEX_TARGET_LOSSES = (nn.CrossEntropyLoss, nn.NLLLoss)
+    """Losses that read the target as class indices rather than per-output rows."""
+
+    def _resolve_optimizer(
+        self,
+        optimizer: Callable[..., Optimizer] | Optimizer | None,
+        learn_rate: float,
+    ) -> Optimizer:
+        """
+        Return the optimizer to train with, from whichever form was supplied.
+
+        An optimizer cannot be built before the model exists, so unlike the loss
+        it is accepted as a class or factory and constructed here over
+        ``self.parameters()``. An already-built instance is honoured as well, for
+        a caller who set up parameter groups.
+
+        Parameters
+        ----------
+        optimizer : callable or Optimizer or None
+            A class, a factory, an instance, or ``None`` for
+            :class:`~torch.optim.Adam`.
+        learn_rate : float
+            Learning rate, applied only when this method does the constructing.
+
+        Returns
+        -------
+        Optimizer
+            The optimizer to step.
+        """
+        if optimizer is None:
+            return optim.Adam(self.parameters(), lr=learn_rate)
+        if isinstance(optimizer, Optimizer):
+            found = sorted({group["lr"] for group in optimizer.param_groups})
+            logger.warning(
+                "Using the %s instance that was passed in, so learn_rate=%g does "
+                "not apply; its parameter groups carry lr=%s.",
+                type(optimizer).__name__,
+                learn_rate,
+                found,
+            )
+            return optimizer
+        return optimizer(self.parameters(), lr=learn_rate)
+
+    def _check_loss(
+        self, loss_function: nn.Module, data: torch.Tensor, targets: torch.Tensor
+    ) -> None:
+        """
+        Check the loss against one real batch before the first epoch runs.
+
+        Two layers, because torch will not do this for us. The specific one:
+        :class:`~torch.nn.CrossEntropyLoss` **accepts** a 2-D float target
+        without complaint, reading each row as soft class probabilities over a
+        competitive softmax - so two co-occurring labels can each reach at most
+        0.5, the curve looks healthy and the objective is wrong. The universal one:
+        everything else: a shape mismatch, a dtype mismatch, a ``weight`` of the
+        wrong length - surfaces as a startup error naming both sides instead of a
+        traceback from inside the epoch loop.
+
+        What neither layer catches: a custom loss that silently misreads its
+        targets. The contract is ``(logits, targets) -> scalar tensor``.
+
+        The check runs in eval mode under :func:`torch.no_grad`, and it is handed
+        the tensors directly rather than a loader, because building a
+        :class:`~torch.utils.data.DataLoader` iterator draws from the global
+        torch generator to seed itself - which would shift every later weight
+        initialisation in the process. As written it moves no batch-norm
+        statistics and draws no randomness, so a trained model is bit-identical
+        with and without it.
+
+        Parameters
+        ----------
+        loss_function : torch.nn.Module
+            The loss about to be used, already on this model's device.
+        data : torch.Tensor
+            One batch of inputs.
+        targets : torch.Tensor
+            That batch's targets.
+
+        Raises
+        ------
+        ValueError
+            If the loss cannot score this model's output, or reads the targets as
+            something other than what they are.
+        """
+        if len(data) == 0:
+            return
+        x_batch, y_batch = data, targets
+        if y_batch.ndim > 1 and isinstance(loss_function, self._INDEX_TARGET_LOSSES):
+            raise ValueError(
+                f"{type(loss_function).__name__} reads the target as class "
+                f"indices, but the targets are {tuple(y_batch.shape)} - one column "
+                "per model output. It would not raise: it reads each row as soft "
+                "class probabilities over a competitive softmax and optimises a "
+                "different objective. Use nn.BCEWithLogitsLoss (loss_func: "
+                '"bcewithlogits") for per-output targets, or encode the labels to '
+                "class indices."
+            )
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                outputs = self(x_batch.to(self.device))
+                try:
+                    loss_function(outputs, y_batch.to(self.device))
+                except Exception as exc:
+                    raise ValueError(
+                        f"{type(loss_function).__name__} cannot score this model's "
+                        f"output: logits {tuple(outputs.shape)} {outputs.dtype} "
+                        f"against targets {tuple(y_batch.shape)} {y_batch.dtype} "
+                        f"({exc}). Check the loss against the label encoding and "
+                        "the model's output width."
+                    ) from exc
+        finally:
+            self.train(was_training)
 
     def _validation_loader(
         self,
@@ -729,7 +908,7 @@ class ModelBase(nn.Module, ABC):
         return DataLoader(
             TensorDataset(
                 torch.from_numpy(np.ascontiguousarray(data_val, dtype=np.float32)),
-                torch.from_numpy(np.ascontiguousarray(labels_val, dtype=np.int64)),
+                _target_tensor(labels_val),
             ),
             batch_size=batchsize,
         )

@@ -197,6 +197,87 @@ def test_config_sanity_check_bad_model_raises():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("loss_func", "FocalLoss", "Unknown loss_func"),
+        ("optimizer", "lion", "Unknown optimizer"),
+        ("loss_params", {"nonsense": 1}, "could not be constructed"),
+    ],
+)
+def test_config_sanity_check_bad_training_lookup_raises(key, value, expected):
+    # A name the runner cannot resolve has to fail here, before a dataset is
+    # downloaded and a model instantiated, not part-way into a training run.
+    cfg = _valid_config()
+    cfg["train_config"]["models"] = [{"model": "FCN", "hyperparams": {key: value}}]
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    with pytest.raises(ValueError, match=expected):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_config_sanity_check_accepts_a_dotted_loss_path():
+    cfg = _valid_config()
+    cfg["train_config"]["models"] = [
+        {
+            "model": "FCN",
+            "hyperparams": {
+                "loss_func": "torch.nn.BCEWithLogitsLoss",
+                "optimizer": "torch.optim.NAdam",
+            },
+        }
+    ]
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    assert config_sanity_check(cfg) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("section", "mapping", "key"),
+    [
+        ("evaluation_config", "metric_class_params", "nr_samples"),
+        ("train_config", "hyperparams.loss_params", "pos_weight"),
+    ],
+)
+def test_a_free_form_mapping_keeps_the_keys_master_cannot_list(section, mapping, key):
+    # master cannot enumerate the parameters of ~37 Quantus classes or of an
+    # arbitrary torch loss, so filtering these two against it dropped whatever it
+    # did not happen to list - silently, bar a warning. Measured before the fix:
+    # metric_class_params: {nr_samples: 7} resolved to master's five keys alone.
+    cfg = _minimal_user_config()
+    block = cfg[section].setdefault("default_settings", {})
+    for part in mapping.split(".")[:-1]:
+        block = block.setdefault(part, {})
+    block[mapping.split(".")[-1]] = {key: [1.0, 2.0] if "weight" in key else 7}
+
+    resolved = config_resolve(cfg, MASTER_CONFIG)[section]["default_settings"]
+    for part in mapping.split("."):
+        resolved = resolved[part]
+    assert key in resolved, f"{mapping}.{key} was dropped"
+
+
+@pytest.mark.unit
+def test_master_still_defaults_the_keys_it_does_list_in_a_free_form_mapping():
+    # Taking the user's mapping whole must not discard master's own entries.
+    cfg = _minimal_user_config()
+    cfg["evaluation_config"]["default_settings"] = {
+        "metric_class_params": {"nr_samples": 7}
+    }
+    resolved = config_resolve(cfg, MASTER_CONFIG)
+    params = resolved["evaluation_config"]["default_settings"]["metric_class_params"]
+    assert params["nr_samples"] == 7
+    assert "normalise" in params, "master's declared defaults must survive"
+
+
+@pytest.mark.unit
+def test_an_unknown_key_outside_a_free_form_mapping_is_still_dropped():
+    cfg = _minimal_user_config()
+    cfg["train_config"]["default_settings"] = {"hyperparams": {"epocs": 5}}
+    resolved = config_resolve(cfg, MASTER_CONFIG)
+    assert "epocs" not in resolved["train_config"]["default_settings"]["hyperparams"]
+
+
+@pytest.mark.unit
 def test_config_sanity_check_bad_explainer_raises():
     cfg = _valid_config()
     cfg["explanation_config"]["explainers"] = [{"method": "NonExistentExplainer9999"}]
@@ -629,13 +710,18 @@ def test_master_hyperparams_match_the_package_defaults():
     The values themselves are compared in ``test_defaults.py``, against the
     signature the runner derives them from. What this adds is coverage of the
     other direction: a key master lists that training would reject.
+
+    The two exceptions are the mappings the runner consumes while building the
+    loss and the optimizer; they are config keys without being parameters, and
+    ``test_defaults.py`` pins that from the other side.
     """
     from xai4tsc.models.base import ModelBase
 
     accepted = set(inspect.signature(ModelBase.train_model).parameters)
+    consumed = {"loss_params", "optimizer_params"}
     master = yaml.safe_load(MASTER_CONFIG.read_text())
     for key in master["train_config"]["default_settings"]["hyperparams"]:
-        assert key in accepted, (
+        assert key in accepted or key in consumed, (
             f"master documents hyperparams.{key}, which train_model does not take"
         )
 

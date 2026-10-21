@@ -103,8 +103,6 @@ def trained_model(split_dataset, tmp_path_factory):
         train_labels,
         epochs=2,
         batchsize=8,
-        loss_func="CrossEntropy",
-        optimizer="adam",
         learn_rate=0.001,
         patience=2,
         save_best=True,

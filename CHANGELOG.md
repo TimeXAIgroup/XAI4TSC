@@ -8,9 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Experiment-runner reliability release. The `metrics.csv` schema changes,
-`xai4tsc.Explanation` gains a required field and label encoding now takes an
-encoder object, so this is a minor version bump with breaking changes to the
-importable API.
+`xai4tsc.Explanation` gains a required field, and label encoding, the loss and the
+optimizer now take library objects instead of strings.
 
 **Results from earlier versions will not reproduce exactly.** Randomness is now
 derived per result rather than once per run, so model weight init, the split and
@@ -45,7 +44,11 @@ an `encoder` object in place of the `encode` string and `class_order`:
 `split(encode="label")` becomes `split(encoder=LabelEncoder())`, or
 `split()` - the default is unchanged. In YAML, `encode: "onehot"` and
 `encode: "ordinal"` become `encode: "label"`, which reproduces their results, and
-`data_config.classes` is removed.
+`data_config.classes` is removed. `train_model()` takes the loss and the optimizer
+as objects: `train_model(loss_func="crossentropy", optimizer="adam")` becomes
+`train_model(loss_func=nn.CrossEntropyLoss(), optimizer=optim.Adam)`, or
+`train_model()` - the defaults are unchanged. YAML configs keep their strings,
+including the mixed-case `"CrossEntropy"` the shipped configs use.
 
 ### Changed
 
@@ -64,6 +67,72 @@ an `encoder` object in place of the `encode` string and `class_order`:
   per sample, 2-D means one column per model output. The integer dtype is
   checked rather than cast, so an encoder emitting floats is refused instead of
   silently truncated.
+- **The loss and the optimizer are torch objects, not names.**
+  `train_model(loss_func="crossentropy", optimizer="adam")` becomes
+  `train_model(loss_func: nn.Module | None, optimizer: Callable[..., Optimizer] |
+  Optimizer | None)`, both defaulting to `None`, which keeps
+  `nn.CrossEntropyLoss` and `torch.optim.Adam`. The two closed whitelists - one
+  loss and one optimizer, which raised on anything else - are deleted, so every
+  `nn.*Loss`, every `torch.optim` optimizer, and any custom module or factory now
+  works without editing the package. An optimizer is accepted as a class, as a
+  callable (a `functools.partial` carrying constructor arguments), or as an
+  instance built over parameter groups; in the last case `learn_rate` does not
+  apply, and that is logged with the learning rate actually in force rather than
+  silently ignored. The loss is moved to the model's device, so a `weight` tensor
+  built on the CPU travels with it.
+  The runner owns the strings, as it does for the encoder:
+  `experiment_runner/losses.py` and `optimizers.py` hold small tables
+  (`crossentropy`, `bcewithlogits`, `nll`; `adam`, `adamw`, `sgd`, `rmsprop`) plus
+  a dotted-path escape hatch, so `loss_func: "torch.nn.MultiMarginLoss"` or
+  `optimizer: "torch.optim.NAdam"` need no table entry. Names are matched
+  case-insensitively, which is what keeps the shipped `"CrossEntropy"` configs
+  working; a dotted path is not, because it has to import. An unresolvable name is
+  reported during the config check, naming the model entry, before anything is
+  downloaded. `experiment_runner/lookups.py` holds the resolution the three
+  families share.
+- **New `loss_params` and `optimizer_params` hyperparameters** carry constructor
+  arguments: `loss_params: {weight: [1.0, 3.2, 0.8]}`,
+  `optimizer_params: {momentum: 0.9}`. List values become `float32` tensors,
+  because torch registers `weight` and `pos_weight` as buffers and refuses a list
+  outright (`cannot assign 'list' object to buffer 'weight'`), and a `float64`
+  tensor makes the loss raise at the first call. Class weighting therefore needs
+  no framework feature of its own - it is a constructor argument of the loss.
+  Note that torch's `weight` and `pos_weight` default to `None`, which means
+  **unweighted, not balanced**: a majority class dominates in proportion to its
+  frequency unless weights are given.
+  These two are the first `hyperparams` keys that are not `train_model`
+  parameters: the runner consumes them when it builds the objects. The accepted
+  key list is now derived from both pointer tables rather than from
+  `_PACKAGE_BACKED` alone.
+- **The loss is checked against the targets before the first epoch.** Two layers,
+  because torch will not do it: a smoke call on one batch, re-raised with both
+  shapes and dtypes named, which turns a mid-training traceback into a startup
+  error (including for a `weight` of the wrong length); and a specific rule for
+  the one case a smoke call cannot catch - `nn.CrossEntropyLoss` **accepts** a 2-D
+  float target, reading each row as soft class probabilities over a competitive
+  softmax, so two co-occurring labels can each reach at most 0.5. It converges,
+  the curve looks healthy and the objective is wrong, so an index-target loss
+  against per-output targets now raises and names `bcewithlogits`. The check runs
+  in eval mode under `no_grad` and is handed tensors rather than a loader - a
+  `DataLoader` iterator seeds itself from the global torch generator, which would
+  have shifted every later weight initialisation.
+- **Targets follow their rank at the tensor boundary**: `int64` for 1-D class
+  indices, `float32` for a 2-D array with one column per output, since
+  `BCEWithLogitsLoss` rejects `int64` and `CrossEntropyLoss` rejects `float32`
+  indices. The per-epoch accuracy follows too: a 2-D target is scored per output
+  (`1 - Hamming loss`, logged as `bit_acc`) instead of being compared against an
+  argmax, which raised when the batch size differed from the column count and
+  silently reported 133% when they matched.
+- **A free-form parameter mapping keeps the keys `master.yaml` cannot list.**
+  `_merge_warn_drop` filtered every nested level against master and dropped what
+  it did not find, so a Quantus parameter set in `default_settings` vanished:
+  `metric_class_params: {nr_samples: 7}` resolved to master's five declared keys
+  alone. The merge now stops its descent at the mappings listed as runner-owned -
+  `metric_class_params`, `metric_call_params`, `loss_params`, `optimizer_params` -
+  which is the rule `default_settings_leaves` already used. Master's own entries
+  still apply underneath as defaults. The trade is deliberate: inside those four
+  mappings a typo is no longer caught at merge time, because master cannot
+  enumerate the parameters of ~37 metric classes or of an arbitrary torch loss.
 - **`encode: "onehot"` and `encode: "ordinal"` are removed**, and both raise with a
   message naming `"label"`. They put scikit-learn's *feature* encoders in the
   label slot, which the library separates deliberately (`LabelEncoder`,

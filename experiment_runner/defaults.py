@@ -53,8 +53,6 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     ("train_config", "hyperparams.learn_rate"): (ModelBase.train_model, "learn_rate"),
     ("train_config", "hyperparams.patience"): (ModelBase.train_model, "patience"),
     ("train_config", "hyperparams.save_best"): (ModelBase.train_model, "save_best"),
-    ("train_config", "hyperparams.loss_func"): (ModelBase.train_model, "loss_func"),
-    ("train_config", "hyperparams.optimizer"): (ModelBase.train_model, "optimizer"),
     ("explanation_config", "target"): (generate_explanation, "targets"),
     ("explanation_config", "visualization_type"): (
         generate_explanation,
@@ -80,6 +78,16 @@ _RUNNER_OWNED: frozenset[tuple[str, str]] = frozenset(
         ("data_config", "encode"),
         ("explanation_config", "save_exp_values"),
         ("train_config", "train"),
+        # The loss and the optimizer are objects in the package signature, whose
+        # default is None, so there is no value to read off it: the names and
+        # their constructor arguments are the runner's own. The two `*_params`
+        # mappings are free-form - a third-party loss has parameters master
+        # cannot enumerate - and are consumed by the runner rather than passed to
+        # `train_model`.
+        ("train_config", "hyperparams.loss_func"),
+        ("train_config", "hyperparams.loss_params"),
+        ("train_config", "hyperparams.optimizer"),
+        ("train_config", "hyperparams.optimizer_params"),
         # Which of `indices` / `count` applies is a runner dispatch, and the
         # indices in master are a placeholder: an entry selecting by index has to
         # supply its own, which config validation requires.
@@ -149,9 +157,15 @@ def hyperparam_names() -> frozenset[str]:
     """
     Return the training hyperparameters a model entry may set.
 
-    Derived from :data:`_PACKAGE_BACKED` rather than listed again, so adding a
+    Derived from both pointer tables rather than listed again, so adding a
     hyperparameter to :meth:`~xai4tsc.models.base.ModelBase.train_model` and the
     table is enough to make it configurable.
+
+    Both tables, not just the package-backed one: ``loss_func`` and ``optimizer``
+    name library objects the runner builds, and ``loss_params`` /
+    ``optimizer_params`` are consumed by the runner and never reach
+    ``train_model`` at all. Deriving from ``_PACKAGE_BACKED`` alone would make
+    all four "not a training parameter" in config validation.
 
     Returns
     -------
@@ -161,7 +175,7 @@ def hyperparam_names() -> frozenset[str]:
     prefix = "hyperparams."
     return frozenset(
         key.removeprefix(prefix)
-        for section, key in _PACKAGE_BACKED
+        for section, key in (*_PACKAGE_BACKED, *_RUNNER_OWNED)
         if section == "train_config" and key.startswith(prefix)
     )
 

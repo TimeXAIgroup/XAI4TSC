@@ -147,7 +147,21 @@ def test_unknown_key_is_not_silently_defaulted():
 @pytest.mark.unit
 def test_hyperparam_names_are_derived_from_train_model():
     accepted = set(inspect.signature(ModelBase.train_model).parameters)
-    assert hyperparam_names() <= accepted
+    # Everything a `hyperparams` block accepts is a train_model parameter, except
+    # the two mappings the runner consumes when it builds the loss and the
+    # optimizer. Naming them makes a third such key an explicit edit rather than
+    # a quiet weakening of the check.
+    consumed = {"loss_params", "optimizer_params"}
+    forwarded = hyperparam_names() - consumed
+    assert forwarded <= accepted, (
+        f"these hyperparams reach train_model but are not parameters of it: "
+        f"{sorted(forwarded - accepted)}"
+    )
+    assert consumed <= hyperparam_names(), "the consumed keys must still be settable"
+    assert not (consumed & accepted), (
+        "a consumed key became a train_model parameter; forward it instead of "
+        "popping it in the runner, and drop it from `consumed` here"
+    )
     assert "epochs" in hyperparam_names()
     # Not a hyperparameter: the runner supplies it, so an entry must not.
     assert "save_path" not in hyperparam_names()

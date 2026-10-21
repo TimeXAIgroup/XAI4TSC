@@ -964,8 +964,6 @@ _TRAIN_HP = {
     "learn_rate": 1e-3,
     "patience": 5,
     "save_best": True,
-    "loss_func": "crossentropy",
-    "optimizer": "adam",
 }
 
 

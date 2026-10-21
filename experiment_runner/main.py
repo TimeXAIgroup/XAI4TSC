@@ -52,6 +52,8 @@ from .encoders import build_encoder
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
 from .log_setup import _add_file_logging, _setup_console_logging
+from .losses import build_loss
+from .optimizers import build_optimizer
 from .seeding import boundary_seed, seed_globals
 from .utils import (
     _METRICS_COLUMNS,
@@ -447,7 +449,19 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         )
                         # Train the model (validation drives early stopping
                         # when a val split is present)
-                        hyperparams = model_config["hyperparams"]
+                        # The package takes the loss object and an optimizer
+                        # factory; the names and their constructor arguments are
+                        # the runner's, so they are resolved here. The two
+                        # `*_params` mappings are consumed, not forwarded.
+                        hyperparams = dict(model_config["hyperparams"])
+                        hyperparams["loss_func"] = build_loss(
+                            hyperparams.get("loss_func"),
+                            hyperparams.pop("loss_params", None),
+                        )
+                        hyperparams["optimizer"] = build_optimizer(
+                            hyperparams.get("optimizer"),
+                            hyperparams.pop("optimizer_params", None),
+                        )
                         model_wrapper.train_model(
                             train_data,
                             train_labels,

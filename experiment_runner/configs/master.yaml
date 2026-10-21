@@ -182,8 +182,25 @@ train_config:
                             # mirror its defaults and a test keeps the two in step
       epochs: 20            # epochs to run in this call (a resumed run continues the count)
       batchsize: 8          # batchsize for model training
-      loss_func: "crossentropy"   # only "crossentropy" is supported; matched case-insensitively
-      optimizer: "adam"           # only "adam" is supported; matched case-insensitively
+      loss_func: "crossentropy"   # which torch loss to train with: "crossentropy" (default),
+                            #   "bcewithlogits", "nll", or a dotted path to any loss class,
+                            #   e.g. "torch.nn.MultiMarginLoss". Matched case-insensitively.
+                            #   The loss is checked against the targets on one batch before
+                            #   the first epoch: a loss that reads class indices given
+                            #   per-output targets is an error, because it would not fail,
+                            #   it would optimise a different objective.
+      loss_params: {}       # constructor arguments for the loss, e.g.
+                            #   {weight: [1.0, 3.2, 0.8]} for crossentropy, or
+                            #   {pos_weight: [1.0, 2.0, 1.0]} for bcewithlogits. Lists are
+                            #   converted to float32 tensors. Both weighting arguments
+                            #   default to none in torch, which means unweighted - not
+                            #   balanced: a majority class dominates in proportion to its
+                            #   frequency unless you say otherwise.
+      optimizer: "adam"     # "adam" (default), "adamw", "sgd" or "rmsprop", or a dotted path
+                            #   to any optimizer class, e.g. "torch.optim.NAdam". Matched
+                            #   case-insensitively.
+      optimizer_params: {}  # constructor arguments beyond the learning rate, e.g.
+                            #   {momentum: 0.9, nesterov: true} for sgd
       learn_rate: 0.001     # optimizer learning rate
       patience: 3           # epochs without a >0.005 improvement before early stopping
       save_best: true       # true = keep the best epoch by validation loss (training loss

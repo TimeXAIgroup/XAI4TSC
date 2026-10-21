@@ -15,8 +15,10 @@ import yaml
 
 from xai4tsc.utils.utils import merge_dicts
 
-from .defaults import apply_package_defaults, hyperparam_names
+from .defaults import _RUNNER_OWNED, apply_package_defaults, hyperparam_names
 from .encoders import build_encoder
+from .losses import build_loss
+from .optimizers import build_optimizer
 
 logger = logging.getLogger("xai4tsc.runner.config")
 
@@ -160,6 +162,37 @@ def register_external_components(config: dict) -> None:
             register_metric(name, cls)
 
 
+def _free_form_mapping(context: str, key: str) -> bool:
+    """
+    Return whether ``context.key`` names a runner-owned free-form mapping.
+
+    Such a mapping is one whose keys ``master.yaml`` cannot enumerate: the
+    Quantus parameter blocks fan out to ~37 metric classes, and ``loss_params``
+    takes whatever its loss constructor does, including a third-party one. They
+    are listed in :data:`~experiment_runner.defaults._RUNNER_OWNED`, and
+    :func:`~experiment_runner.defaults.default_settings_leaves` already stops its
+    descent at exactly these keys; this is the same rule for the merge, which
+    otherwise filters each level against master and drops what it does not find.
+
+    Parameters
+    ----------
+    context : str
+        The dotted merge context, e.g. ``"root.train_config.default_settings"``.
+    key : str
+        The key being merged inside *context*.
+
+    Returns
+    -------
+    bool
+        ``True`` when the user's mapping should be taken whole.
+    """
+    parts = context.split(".")
+    if len(parts) < 3 or parts[0] != "root" or parts[2] != "default_settings":
+        return False
+    path = ".".join([*parts[3:], key])
+    return (parts[1], path) in _RUNNER_OWNED
+
+
 def _merge_warn_drop(
     user: dict, master: dict, context: str, issues: "ConfigIssues | None" = None
 ) -> dict:
@@ -199,9 +232,15 @@ def _merge_warn_drop(
             )
             continue
         if isinstance(value, dict) and isinstance(master[key], dict):
-            result[key] = _merge_warn_drop(
-                value, master[key], f"{context}.{key}", issues
-            )
+            if _free_form_mapping(context, key):
+                # Master cannot enumerate these keys, so filtering against it
+                # would silently drop every parameter it does not happen to list.
+                # Its own entries still apply as defaults underneath.
+                result[key] = merge_dicts(copy.deepcopy(value), master[key])
+            else:
+                result[key] = _merge_warn_drop(
+                    value, master[key], f"{context}.{key}", issues
+                )
         else:
             result[key] = value
     if own_report:
@@ -1198,6 +1237,42 @@ def _validate_encoders(config: dict, issues: ConfigIssues) -> None:
             )
 
 
+def _validate_training_lookups(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check that each model entry's loss and optimizer can be built.
+
+    The counterpart to :func:`_validate_encoders`: resolving the names here means
+    a misspelling, a retired name or a bad constructor argument fails before a
+    dataset is downloaded or a model is instantiated, instead of part-way into a
+    training run.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config, whose model entries already carry their merged
+        ``hyperparams``.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    for index, entry in enumerate(
+        (config.get("train_config") or {}).get("models") or []
+    ):
+        if not isinstance(entry, dict):
+            continue
+        hyperparams = entry.get("hyperparams")
+        if not isinstance(hyperparams, dict):
+            continue
+        where = f"train_config.models[{index}] ('{entry.get('model', '?')}')"
+        for build, name_key, params_key in (
+            (build_loss, "loss_func", "loss_params"),
+            (build_optimizer, "optimizer", "optimizer_params"),
+        ):
+            try:
+                build(hyperparams.get(name_key), hyperparams.get(params_key))
+            except ValueError as exc:
+                issues.error(where, str(exc))
+
+
 def _validate_explanation_samples(config: dict, issues: ConfigIssues) -> None:
     """
     Check each explainer's ``samples`` block as far as the data allows.
@@ -1269,9 +1344,11 @@ def _validate_hyperparams(config: dict, issues: ConfigIssues) -> None:
     Check every model entry's ``hyperparams`` block against what training takes.
 
     The block is handed to
-    :meth:`~xai4tsc.models.base.ModelBase.train_model` as keyword arguments, so
-    an unrecognised key raises there. Reporting it here instead names the entry
-    and offers the near-miss, and does so before a dataset is downloaded. It is
+    :meth:`~xai4tsc.models.base.ModelBase.train_model` as keyword arguments - all
+    but ``loss_params`` and ``optimizer_params``, which the runner consumes when
+    it builds those two objects - so an unrecognised key raises there. Reporting
+    it here instead names the entry and offers the near-miss, and does so before
+    a dataset is downloaded. It is
     an error rather than a warning because the keys decide how the model trains:
     a silently dropped ``epochs`` moves every number the run produces.
 
@@ -1361,6 +1438,7 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     _validate_encoders(config, issues)
     _validate_explanation_samples(config, issues)
     _validate_hyperparams(config, issues)
+    _validate_training_lookups(config, issues)
 
     # Lazy imports to avoid circular dependencies at module level
     from xai4tsc.xai.explain import EXPLAINERS

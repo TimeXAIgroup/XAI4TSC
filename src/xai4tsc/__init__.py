@@ -24,6 +24,7 @@ from .data import (
     DatasetBase,
     LocalDataset,
     MultiHotLabelEncoder,
+    PowersetLabelEncoder,
     SyntheticDataset,
     SynthMultilabelFreqDataset,
     UcrUeaDataset,
@@ -80,7 +81,7 @@ from .xai import (
 )
 
 # Library convention: add NullHandler so xai4tsc is silent by default.
-# The standalone runner (main.py) installs real handlers on this logger.
+# An application using the package installs real handlers on this logger.
 logging.getLogger("xai4tsc").addHandler(logging.NullHandler())
 
 __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
@@ -98,6 +99,7 @@ __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
     "UcrUeaDataset",
     "LocalDataset",
     "MultiHotLabelEncoder",
+    "PowersetLabelEncoder",
     "SyntheticDataset",
     "SynthMultilabelFreqDataset",
     "SYNTHETIC_DATASETS",

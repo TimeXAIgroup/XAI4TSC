@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import inspect
 import logging
+import re
 from pathlib import Path
 from types import FunctionType
 
@@ -94,8 +95,8 @@ def load_class_from_path(path: str | Path, class_name: str) -> type:
     ``sys.modules``.
 
     This runs untrusted code. Callers are responsible for obtaining user consent
-    before invoking it; the experiment runner gates this behind the
-    ``general.allow_external_code`` config flag.
+    before invoking it, and so for gating it behind a setting the user controls
+    rather than calling it on a path that merely happens to be present.
 
     Parameters
     ----------
@@ -151,3 +152,29 @@ def rescale_array(
     if a_min == a_max:
         return np.full_like(array, new_min, dtype=float)
     return (array - a_min) / (a_max - a_min) * (new_max - new_min) + new_min
+
+
+def _filename_slug(name: object, fallback: str) -> str:
+    """
+    Reduce a class name to something safe to put in a filename.
+
+    A generated class name - an integer index, or a multi-hot row joined with
+    dashes - is usable as-is, but a name supplied through an encoder's
+    ``classes`` argument is arbitrary text: a ``/`` would silently write into a
+    subdirectory or fail, and a space makes the path awkward to pass around.
+
+    Parameters
+    ----------
+    name : object
+        The display name, of any type; it is stringified first.
+    fallback : str
+        Used when *name* has no usable characters at all.
+
+    Returns
+    -------
+    str
+        *name* with every character outside ``[A-Za-z0-9._-]`` replaced by an
+        underscore, runs collapsed and the ends trimmed.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("_")
+    return slug or fallback

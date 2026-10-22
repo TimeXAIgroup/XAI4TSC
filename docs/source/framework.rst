@@ -36,12 +36,14 @@ Getting Started
 
       results_rel_path/
       └── <experiment_name>/
-          ├── metrics.csv            # all results
+          ├── metrics.csv            # all XAI metric scores
+          ├── models.csv             # test-set performance of every model
           ├── experiment.log         # run log
           └── <dataset>/
-              ├── metrics.csv        # per-dataset results
+              ├── metrics.csv        # per-dataset metric scores
+              ├── <dataset>_models.csv  # per-dataset model performance
               └── <model>/
-                  ├── metrics.csv    # per-model results
+                  ├── metrics.csv    # per-model metric scores
                   ├── <model>_epoch_<n>.pt   # best checkpoint
                   ├── <model>_epoch_<n>_config.json  # how to rebuild it
                   └── explanations/  # per-sample relevance plots
@@ -82,11 +84,25 @@ Getting Started
         - Explainer result identity (``WRAPPER-BASE`` for wrapper methods)
       * - ``metric``
         - Metric result identity
+      * - ``target``
+        - The class this row's attributions explain, when the explanation holds
+          one per class (``target: "all"``, or a per-output label encoding).
+          Empty for a single-target explanation, where the explained class
+          varies per sample
+      * - ``samples``
+        - How many samples were handed to the metric. An upper bound rather than
+          an exact count, since a ground-truth metric drops samples with no
+          region of its own accord
+      * - ``seed``
+        - The derived seed this result was computed with, so a row can be
+          reproduced from the row alone. Empty under ``reproducible: false``
       * - ``status``
         - ``ok`` (a score was produced), ``nan`` (the metric ran but could not
-          produce a number), ``error`` (the metric raised) or
-          ``skipped-domain`` (the metric needs an explanation domain this
-          explainer does not produce)
+          produce a number), ``error`` (the metric raised), ``skipped-domain``
+          (the metric needs an explanation domain this explainer does not
+          produce), ``skipped-no-ground-truth`` (the metric localizes against
+          ground truth the dataset does not provide) or ``skipped-no-targets``
+          (no explained sample carries this target)
       * - ``score``
         - The aggregated score; empty unless ``status`` is ``ok``
       * - ``detail``
@@ -95,6 +111,48 @@ Getting Started
    Every combination the run attempts gets a row, so the file accounts for the
    whole configuration rather than only its successes. A finished run always
    writes the global ``metrics.csv``, header-only if nothing succeeded.
+
+   **``models.csv`` is a different measurement** and so a separate file: the
+   test-set performance of each model, one row per (dataset, model), rather than
+   the XAI metric scores. It starts with ``dataset``, ``model``, ``epoch`` (the
+   weights the numbers describe), ``status`` and ``detail``, and the metric
+   columns that follow depend on the formulation - ``pos`` / ``neg`` and the
+   positive class's rates for a binary problem, macro rates for a multiclass
+   one, and ``subset_accuracy`` / ``bit_accuracy`` / ``hamming_loss`` for a
+   multi-label one. Mixing formulations in one experiment therefore gives a
+   union of columns, with an empty cell where a formulation does not define the
+   metric. Which columns a row has follows from the formulation and not from the
+   split: a split with only one class present reports a ``nan`` AUC and keeps
+   every other column.
+
+   The same numbers are also written per model as
+   ``<model>_e<epoch>_test_results.csv``, with the one-vs-rest counts of every
+   class, and every rate derived from them, beside it in
+   ``<model>_e<epoch>_test_per_class.csv`` - one row per class, or per output
+   for a multi-label model, with the same columns either way. That table is
+   where a class's own ``accuracy``, ``sensitivity``, ``specificity``, ``ppv``,
+   ``npv``, ``f1``, ``mcc`` and ``auc`` live; the summary carries only the
+   aggregate. Both tables report fractions rather than percentages.
+
+   Every model gets a row, including one this run did not train: an entry with
+   no ``train`` key is scored on the test split exactly like a freshly trained
+   one, which is what pointing an entry at a checkpoint is for. A model whose
+   iteration raises is skipped, and gets a ``status: failed`` row carrying the
+   exception rather than no row at all. So the file accounts for the
+   configuration the same way ``metrics.csv`` does.
+
+   ``epoch`` is empty for weights whose epoch is not known - a freshly
+   initialised model, or a checkpoint that recorded none. The files beside it
+   are named ``_e0_`` in that case, since a file still needs a name.
+
+   **Confusion figures.** A single-label run writes one
+   ``<model>_e<epoch>_confusion_matrix.png``. A multi-label run writes one per
+   output instead, named after the class
+   (``<model>_e<epoch>_confusion_matrix_<i>_<class>.png``), because a K-by-K
+   matrix cannot describe a problem where one sample belongs to several classes
+   at once - its rows would not sum to the sample count. The index is in the
+   name as well as the class, since class names come from the encoder and two
+   of them can reduce to the same filesystem-safe spelling.
 
    **Result identities.** A row and its output directory are named after the
    config entry that produced them. Repeating an entry is supported: when two or

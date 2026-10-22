@@ -70,14 +70,22 @@ data_config:
                             # Ignored by `use_predefined_splits` and `is_presplit`.
     encode: "label"         # which label encoder turns the label column into model targets.
                             # The runner builds the object, the package takes it, and the
-                            # fitted encoder maps class indices back to names:
+                            # fitted encoder names the model's outputs:
                             #   "label":    one int64 class index per sample (default)
-                            #   "multihot": multi-hot rows (e.g. [0,1,1]) -> one index per
-                            #               distinct combo, i.e. the label-powerset reduction
-                            #   a dotted path to an encoder class taking no constructor
-                            #   arguments, e.g. "sklearn.preprocessing.LabelBinarizer"
+                            #   "multihot": multi-hot rows (e.g. [0,1,1]) kept as one target
+                            #               column per output. Train it with
+                            #               loss_func: "bcewithlogits"
+                            #   "powerset": multi-hot rows -> one index per distinct combo,
+                            #               the label-powerset reduction.
+                            #   a dotted path to an encoder class, e.g.
+                            #   "sklearn.preprocessing.MultiLabelBinarizer" when the labels
+                            #   are label *sets* rather than multi-hot rows
                             # An unknown name is an error, never a silent fallback.
                             # "onehot" and "ordinal" were removed - use "label".
+    encode_params: {}       # constructor arguments for `encode`; most encoders take none.
+                            # "multihot" accepts `classes`, the label identity of each
+                            # column in order, which is what names the outputs in the
+                            # per-output results: {classes: ["7Hz", "19Hz", "37Hz"]}.
     format: "numpy"         # "numpy", "arff", "csv", "wfdb"
     layout: "auto"          # axis order of a local array (ignored for UCR/UEA and synthetic):
                             #   "auto": transpose when axis 1 > axis 2, with a warning
@@ -109,7 +117,9 @@ data_config:
     skip_explainers: false  # split and train only; skip explain and evaluate
     skip_metrics: false     # split, train, and explain; skip evaluate
     allow_padding: false    # zero-pad variable-length series to the longest series length
+                            # (the package calls this pad_series, as its errors name it)
     allow_imputation: false # replace NaN values with the per-channel mean before splitting
+                            # (the package calls this impute_missing)
     max_samples: null       # subsample to at most N samples; prevents OOM on large datasets (e.g. InsectWingbeat)
     sample_strategy: "random"  # subset selection: "random" | "first" | "last" | "stratified"
     max_series_length: null # truncate each series to at most T timesteps; reduces memory for long-series datasets
@@ -141,7 +151,8 @@ data_config:
                                 # synthetic: multi-label bursts localized in time and
                                 #   frequency, generated on first use and cached, with
                                 #   per-sample ground truth for the localization metrics
-      encode: "multihot"        # its labels are multi-hot rows
+      encode: "multihot"        # its labels are multi-hot rows; one output per
+                                # frequency. Pair with loss_func: "bcewithlogits"
       init_params:              # generation params (defaults from the dataset class,
                                 #   which are the source repository's and reproduce its
                                 #   published dataset exactly):
@@ -282,7 +293,20 @@ explanation_config:
     # As in data_config: these mirror the package defaults and a test holds them
     # in step.
     target: "predicted"     # class an attribution explains and is scored against:
-                            # "predicted", "label", or "all" (one explanation per class)
+                            # "predicted", "label", or "all" (one explanation per class).
+                            # Under a per-output encoding (encode: "multihot") a
+                            # prediction is a SET of labels, so all three stack one
+                            # attribution per output; "label" and "predicted" then mark
+                            # which outputs each sample is scored for - the labels it
+                            # carries, or those over `threshold`. Every metric then sees
+                            # only the samples that carry the output it is scoring.
+    threshold: 0.5          # decision threshold on a per-output probability. Read only
+                            # for a per-output encoding with target: "predicted", where
+                            # it decides which outputs each sample is explained for, and
+                            # so how many samples each output's score is over. That count
+                            # is the `samples` column of metrics.csv: it moves with the
+                            # model and with this value, so scores are not comparable
+                            # without it
     visualization_type:
       - "points"            # Available: points (default), background, intensity, bar, graph
     samples:                # which test samples to explain. Metrics score only these, so

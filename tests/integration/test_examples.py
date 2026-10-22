@@ -42,7 +42,8 @@ def test_getting_started_trains_a_model_that_is_not_degenerate(
     # steadier thing to assert than a threshold on 20 test samples.
     assert results["tp"] > 0, f"predicts no positives: {results}"
     assert results["tn"] > 0, f"predicts no negatives: {results}"
-    assert float(results["accuracy"]) > 60, f"below majority baseline: {results}"
+    # `accuracy` is a fraction, as every rate the summary reports is.
+    assert float(results["accuracy"]) > 0.6, f"below majority baseline: {results}"
     assert float(results["mcc"]) > 0, f"no better than chance by MCC: {results}"
 
     # The example's own artifacts land in out_dir, named after the model.

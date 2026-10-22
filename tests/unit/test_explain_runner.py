@@ -76,6 +76,7 @@ def _explainer_config(sample_type, **extra):
     cfg = {
         "method": "integrated_gradients",
         "target": "predicted",
+        "threshold": 0.5,
         "samples": {"type": sample_type},
         "visualization_type": ["points"],
         "save_exp_values": False,
@@ -116,6 +117,7 @@ def test_wrapper_save_folder_uses_qualified_name(tmp_path, monkeypatch):
     cfg = {
         "method": "SIGN",
         "target": "predicted",
+        "threshold": 0.5,
         "samples": {"type": "index", "indices": [0, 2]},
         "visualization_type": ["points"],
         "save_exp_values": False,
@@ -251,6 +253,7 @@ def test_adapter_strips_its_own_keys_before_building_the_explainer(
             "explanation_config": {
                 "default_settings": {
                     "target": None,
+                    "threshold": None,
                     "samples": None,
                     "visualization_type": None,
                     "save_exp_values": None,

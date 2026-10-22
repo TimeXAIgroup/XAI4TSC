@@ -1,5 +1,5 @@
 """
-The ``DataType`` and ``Domain`` enums, plus the data-domain config spellings.
+The ``DataType`` and ``Domain`` enums, plus the data-domain string spellings.
 
 Datasets declare which signal domain their arrays are expressed in, explainers declare
 which domains they consume and produce, and metrics declare which they can score.
@@ -54,7 +54,7 @@ DATA_DOMAINS: dict[str, Domain] = {
     "frequency": Domain.FREQUENCY,
     "time_frequency": Domain.TIME_FREQUENCY,
 }
-"""Config spellings of the signal domain a dataset's arrays are expressed in."""
+"""String spellings of the signal domain a dataset's arrays are expressed in."""
 
 
 def resolve_data_domain(value: "str | Domain") -> Domain:

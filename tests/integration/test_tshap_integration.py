@@ -125,6 +125,7 @@ def test_tshap_through_runner_adapter(trained_model, split_dataset, tmp_path):
     explainer_config = {
         "method": "TSHAP",
         "target": "predicted",
+        "threshold": 0.5,
         "samples": {"type": "index", "indices": [0, 1]},
         "visualization_type": ["points"],
         "save_exp_values": False,

@@ -50,8 +50,8 @@ class ExplainerBase(ABC):
     explanation_domains: ClassVar[set[Domain]] = {Domain.TIME}
     """Signal domains this explainer *can* produce explanations in. A set of
     :class:`~xai4tsc.xai.Domain` members (capability declaration, mirroring
-    :attr:`data_applicability`). Checked statically by the runner's config sanity
-    check before any explainer is instantiated. Only read when
+    :attr:`data_applicability`). Declared on the class, so it can be checked
+    before an explainer is instantiated. Only read when
     :attr:`explains_in_data_domain` is ``False``; a domain-changing explainer
     (frequency / time-frequency) overrides both. The realized domain of a produced
     explanation (``Explanation.explanation_domain``) must be a member of this set."""

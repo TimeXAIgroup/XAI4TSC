@@ -11,7 +11,7 @@ from .._random import DEFAULT_SEED, resolve_rng
 from ..data.base import class_names
 from ..models.base import ModelBase, predict_probs
 from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
-from ..utils.utils import dict_to_args
+from ..utils.utils import _filename_slug, dict_to_args
 from . import (
     explanation_domains,
     feature_attribution,
@@ -41,6 +41,7 @@ def generate_explanation(
     save_path: Path | str | None = None,
     visualization_type: Sequence[str] = ("points",),
     data_domain: str | Domain = Domain.TIME,
+    threshold: float = 0.5,
 ) -> Explanation | None:
     """
     Generate an explanation for the given indices or for random samples.
@@ -50,7 +51,8 @@ def generate_explanation(
     Parameters
     ----------
     method : str
-        Explanation method to use. Have a look at the support.yaml file.
+        Explanation method to use, as keyed in
+        :data:`~xai4tsc.xai.EXPLAINERS`.
     model : ModelBase
         Model to explain.
     data : np.ndarray
@@ -59,7 +61,15 @@ def generate_explanation(
         Labels of the dataset, by default None
     targets : str, optional
         Which class to explain: ``"predicted"`` (default), ``"label"``
-        (ground truth), or ``"all"`` (one explanation per class).
+        (ground truth), or ``"all"`` (one explanation per class). Under a
+        per-output (2-D) label encoding all three stack one attribution per
+        output; ``"label"`` and ``"predicted"`` then set
+        ``Explanation.target_mask`` to say which of them apply per sample.
+    threshold : float, optional
+        Decision threshold on a per-output probability, 0.5 by default. Only
+        read for a per-output (multi-label) encoding with
+        ``targets="predicted"``, where it decides which outputs each sample is
+        explained for.
     params : dict, optional
         Parameters for the explanation method, by default None
     call_params : dict, optional
@@ -77,8 +87,8 @@ def generate_explanation(
     prng : np.random.Generator, optional
         Generator used to pick random sample indices. When ``None`` a generator
         seeded with :data:`~xai4tsc.DEFAULT_SEED` is used, so the selection is
-        reproducible; the runner passes a per-dataset generator so every
-        explainer scores the same samples.
+        reproducible. Pass one generator to several explainers to have them
+        all explain the same samples.
     device : str, optional
         Device to calculate on, by default ``"cpu"``.
     save_path : Path | str, optional
@@ -140,8 +150,46 @@ def generate_explanation(
         save_path=save_path,
         visualization_type=visualization_type,
         data_domain=data_domain,
+        threshold=threshold,
     )
     return explanation
+
+
+def _per_output_mask(
+    model: ModelBase,
+    exp: Explanation,
+    labels: np.ndarray,
+    targets: str,
+    threshold: float,
+) -> np.ndarray:
+    """
+    Build the ``(n_outputs, n_samples)`` mask of attributions that apply.
+
+    Parameters
+    ----------
+    model : ModelBase
+        The model, queried for ``"predicted"``.
+    exp : Explanation
+        The explanation under construction, for its ``data``.
+    labels : np.ndarray
+        Multi-hot labels, shape ``(n_samples, n_outputs)``.
+    targets : str
+        ``"label"`` for the outputs a sample truly carries, anything else for
+        those the model puts over *threshold*.
+    threshold : float
+        Decision threshold on the per-output probability.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask, transposed so the target axis leads like the stack's.
+    """
+    if targets == "label":
+        return np.asarray(labels).astype(bool).T
+    # predict_probs applies the model's own output activation, which for a
+    # per-output model is a sigmoid - so this is a per-label probability and
+    # not a share of a competitive softmax.
+    return (predict_probs(model, exp.data) >= threshold).T
 
 
 def _get_explanation(
@@ -158,6 +206,7 @@ def _get_explanation(
     save_path: Path | None = None,
     visualization_type: Sequence[str] = ("points",),
     data_domain: str | Domain = Domain.TIME,
+    threshold: float = 0.5,
 ) -> Explanation:
     """
     Use the supplied parameters to explain the given samples.
@@ -182,8 +231,13 @@ def _get_explanation(
         for options an explainer takes per call. Recorded on the returned
         explanation so the re-explaining metrics replay the same call.
     targets : str, optional
-        Whether to explain predictions for all classes or only the
-        predicted class, by default "predicted"
+        Which class each attribution explains: ``"predicted"`` (default) the
+        model's own top class, ``"label"`` the sample's true class, or ``"all"``
+        one attribution per class stacked on a leading axis. Under a per-output
+        (2-D) label encoding all three stack one attribution per output;
+        ``"label"`` and ``"predicted"`` then set
+        :attr:`~xai4tsc.xai.Explanation.target_mask` to say which of them apply
+        per sample.
     device : str, optional
         Device to calculate on, by default "cpu"
     orig_indices : np.ndarray, optional
@@ -198,6 +252,12 @@ def _get_explanation(
         A plain attributor explains in this domain, so it is what the resulting
         ``explanation_domain`` becomes; a domain-changing explainer declares which
         domains it can consume and is refused on the others.
+    threshold : float, optional
+        Decision threshold on a per-output probability, 0.5 by default. Only
+        read for a per-output (multi-label) encoding with
+        ``targets="predicted"``, where it decides which outputs a sample is
+        explained for, i.e. what
+        :attr:`~xai4tsc.xai.Explanation.target_mask` records.
 
     Returns
     -------
@@ -256,12 +316,21 @@ def _get_explanation(
         transform=getattr(explainer_instance, "transform", None),
     )
 
-    # Check which targets to generate explanations for
-    if targets == "all":
-        # Explain all classes, stacking one attribution per class on a leading
-        # axis. The container is derived from what the explainer actually
-        # returns, not from `data`: frequency is (n, C, F), time-frequency is
-        # (n, C, n_freq, n_time), and freq/TF outputs may be complex.
+    # A 2-D target is one column per model output, per the contract the data
+    # layer fixes (1-D encodes class indices, 2-D one column per output). There
+    # a prediction is a *set* of labels, so no mode can name one class per
+    # sample: all three stack one attribution per output and differ only in the
+    # mask saying which of them apply. The alternative is what used to happen
+    # and was silently wrong - "label" argmaxed the multi-hot row and explained
+    # only its first active output, and "predicted" argmaxed a softmax over
+    # outputs that do not compete.
+    per_output = np.ndim(labels) > 1
+
+    if targets == "all" or per_output:
+        # One attribution per class, stacked on a leading axis. The container is
+        # derived from what the explainer actually returns, not from `data`:
+        # frequency is (n, C, F), time-frequency is (n, C, n_freq, n_time), and
+        # freq/TF outputs may be complex.
         classes = encoder.classes_
         exp_values = None
         for ind in range(len(classes)):
@@ -274,17 +343,16 @@ def _get_explanation(
                 )
             exp_values[ind] = relevance
         exp.exp_values = exp_values
+        if per_output and targets != "all":
+            exp.target_mask = _per_output_mask(model, exp, labels, targets, threshold)
+        # `explained_targets` names one class per sample, which a stack does
+        # not have: it stays unset here and is set by whoever reduces the stack
+        # to a single target.
+        exp.validate_target_mask()
     elif targets == "label":
-        # Captum targets must be per-sample integer class indices. Encoded labels
-        # may be 2-D (one-hot or ordinal); collapse them back to class indices.
-        label_arr = np.asarray(labels)
-        if label_arr.ndim > 1:
-            label_arr = (
-                label_arr.argmax(axis=1)
-                if label_arr.shape[1] > 1
-                else label_arr.ravel()
-            )
-        method_targets = label_arr.astype(int).tolist()
+        # Captum targets must be per-sample integer class indices, which a 1-D
+        # label column already is.
+        method_targets = np.asarray(labels).astype(int).tolist()
         exp.exp_values = explainer_instance.explain(
             model, exp, device, method_targets, **exp.explainer_call_params
         )
@@ -328,7 +396,8 @@ def plot_exp(
     not overwrite one another. ``<name>`` is the class the attribution explains
     (``exp.explained_targets``, falling back to ``exp.labels``), spelled as
     :func:`~xai4tsc.data.base.class_names` spells it - so a multi-hot class reads
-    ``0-0-1`` rather than ``[0 0 1]``, which is not a usable filename.
+    ``0-0-1`` rather than ``[0 0 1]``, which is not a usable filename - and then
+    reduced to filesystem-safe characters.
 
     The renderer is chosen by ``exp.explanation_domain``:
     time-domain explanations use the 1-D
@@ -396,12 +465,16 @@ def plot_exp(
         # per-domain dispatch below is written once. Multi-target stacks a class
         # axis first: exp_values[class, sample]; single-target is exp_values[sample].
         if multi_target:
+            # A target_mask means this sample is explained for only some of the
+            # stacked targets - plotting the rest would draw an attribution for
+            # a label the sample does not carry, which reads as a real finding.
             items = [
                 (
                     _class_label(names, class_ind),
                     exp.exp_values[class_ind, sample_ind : sample_ind + 1],
                 )
                 for class_ind in range(exp.exp_values.shape[0])
+                if exp.rows_for_target(class_ind)[sample_ind]
             ]
         else:
             items = [
@@ -412,7 +485,13 @@ def plot_exp(
             ]
 
         for label, relevance_i in items:
-            base = save_path / f"relevance_index_{idx}_class_{label}"
+            # The label reaches the filesystem, and a class name may come from
+            # an encoder's `classes` argument, so a '/' in it would write into
+            # a subdirectory. A generated name - an index, or a dash-joined
+            # multi-hot row - slugs to itself.
+            base = (
+                save_path / f"relevance_index_{idx}_class_{_filename_slug(label, '?')}"
+            )
             if exp.explanation_domain == Domain.TIME_FREQUENCY:
                 # Time-frequency renders a single fixed heatmap view (no rel_type).
                 fig_path = Path(f"{base}_timefrequency.png")
@@ -457,8 +536,8 @@ def build_explainer(method: str, params: dict | None) -> ExplainerBase:
     Instantiate a registered explainer, filtering *params* to its ``__init__``.
 
     Shared by :func:`_get_explanation` and by wrapper explainers
-    (:class:`~xai4tsc.xai.base.WrapperExplainer`) that need to build their
-    wrapped base method the same way the runner does.
+    (:class:`~xai4tsc.xai.base.WrapperExplainer`), so a wrapped base method is
+    built exactly as a top-level one is.
 
     Parameters
     ----------
@@ -495,8 +574,8 @@ def register_explainer(name: str, explainer_class: type) -> None:
     """
     Register a custom :class:`~xai4tsc.xai.ExplainerBase` subclass.
 
-    After registration the explainer is available by *name* in experiment
-    configs and via :func:`_get_explanation`.
+    After registration the explainer is available by *name* to
+    :func:`_get_explanation` and to anything else resolving :data:`EXPLAINERS`.
 
     Parameters
     ----------

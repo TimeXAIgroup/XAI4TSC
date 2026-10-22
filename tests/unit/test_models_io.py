@@ -43,6 +43,11 @@ _TINY_FCN = {
     },
 }
 
+# What the model RECORDS: what was passed, plus the constructor defaults it did
+# not get. Keeping the two separate is the point of
+# test_recorded_params_include_defaults_not_only_what_was_passed.
+_TINY_FCN_RECORDED = _TINY_FCN["init_params"] | {"output_activation": "softmax"}
+
 
 class _TinyModel(ModelBase):
     """Minimal concrete ModelBase used for registry/save tests."""
@@ -717,7 +722,7 @@ def test_load_model_reads_init_params_from_config_sidecar(tmp_path):
 
     reloaded = load_model({"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu")
 
-    assert reloaded._init_params == _TINY_FCN["init_params"]
+    assert reloaded._init_params == _TINY_FCN_RECORDED
     for key, tensor in original.state_dict().items():
         assert torch.equal(tensor, reloaded.state_dict()[key])
 
@@ -804,7 +809,7 @@ def test_save_model_writes_the_checkpoint_config_beside_it(tmp_path):
     written = json.loads((tmp_path / "FCN_epoch_7_config.json").read_text())
     assert written == {
         "model": "FCN",
-        "init_params": _TINY_FCN["init_params"],
+        "init_params": _TINY_FCN_RECORDED,
         "epoch": 7,
     }
     # Not resumed, so the key is absent rather than null.
@@ -953,7 +958,7 @@ def test_load_model_honours_a_legacy_directory_level_config(tmp_path):
 
     model = load_model({"model": "FCN", "model_ckpt_path": str(ckpt)}, device="cpu")
 
-    assert model._init_params == _TINY_FCN["init_params"]
+    assert model._init_params == _TINY_FCN_RECORDED
 
 
 # ── resuming continues the epoch count ────────────────────────────────────────
@@ -1052,6 +1057,7 @@ def test_recorded_params_include_defaults_not_only_what_was_passed():
         "num_classes": 2,
         "filters": (128, 256, 128),
         "kernel_sizes": (8, 5, 3),
+        "output_activation": "softmax",
     }
 
 
@@ -1258,12 +1264,58 @@ def test_per_class_results_are_written_for_every_problem(tmp_path):
 
     csv = next(tmp_path.glob("*_test_per_class.csv"))
     rows = [line.split(",") for line in csv.read_text().strip().splitlines()]
-    assert rows[0][:7] == ["class", "name", "support", "tp", "tn", "fp", "fn"]
+    assert rows[0][:7] == ["class", "name", "samples", "tp", "tn", "fp", "fn"]
     assert [r[0] for r in rows[1:]] == ["0", "1", "2"]
     assert [r[1] for r in rows[1:]] == ["a", "b", "c"]
     assert [int(r[2]) for r in rows[1:]] == [4, 4, 4]
     # tp + tn + fp + fn is the whole test set for each class, one-vs-rest.
     assert all(sum(int(v) for v in r[3:7]) == 12 for r in rows[1:])
+
+
+@pytest.mark.unit
+def test_the_per_class_table_reports_each_class_its_own_accuracy(tmp_path):
+    # The summary's accuracy is the whole split's; per class the one-vs-rest
+    # reading is the only one available, and it was the column the per-output
+    # table had and this one did not.
+    data = np.random.default_rng(1).standard_normal((12, 1, 32)).astype("float32")
+    labels = np.array([0, 1, 2] * 4)
+
+    FCN(in_channels=1, num_classes=3).evaluate_model(
+        data, labels, batchsize=4, save_path=tmp_path
+    )
+
+    csv = next(tmp_path.glob("*_test_per_class.csv"))
+    header, *body = csv.read_text().strip().splitlines()
+    cols = header.split(",")
+    assert cols.index("accuracy") == cols.index("fn") + 1, "with the other rates"
+    for line in body:
+        cell = dict(zip(cols, line.split(","), strict=True))
+        counts = (int(cell["tp"]), int(cell["tn"]))
+        assert float(cell["accuracy"]) == pytest.approx(sum(counts) / 12, abs=1e-4)
+
+
+@pytest.mark.unit
+def test_both_formulations_report_the_same_per_class_columns(tmp_path):
+    # Single-label and multi-label write the same filename, so a reader that
+    # handles one has to handle the other. Both derive their rates from _rates,
+    # which is what keeps the columns identical.
+    data = np.random.default_rng(2).standard_normal((12, 1, 32)).astype("float32")
+
+    FCN(in_channels=1, num_classes=3).evaluate_model(
+        data, np.array([0, 1, 2] * 4), batchsize=4, save_path=tmp_path / "single"
+    )
+    FCN(in_channels=1, num_classes=3, output_activation="sigmoid").evaluate_model(
+        data,
+        np.array([[1, 0, 1], [0, 1, 1], [1, 1, 0], [0, 0, 0]] * 3),
+        batchsize=4,
+        save_path=tmp_path / "multi",
+    )
+
+    def header(directory: str) -> list[str]:
+        csv = next((tmp_path / directory).glob("*_test_per_class.csv"))
+        return csv.read_text().splitlines()[0].split(",")
+
+    assert header("single") == header("multi")
 
 
 @pytest.mark.unit
@@ -1289,7 +1341,7 @@ def test_class_names_of_the_wrong_length_are_reported_and_ignored(tmp_path, capl
 
 @pytest.mark.unit
 def test_confusion_counts_are_indexed_by_class_not_by_presence():
-    # The full matrix is what makes support_k mean class k. Built over only the
+    # The full matrix is what makes samples_k mean class k. Built over only the
     # classes present, an absent class shifts every row after it. (evaluate_model
     # cannot be driven this way yet: its multiclass AUC rejects a test split that
     # misses a class, so the guarantee is checked on the helper.)
@@ -1298,8 +1350,8 @@ def test_confusion_counts_are_indexed_by_class_not_by_presence():
     counts = _confusion_counts(cm)
 
     assert len(counts) == 3
-    assert counts[2] == {"support": 0, "tp": 0, "tn": 10, "fp": 0, "fn": 0}
-    assert counts[0] == {"support": 4, "tp": 3, "tn": 4, "fp": 2, "fn": 1}
+    assert counts[2] == {"samples": 0, "tp": 0, "tn": 10, "fp": 0, "fn": 0}
+    assert counts[0] == {"samples": 4, "tp": 3, "tn": 4, "fp": 2, "fn": 1}
     assert all(c["tp"] + c["tn"] + c["fp"] + c["fn"] == 10 for c in counts)
 
 
@@ -1310,10 +1362,15 @@ def test_rates_are_nan_where_undefined_rather_than_raising():
     empty = _rates(tp=0, tn=10, fp=0, fn=0)
     assert np.isnan(empty["sensitivity"]) and np.isnan(empty["f1"])
     assert empty["specificity"] == 1.0
+    # Accuracy is the exception: a class nothing belongs to and nothing predicts
+    # is right about every sample, so it is 1.0 rather than nan.
+    assert empty["accuracy"] == 1.0
+    assert np.isnan(_rates(tp=0, tn=0, fp=0, fn=0)["accuracy"]), "no samples at all"
 
     perfect = _rates(tp=5, tn=5, fp=0, fn=0)
     assert perfect == pytest.approx(
         {
+            "accuracy": 1.0,
             "sensitivity": 1.0,
             "specificity": 1.0,
             "ppv": 1.0,
@@ -1443,7 +1500,7 @@ def test_a_class_absent_from_the_test_split_scores_partially(tmp_path):
     header, body = rows[0], rows[1:]
     assert len(body) == 4, "one row per model class, present or not"
     absent = dict(zip(header, body[3], strict=True))
-    assert int(absent["support"]) == 0
+    assert int(absent["samples"]) == 0
     assert absent["auc"] == "nan", "no AUC for a class with no samples"
 
 
@@ -1483,3 +1540,315 @@ def test_a_single_class_test_split_completes_without_a_roc(tmp_path, num_classes
     assert list(tmp_path.glob("*_test_per_class.csv"))
     assert list(tmp_path.glob("*_confusion_matrix.png"))
     assert not list(tmp_path.glob("*_roc.png")), "no curve exists to plot"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("num_classes", [2, 3])
+def test_a_degenerate_split_keeps_the_columns_of_its_problem_type(
+    tmp_path, num_classes
+):
+    # Only the AUC needs two classes present; every rate is nan-safe arithmetic
+    # over the confusion counts. The binary path used to skip the whole rate
+    # block here and emit a short row, so one degenerate dataset in a benchmark
+    # left half of models.csv empty for every other row too.
+    data = np.random.default_rng(8).standard_normal((12, 1, 32)).astype("float32")
+    model = FCN(in_channels=1, num_classes=num_classes)
+    labels = np.arange(12) % num_classes
+
+    healthy = model.evaluate_model(
+        data, labels, batchsize=4, save_path=tmp_path / "healthy"
+    )
+    degenerate = model.evaluate_model(
+        data, np.zeros(12, dtype=np.int64), batchsize=4, save_path=tmp_path / "one"
+    )
+
+    assert list(degenerate) == list(healthy)
+    assert degenerate["auc"] == "nan", "the AUC is the only thing lost"
+    assert degenerate["accuracy"] != "nan", "accuracy needs no second class"
+
+
+# ── output_activation ─────────────────────────────────────────────────────────
+
+# predict_probs is the single probability path for prediction, evaluation and
+# every explainer that picks a target, so which activation it applies decides a
+# lot of numbers. It is a CONSTRUCTOR argument because only init_params are
+# persisted to a checkpoint: anywhere else and a reloaded multi-label model gets
+# softmaxed with nothing in the checkpoint to catch it.
+
+
+@pytest.mark.unit
+def test_predict_probs_softmaxes_by_default():
+    model = FCN(in_channels=1, num_classes=3).eval()
+    probs = predict_probs(model, np.zeros((4, 1, 32), dtype=np.float32))
+    assert probs.shape == (4, 3)
+    np.testing.assert_allclose(probs.sum(axis=1), np.ones(4), atol=1e-5)
+
+
+@pytest.mark.unit
+def test_predict_probs_applies_sigmoid_when_the_model_declares_it():
+    model = FCN(in_channels=1, num_classes=3, output_activation="sigmoid").eval()
+    x = np.zeros((4, 1, 32), dtype=np.float32)
+
+    probs = predict_probs(model, x)
+
+    assert probs.shape == (4, 3)
+    assert ((probs >= 0) & (probs <= 1)).all()
+    # The contract: elementwise sigmoid of the logits, with nothing forcing a
+    # row to sum to 1 the way a softmax would.
+    with torch.no_grad():
+        expected = torch.sigmoid(model(torch.from_numpy(x))).numpy()
+    np.testing.assert_allclose(probs, expected, atol=1e-6)
+
+
+@pytest.mark.unit
+def test_predict_probs_defaults_to_softmax_for_a_module_without_the_attribute():
+    # The contract is "any nn.Module", so a plain module must still work.
+    class _Plain(torch.nn.Module):
+        def forward(self, x):
+            return torch.zeros((x.shape[0], 2))
+
+    probs = predict_probs(_Plain(), np.zeros((3, 1, 8), dtype=np.float32))
+    np.testing.assert_allclose(probs.sum(axis=1), np.ones(3), atol=1e-5)
+
+
+@pytest.mark.unit
+def test_an_unknown_output_activation_raises_at_construction():
+    # Early, because a typo would otherwise silently change every probability
+    # the model ever reports rather than failing.
+    with pytest.raises(ValueError, match="output_activation must be one of"):
+        FCN(in_channels=1, num_classes=2, output_activation="relu")
+
+
+@pytest.mark.unit
+def test_output_activation_survives_a_checkpoint_round_trip(tmp_path):
+    # The whole reason it lives on the constructor: a reloaded multi-label
+    # checkpoint must still report independent per-label probabilities.
+    config = {
+        "model": "FCN",
+        "init_params": {
+            "in_channels": 1,
+            "num_classes": 3,
+            "filters": [4, 8, 4],
+            "output_activation": "sigmoid",
+        },
+    }
+    model = load_model(config, device="cpu", save_path=tmp_path)
+    model.save_model(tmp_path / "weights.pt")
+
+    written = json.loads((tmp_path / "weights_config.json").read_text())
+    assert written["init_params"]["output_activation"] == "sigmoid"
+
+    reloaded = load_model(
+        {"model": "FCN", "model_ckpt_path": str(tmp_path / "weights.pt")}, device="cpu"
+    )
+    assert reloaded.output_activation == "sigmoid"
+    probs = predict_probs(reloaded.eval(), np.zeros((2, 1, 32), dtype=np.float32))
+    assert not np.allclose(probs.sum(axis=1), 1.0), "a softmax was re-applied"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config", _TINY_MODEL_CONFIGS)
+def test_every_built_in_accepts_output_activation(config):
+    params = {
+        "in_channels": 1,
+        "num_classes": 3,
+        "output_activation": "sigmoid",
+        **config["init_params"],
+    }
+    model = load_model({"model": config["model"], "init_params": params}, device="cpu")
+    assert model.output_activation == "sigmoid"
+
+
+# ── evaluate_model: the multi-label branch ────────────────────────────────────
+
+# A 2-D target is one column per output, and every step of the single-label path
+# assumes exactly one true class per sample. The branch is picked by the
+# FORMULATION rather than the output width, which is what keeps a two-label
+# problem off the binary path.
+
+
+def _multi_label_model(n_outputs: int = 3) -> FCN:
+    return FCN(in_channels=1, num_classes=n_outputs, output_activation="sigmoid")
+
+
+@pytest.mark.unit
+def test_a_two_label_problem_does_not_take_the_binary_path(tmp_path):
+    # The regression guard on `is_binary = n_model_classes == 2`: with two
+    # outputs the width alone is indistinguishable from a binary problem, and
+    # the binary path would report pos/neg as a class balance that does not
+    # exist here, since a sample can carry both labels or neither.
+    data = np.random.default_rng(0).standard_normal((12, 1, 32)).astype("float32")
+    rows = np.array([[1, 1], [0, 0], [1, 0], [0, 1]] * 3)
+
+    results = _multi_label_model(2).evaluate_model(
+        data, rows, batchsize=4, save_path=tmp_path
+    )
+
+    assert not {"pos", "neg"} & set(results), "took the binary branch"
+    assert {"subset_accuracy", "bit_accuracy", "hamming_loss"} <= set(results)
+
+
+@pytest.mark.unit
+def test_the_summary_never_calls_anything_just_accuracy(tmp_path):
+    # Deliberate: "accuracy" meaning subset accuracy here and exact-match
+    # accuracy there is how a cross-formulation comparison goes wrong without
+    # anything looking wrong.
+    data = np.random.default_rng(1).standard_normal((10, 1, 32)).astype("float32")
+    rows = np.array([[1, 0, 1], [0, 1, 0]] * 5)
+
+    results = _multi_label_model().evaluate_model(
+        data, rows, batchsize=5, save_path=tmp_path
+    )
+
+    assert "accuracy" not in results
+    assert results["outputs"] == 3
+
+
+@pytest.mark.unit
+def test_subset_and_bit_accuracy_are_what_they_claim(tmp_path):
+    # Pinned against a model whose outputs are forced, so the arithmetic is
+    # checkable rather than whatever the random init happens to produce.
+    class _Fixed(ModelBase):
+        """Emits a fixed logit pattern: output 0 always on, 1 and 2 always off."""
+
+        def __init__(self):
+            super().__init__()
+            self._record_init_params(locals())
+            self.output_activation = "sigmoid"
+            self.unused = nn.Linear(1, 1)
+
+        def forward(self, x):
+            logits = torch.full((x.shape[0], 3), -10.0)
+            logits[:, 0] = 10.0
+            return logits
+
+    model = _Fixed().configure(device="cpu", save_path=tmp_path)
+    # Truth: output 0 right every time, output 1 wrong every time, output 2
+    # right every time. So bit accuracy = 2/3 and subset accuracy = 0.
+    rows = np.array([[1, 1, 0]] * 6)
+    data = np.zeros((6, 1, 32), dtype=np.float32)
+
+    results = model.evaluate_model(data, rows, batchsize=3, save_path=tmp_path)
+
+    assert results["subset_accuracy"] == f"{0:.4f}"
+    assert results["bit_accuracy"] == f"{2 / 3:.4f}"
+    assert results["hamming_loss"] == f"{1 / 3:.4f}"
+
+
+@pytest.mark.unit
+def test_the_per_output_csv_has_one_row_per_output_with_its_own_counts(tmp_path):
+    data = np.random.default_rng(2).standard_normal((16, 1, 32)).astype("float32")
+    rows = np.array([[1, 0, 1], [0, 1, 1], [1, 1, 0], [0, 0, 0]] * 4)
+
+    _multi_label_model().evaluate_model(
+        data, rows, batchsize=4, save_path=tmp_path, class_names=["7Hz", "19Hz", "37Hz"]
+    )
+
+    csv = next(tmp_path.glob("*_test_per_class.csv"))
+    table = csv.read_text().splitlines()
+    assert len(table) == 4, "a header plus one row per output"
+    assert table[0].split(",")[:2] == ["class", "name"]
+    assert "7Hz" in table[1] and "37Hz" in table[3]
+    # samples is that output's positive count, not a share of the sample total.
+    header = table[0].split(",")
+    samples = header.index("samples")
+    assert [row.split(",")[samples] for row in table[1:]] == ["8", "8", "8"]
+
+
+@pytest.mark.unit
+def test_one_confusion_matrix_per_output_named_after_its_class(tmp_path):
+    # A K-by-K matrix over output columns would be meaningless, since its rows
+    # could not sum to the sample count. One 2x2 per output instead, each in its
+    # own file so a figure can be pointed at without cropping a grid.
+    data = np.random.default_rng(3).standard_normal((8, 1, 32)).astype("float32")
+    rows = np.array([[1, 0, 1], [0, 1, 0]] * 4)
+
+    _multi_label_model().evaluate_model(
+        data, rows, batchsize=4, save_path=tmp_path, class_names=["7Hz", "19Hz", "37Hz"]
+    )
+
+    written = sorted(p.name for p in tmp_path.glob("*_confusion_matrix_*.png"))
+    assert len(written) == 3
+    assert all(any(name in f for f in written) for name in ("7Hz", "19Hz", "37Hz"))
+    # No single combined figure is left behind under the old name.
+    assert not list(tmp_path.glob("*_confusion_matrix.png"))
+
+
+@pytest.mark.unit
+def test_a_class_name_is_made_safe_for_the_filesystem(tmp_path):
+    # Names reach the filesystem and are user-supplied now that an encoder takes
+    # a `classes` argument: a slash would write into a subdirectory or fail.
+    data = np.random.default_rng(5).standard_normal((6, 1, 32)).astype("float32")
+    rows = np.array([[1, 0], [0, 1]] * 3)
+
+    _multi_label_model(2).evaluate_model(
+        data, rows, batchsize=3, save_path=tmp_path, class_names=["a/b", "7 Hz"]
+    )
+
+    written = sorted(p.name for p in tmp_path.glob("*_confusion_matrix_*.png"))
+    assert len(written) == 2, "a slash must not redirect the file elsewhere"
+    assert any("a_b" in f for f in written)
+    assert any("7_Hz" in f for f in written)
+
+
+@pytest.mark.unit
+def test_two_names_that_slug_alike_do_not_overwrite_each_other(tmp_path):
+    # The index in the filename is what keeps one figure from replacing the
+    # other when the slugs collide.
+    data = np.random.default_rng(6).standard_normal((6, 1, 32)).astype("float32")
+    rows = np.array([[1, 0], [0, 1]] * 3)
+
+    _multi_label_model(2).evaluate_model(
+        data, rows, batchsize=3, save_path=tmp_path, class_names=["7 Hz", "7/Hz"]
+    )
+
+    assert len(list(tmp_path.glob("*_confusion_matrix_*.png"))) == 2
+
+
+@pytest.mark.unit
+def test_the_counts_come_from_sklearn_and_match_the_matrices(tmp_path):
+    # The per-output table and the figures have to describe the same thing, so
+    # both read the one (n_outputs, 2, 2) array sklearn returns.
+    from sklearn.metrics import multilabel_confusion_matrix
+
+    data = np.random.default_rng(7).standard_normal((20, 1, 32)).astype("float32")
+    rows = np.array([[1, 0, 1], [0, 1, 1], [1, 1, 0], [0, 0, 0]] * 5)
+
+    model = _multi_label_model()
+    model.evaluate_model(data, rows, batchsize=5, save_path=tmp_path)
+
+    probs = predict_probs(model.eval(), data)
+    expected = multilabel_confusion_matrix(rows, (probs >= 0.5).astype(int))
+
+    table = (tmp_path / next(tmp_path.glob("*_test_per_class.csv")).name).read_text()
+    header, *body = table.splitlines()
+    cols = header.split(",")
+    for j, line in enumerate(body):
+        cell = dict(zip(cols, line.split(","), strict=True))
+        (tn, fp), (fn, tp) = expected[j]
+        assert (int(cell["tp"]), int(cell["tn"]), int(cell["fp"]), int(cell["fn"])) == (
+            tp,
+            tn,
+            fp,
+            fn,
+        )
+        assert int(cell["samples"]) == tp + fn
+
+
+@pytest.mark.unit
+def test_an_output_with_one_class_present_keeps_a_nan_auc(tmp_path):
+    # Output 2 is never present, so it has nothing to separate. It must not drag
+    # the macro AUC to nan, and it must not be silently dropped from the table.
+    data = np.random.default_rng(4).standard_normal((12, 1, 32)).astype("float32")
+    rows = np.array([[1, 0, 0], [0, 1, 0]] * 6)
+
+    results = _multi_label_model().evaluate_model(
+        data, rows, batchsize=4, save_path=tmp_path
+    )
+
+    assert results["auc"] != "nan"
+    # And it says it is an average over two of the three, the same way a class
+    # absent from a single-label test split labels its macro AUC partial.
+    assert "partial, 2/3 outputs" in results["auc"]
+    csv = next(tmp_path.glob("*_test_per_class.csv")).read_text().splitlines()
+    assert csv[3].split(",")[-1] == "nan", "the empty output reports no AUC"

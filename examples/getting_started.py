@@ -86,7 +86,7 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
         metric_class_params={"normalise": True, "abs": True, "disable_warnings": True},
         device="cpu",
     )
-    print(f"Test accuracy: {results['accuracy']}%")
+    print(f"Test accuracy: {results['accuracy']}")
     print(f"Complexity of the explanations: {complexity}")
 
     return results

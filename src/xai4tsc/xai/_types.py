@@ -87,6 +87,19 @@ class Explanation:
         localization (e.g. ``{"ground_truth": {class: [regions]}, ...}``) from
         datasets that provide it; consumed by ground-truth localization metrics
         such as ``TimeFrequencyAUC``. ``None`` when the dataset has no metadata.
+    target_mask : np.ndarray, optional
+        Which attributions of a multi-target stack apply, shape
+        ``(n_targets, n_samples)`` of ``bool``. ``None`` means every one does,
+        which is the single-target case and ``targets="all"``.
+
+        It exists for the per-output (multi-label) formulation, where a
+        prediction is a *set* of labels: ``targets="label"`` marks the labels a
+        sample truly carries and ``targets="predicted"`` those over the decision
+        threshold, so the number of attributions that mean anything varies per
+        sample. A ragged array cannot hold that, and flattening it would break
+        the invariant that a row of ``exp_values`` is a sample lining up with
+        ``indices`` and ``metadata`` - so the stack stays rectangular and this
+        says which of its rows mean anything. :meth:`rows_for_target` reads it.
     """
 
     explainer: str
@@ -104,6 +117,59 @@ class Explanation:
     metadata: list | None = None
     explained_targets: np.ndarray | None = None
     explainer_call_params: dict = field(default_factory=dict)
+    target_mask: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the target mask against the attribution stack."""
+        self.validate_target_mask()
+
+    def validate_target_mask(self) -> None:
+        """
+        Check that ``target_mask`` lines up with ``exp_values``.
+
+        Called on every construction of the dataclass, and again once
+        ``exp_values`` has been filled in - the container is built with
+        ``exp_values=None`` and populated afterwards, so construction alone
+        cannot see the shape. A mask that has drifted out of step with the stack
+        would otherwise pair one target's attributions with another target's
+        samples, silently.
+
+        Raises
+        ------
+        ValueError
+            If the mask is not ``(n_targets, n_samples)`` for this stack.
+        """
+        if self.target_mask is None or self.exp_values is None:
+            return
+        mask = np.asarray(self.target_mask)
+        expected = self.exp_values.shape[:2]
+        if mask.shape != expected:
+            raise ValueError(
+                f"target_mask has shape {mask.shape}, but the attribution stack "
+                f"is {self.exp_values.shape}, so the mask must be {expected} "
+                "(one row per target, one column per sample)."
+            )
+
+    def rows_for_target(self, target: int) -> np.ndarray:
+        """
+        Return the samples whose attribution for *target* is meaningful.
+
+        Parameters
+        ----------
+        target : int
+            Index along the stack's leading (target) axis.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean selector over samples. All ``True`` when no
+            ``target_mask`` is set, so a caller needs no special case.
+        """
+        if self.target_mask is None:
+            # From `data`, which is always the explained samples; `indices` is
+            # optional on a hand-built explanation.
+            return np.ones(np.shape(self.data)[0], dtype=bool)
+        return np.asarray(self.target_mask[target], dtype=bool)
 
 
 # Rank of a *single-target* ``exp_values`` array per explanation domain. Frequency

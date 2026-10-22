@@ -2,9 +2,10 @@
 Pure helpers for the experiment runner.
 
 Small, side-effect-free utilities shared by the runner entry point: archive
-wildcard expansion, metric-score aggregation, and the ``metrics.csv`` row and
-log-label formatting. Kept apart from :mod:`experiment_runner.main` so the
-orchestration module holds only the pipeline itself.
+wildcard expansion, metric-score aggregation, the ``metrics.csv`` and
+``models.csv`` row builders, and log-label formatting. Kept apart from
+:mod:`experiment_runner.main` so the orchestration module holds only the
+pipeline itself.
 
 This is the runner's own helper module and is unrelated to
 :mod:`xai4tsc.utils`, which serves the importable package.
@@ -14,6 +15,7 @@ import copy
 import logging
 
 import numpy as np
+import pandas as pd
 from sktime.datasets.tsc_dataset_names import (
     multivariate as _UEA_NAMES,  # noqa: N812 — uppercase denotes a constant
 )
@@ -108,11 +110,63 @@ _METRICS_COLUMNS = (
     "model",
     "explainer",
     "metric",
+    "target",
+    "samples",
     "seed",
     "status",
     "score",
     "detail",
 )
+
+
+_INTEGER_COLUMNS = frozenset({"epoch", "samples", "outputs", "pos", "neg", "seed"})
+"""
+Columns of either result file that count something and cannot be fractional.
+
+Held in one place because both files have gaps in them for the same reason: a
+row that does not define a column leaves the cell empty.
+"""
+
+
+def _as_integer_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cast the counting columns of a result frame to a nullable integer dtype.
+
+    A row with no value for a column - a failed model, a formulation that does
+    not define a metric, an unseeded run - leaves a gap, and pandas represents a
+    gap in an ``int64`` column by widening the column to ``float64``. The counts
+    then reach the CSV as ``9.0`` and ``1.0``, reading as measurements precise to
+    one decimal rather than as a number of samples or an epoch. ``Int64`` holds
+    the gap itself, so a count stays a count and the empty cell stays empty.
+
+    Done per column and tolerant of failure: these files are written once, at the
+    end of a run, so a column that will not cast - a custom summary putting a
+    fractional value under one of these names - is left as it was and warned
+    about rather than taking the whole result file down with it.
+
+    Parameters
+    ----------
+    frame : pd.DataFrame
+        A frame of :func:`_result_row` or :func:`_model_row` rows.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same frame, with every present member of
+        :data:`_INTEGER_COLUMNS` cast where the cast succeeded.
+    """
+    for column in frame.columns:
+        if column not in _INTEGER_COLUMNS:
+            continue
+        try:
+            frame[column] = frame[column].astype("Int64")
+        except (TypeError, ValueError):
+            logger.warning(
+                "Column '%s' holds values that are not whole numbers, so it is "
+                "written as-is rather than as a count.",
+                column,
+            )
+    return frame
 
 
 def _result_row(
@@ -124,6 +178,8 @@ def _result_row(
     score: float | None = None,
     detail: str = "",
     seed: int | None = None,
+    target: str = "",
+    samples: int | None = None,
 ) -> dict:
     """
     Build one ``metrics.csv`` row.
@@ -140,9 +196,11 @@ def _result_row(
         not raw registry names.
     status : str
         One of ``"ok"`` (a score was produced), ``"nan"`` (the metric ran but
-        could not produce a number), ``"error"`` (the metric raised) or
+        could not produce a number), ``"error"`` (the metric raised),
         ``"skipped-domain"`` (the metric requires an explanation domain this
-        explainer does not produce).
+        explainer does not produce), ``"skipped-no-ground-truth"`` (the metric
+        localizes against ground truth the dataset does not provide) or
+        ``"skipped-no-targets"`` (no explained sample carries this target).
     score : float or None
         The aggregated score; ``None`` for any status other than ``"ok"`` and
         rendered as an empty cell.
@@ -153,6 +211,21 @@ def _result_row(
         The derived seed this result was computed with, so a row can be
         reproduced from the row alone. Empty under ``reproducible: false``,
         where no seed was applied.
+    target : str
+        The class this row's attributions explain, when the explanation holds
+        one per class (``targets="all"``, or a per-output encoding). Empty for a
+        single-target explanation, where the explained class varies per sample.
+        A row per target rather than their mean is what makes a per-class spread
+        visible at all.
+    samples : int or None
+        How many samples were handed to the metric. Not decoration: under a
+        per-output encoding this varies per target and, with
+        ``targets="predicted"``, with the model and the decision threshold too,
+        so two scores without their denominators are not comparable. It is an
+        upper bound rather than the exact count, because a ground-truth metric
+        drops samples with no region of its own accord - which is also why those
+        metrics score the same with or without a target mask, while the
+        perturbation metrics do not.
 
     Returns
     -------
@@ -165,11 +238,118 @@ def _result_row(
         "model": model_id,
         "explainer": explainer_id,
         "metric": metric_id,
+        "target": target,
+        "samples": samples,
         "seed": seed,
         "status": status,
         "score": score,
         "detail": flat[:300],
     }
+
+
+_MODEL_COLUMNS = (
+    "dataset",
+    "model",
+    "epoch",
+    "status",
+    "detail",
+)
+"""
+The identity prefix of ``models.csv``; the metric columns follow it.
+
+Which metrics those are depends on the formulation -
+:meth:`~xai4tsc.models.base.ModelBase.evaluate_model` reports ``pos`` / ``neg``
+and the positive class's rates for a binary problem, macro rates for a
+multiclass one, and subset / per-output accuracy plus the Hamming loss for a
+multi-label one. So the columns are a union over the rows actually produced
+rather than a fixed schema, and a cell is empty where that formulation does not
+define the metric.
+"""
+
+
+def _model_row(
+    dataset_id: str,
+    model_id: str,
+    status: str,
+    summary: dict | None = None,
+    epoch: int | None = None,
+    detail: str = "",
+) -> dict:
+    """
+    Build one ``models.csv`` row from an ``evaluate_model`` summary.
+
+    This is test-set *model performance*, which is a different measurement from
+    the XAI metric scores in ``metrics.csv``: one row per (dataset, model)
+    rather than per explanation, and its own columns. The two files are kept
+    apart for that reason rather than merged.
+
+    Every model the runner builds is scored on the test split, trained in this
+    run or not, and one whose iteration raised gets a ``failed`` row rather
+    than none, so the file accounts for the whole configuration the way
+    ``metrics.csv`` does.
+
+    Parameters
+    ----------
+    dataset_id, model_id : str
+        Result identities (see
+        :func:`~experiment_runner.config.result_identities`), not raw registry
+        names - so two entries of the same model are distinguishable.
+    status : str
+        ``"ok"`` for a scored model, or ``"failed"`` for one whose iteration
+        raised and was skipped. A non-``ok`` row explains itself in *detail*.
+    summary : dict, optional
+        What :meth:`~xai4tsc.models.base.ModelBase.evaluate_model` returned.
+        Its keys become columns. Identity columns win on a name collision.
+    epoch : int or None
+        The epoch the evaluated weights come from (``best_epoch``), empty when
+        none is known. The model's own result files are named after
+        :attr:`~xai4tsc.models.base.ModelBase.epoch_label`, which is ``0`` in
+        that case rather than empty.
+    detail : str
+        Why, for a non-``ok`` status. Flattened to a single line.
+
+    Returns
+    -------
+    dict
+        A row for the ``models.csv`` schema.
+    """
+    flat = " ".join(str(detail).split())
+    return {
+        **(summary or {}),
+        "dataset": dataset_id,
+        "model": model_id,
+        "epoch": epoch,
+        "status": status,
+        "detail": flat[:300],
+    }
+
+
+def _model_frame(rows: list[dict]) -> pd.DataFrame:
+    """
+    Collect model rows into a frame with the identity columns first.
+
+    The metric columns vary by formulation, so they are ordered by first
+    appearance rather than sorted: that keeps each summary's own order
+    (``samples``, then accuracy, then the rates) readable instead of
+    interleaving unrelated measurements alphabetically.
+
+    Parameters
+    ----------
+    rows : list of dict
+        Rows from :func:`_model_row`.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per model, columns being :data:`_MODEL_COLUMNS` followed by
+        every metric any row carried.
+    """
+    ordered = list(_MODEL_COLUMNS)
+    for row in rows:
+        for key in row:
+            if key not in ordered:
+                ordered.append(key)
+    return _as_integer_columns(pd.DataFrame(rows, columns=ordered))
 
 
 def _format_label_list(labels: list[str], limit: int = 10) -> str:

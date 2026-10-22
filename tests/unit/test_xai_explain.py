@@ -8,8 +8,9 @@ captures the indices it receives, so the index-selection logic of
 
 import numpy as np
 import pytest
+import torch
 
-from xai4tsc.xai import DataType
+from xai4tsc.xai import DataType, Explanation
 from xai4tsc.xai import explain as xai_explain
 from xai4tsc.xai.explain import (
     EXPLAINERS,
@@ -247,3 +248,174 @@ def test_sign_wrapper_inherits_base_data_applicability():
     assert (
         sign.data_applicability == sign._base.data_applicability == {DataType.AGNOSTIC}
     )
+
+
+# ── targets under a per-output (2-D) label encoding ───────────────────────────
+
+# A 2-D target is one column per model output, where a prediction is a SET of
+# labels. So all three modes stack one attribution per output and differ only in
+# the mask saying which apply. Before this, "label" argmaxed the multi-hot row
+# and explained only its first active output, and "predicted" argmaxed a softmax
+# over outputs that do not compete - both silent.
+
+
+class _StubEncoder:
+    """Minimal fitted-encoder stand-in: ``classes_`` is all the dispatch reads."""
+
+    def __init__(self, n_outputs=3):
+        self.classes_ = np.arange(n_outputs)
+
+
+class _FixedProbs(torch.nn.Module):
+    """Per-output logits chosen so the thresholded prediction is known."""
+
+    def __init__(self, logits):
+        super().__init__()
+        self.output_activation = "sigmoid"
+        self._logits = torch.tensor(logits, dtype=torch.float32)
+        self.unused = torch.nn.Linear(1, 1)
+
+    def forward(self, x):
+        return self._logits[: x.shape[0]]
+
+
+def _register_recording_explainer(monkeypatch):
+    """Register a stub explainer that records the targets it is handed."""
+    from xai4tsc.xai.base import ExplainerBase
+
+    recorded = {"targets": []}
+
+    class _Recorder(ExplainerBase):
+        explanation_type = "feature_attribution"
+
+        def explain(self, model, exp, device, targets, **kwargs):
+            recorded["targets"].append(list(targets))
+            return np.zeros((len(exp.data), 1, 4), dtype=np.float32)
+
+    register_explainer("_RecorderXAI", _Recorder)
+    monkeypatch.setattr(
+        xai_explain, "plot_exp", lambda *args, **kwargs: None, raising=False
+    )
+    return recorded
+
+
+def _explain(monkeypatch, labels, targets, model=None, **kwargs):
+    recorded = _register_recording_explainer(monkeypatch)
+    try:
+        exp = _get_explanation(
+            method="_RecorderXAI",
+            model=model if model is not None else _DummyModel(),
+            data=np.zeros((len(labels), 1, 4), dtype=np.float32),
+            labels=np.asarray(labels),
+            encoder=_StubEncoder(np.shape(labels)[1] if np.ndim(labels) > 1 else 3),
+            params={},
+            targets=targets,
+            **kwargs,
+        )
+    finally:
+        EXPLAINERS.pop("_recorderxai", None)
+    return exp, recorded
+
+
+@pytest.mark.unit
+def test_label_targets_stack_every_output_and_mask_the_ones_present():
+    # The stack is rectangular - one attribution per (output, sample) - and the
+    # mask says which of them mean anything. A ragged array could not hold it,
+    # and flattening would break the rule that a row lines up with `indices`.
+    labels = np.array([[1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 0, 0]])
+    exp, _ = _explain(pytest.MonkeyPatch(), labels, "label")
+
+    assert exp.exp_values.shape == (3, 4, 1, 4)
+    np.testing.assert_array_equal(exp.target_mask, labels.astype(bool).T)
+    # Sample 3 carries nothing, so no output is scored on it.
+    assert not exp.target_mask[:, 3].any()
+    # Output 0 applies to samples 0 and 2.
+    np.testing.assert_array_equal(
+        exp.rows_for_target(0), np.array([True, False, True, False])
+    )
+
+
+@pytest.mark.unit
+def test_predicted_targets_mask_by_the_per_output_threshold():
+    # Independent sigmoids, not a competitive argmax: a sample can be explained
+    # for several outputs or for none.
+    labels = np.array([[1, 0, 0], [0, 1, 1]])
+    model = _FixedProbs([[5.0, -5.0, 5.0], [-5.0, -5.0, -5.0]])
+
+    exp, _ = _explain(pytest.MonkeyPatch(), labels, "predicted", model=model)
+
+    # Row 0: outputs 0 and 2 over 0.5. Row 1: none of them.
+    np.testing.assert_array_equal(
+        exp.target_mask, np.array([[True, False], [False, False], [True, False]])
+    )
+
+
+@pytest.mark.unit
+def test_the_threshold_decides_which_outputs_are_explained():
+    labels = np.array([[1, 1, 1]])
+    # sigmoid(1.0) ~ 0.73, so a 0.9 threshold excludes it and a 0.5 keeps it.
+    model = _FixedProbs([[1.0, 1.0, 1.0]])
+
+    lenient, _ = _explain(
+        pytest.MonkeyPatch(), labels, "predicted", model=model, threshold=0.5
+    )
+    strict, _ = _explain(
+        pytest.MonkeyPatch(), labels, "predicted", model=model, threshold=0.9
+    )
+
+    assert lenient.target_mask.all()
+    assert not strict.target_mask.any()
+
+
+@pytest.mark.unit
+def test_all_targets_leave_every_row_applicable():
+    # Under "all" there is nothing to mask: every output is explained for every
+    # sample, which is what rows_for_target returns without a mask.
+    labels = np.array([[1, 0, 0], [0, 1, 0]])
+    exp, _ = _explain(pytest.MonkeyPatch(), labels, "all")
+
+    assert exp.target_mask is None
+    assert exp.rows_for_target(1).all()
+
+
+@pytest.mark.unit
+def test_every_output_is_explained_as_its_own_captum_target():
+    # Captum selects output unit j with target=j, so the stack is built by
+    # asking for each one in turn rather than by reinterpreting one attribution.
+    labels = np.array([[1, 1, 0], [0, 0, 1]])
+    _, recorded = _explain(pytest.MonkeyPatch(), labels, "label")
+
+    assert recorded["targets"] == [[0, 0], [1, 1], [2, 2]]
+
+
+@pytest.mark.unit
+def test_a_mask_that_does_not_match_the_stack_raises():
+    # The mask is only useful while it lines up with the stack; drifted, it
+    # would score one output's attributions against another's samples.
+    exp = Explanation(
+        explainer="x",
+        explainer_params={},
+        explanation_type="feature_attribution",
+        exp_values=np.zeros((3, 4, 1, 8), dtype=np.float32),
+        data=np.zeros((4, 1, 8), dtype=np.float32),
+        labels=np.zeros((4, 3), dtype=np.int64),
+        indices=np.arange(4),
+        encoder=_StubEncoder(),
+        meta=None,
+    )
+    exp.target_mask = np.ones((3, 5), dtype=bool)
+    with pytest.raises(ValueError, match="target_mask has shape"):
+        exp.validate_target_mask()
+
+
+@pytest.mark.unit
+def test_label_targets_pass_1d_class_indices_through_unchanged():
+    # The regression guard: the single-label path is what every shipped config
+    # uses and it must be untouched by any of the above - one attribution per
+    # sample, no stack, no mask.
+    exp, recorded = _explain(pytest.MonkeyPatch(), np.array([2, 0, 1]), "label")
+
+    assert recorded["targets"] == [[2, 0, 1]]
+    assert exp.exp_values.shape == (3, 1, 4)
+    assert exp.target_mask is None
+    assert exp.explained_targets.tolist() == [2, 0, 1]

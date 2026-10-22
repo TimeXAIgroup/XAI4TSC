@@ -252,6 +252,7 @@ def _generate_explanation(
             save_path=explanation_dir,
             visualization_type=visualization_type,
             data_domain=data_domain,
+            threshold=explainer_config["threshold"],
         )
     # Explain random samples
     elif explainer_config["samples"]["type"] == "random":
@@ -271,6 +272,7 @@ def _generate_explanation(
             save_path=explanation_dir,
             visualization_type=visualization_type,
             data_domain=data_domain,
+            threshold=explainer_config["threshold"],
         )
     else:
         # "all" case
@@ -289,6 +291,7 @@ def _generate_explanation(
             save_path=explanation_dir,
             visualization_type=visualization_type,
             data_domain=data_domain,
+            threshold=explainer_config["threshold"],
         )
     # Attach per-sample ground-truth metadata for the explained samples (aligned
     # to explanation.indices) so ground-truth metrics (e.g. TimeFrequencyAUC) can
@@ -300,6 +303,14 @@ def _generate_explanation(
         explanation_dir.mkdir(parents=True, exist_ok=True)
         np.save(explanation_dir / "exp_values.npy", explanation.exp_values)
         np.save(explanation_dir / "indices.npy", explanation.indices)
+        if explanation.target_mask is not None:
+            # Without it the stack is uninterpretable: it holds an attribution
+            # for every (target, sample) pair, and only the mask says which of
+            # them the sample actually carries.
+            np.save(
+                explanation_dir / "target_mask.npy",
+                np.asarray(explanation.target_mask),
+            )
         try:
             decoded_labels = decode_labels(explanation.encoder, explanation.labels)
         except Exception:

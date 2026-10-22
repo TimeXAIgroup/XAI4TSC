@@ -49,9 +49,111 @@ as objects: `train_model(loss_func="crossentropy", optimizer="adam")` becomes
 `train_model(loss_func=nn.CrossEntropyLoss(), optimizer=optim.Adam)`, or
 `train_model()` - the defaults are unchanged. YAML configs keep their strings,
 including the mixed-case `"CrossEntropy"` the shipped configs use.
+`MultiHotLabelEncoder` is **renamed `PowersetLabelEncoder`**, and the name is
+reused for the encoder that keeps the multi-hot rows: in YAML,
+`encode: "multihot"` for the previous behaviour becomes `encode: "powerset"`.
+A config left on `encode: "multihot"` trains a different formulation, which is
+why it fails rather than drifting - the rows are a 2-D target and
+`CrossEntropy` is refused against one before the first epoch. The two shipped
+examples move to the new formulation deliberately, so their published numbers
+change.
 
 ### Changed
 
+- **Model performance is collected into `models.csv`.** `evaluate_model`'s summary
+  used to be returned and dropped on the floor by the runner, so comparing two
+  models meant opening each model's own `*_test_results.csv`. It is now also
+  written as `models.csv` beside `metrics.csv`, plus a per-dataset
+  `<dataset>_models.csv`, with one row per (dataset, model) and the `epoch` the
+  numbers describe.
+  Its columns depend on the formulation - `pos` / `neg` and the positive class's
+	rates for a binary problem, macro rates for a multiclass one, `subset_accuracy`
+	/ `bit_accuracy` / `hamming_loss` for a multi-label one - so an experiment
+	mixing formulations gets a union of columns with an empty cell where one does
+	not define a metric, and the per-dataset file drops the columns none of its own
+	rows filled. Every model gets a row, including one the run did not train: an
+	entry with no `train` key is scored on the test split like any other, which is
+	what pointing an entry at a checkpoint is for. A model whose iteration raises
+	is skipped with a `status: failed` row carrying the exception.
+- **`Synth_Multilabel_Freq` can be trained as the multi-label problem it is.**
+  Previously its multi-hot labels were collapsed to one class per distinct
+  combination, so an 8-way single-label classifier stood in for three
+  independent detectors. `encode: "multihot"` now keeps one target column per
+  label and pairs with `loss_func: "bcewithlogits"`; the collapse is still
+  available as `encode: "powerset"`.
+  The reason is evaluation validity rather than accuracy. Under the powerset,
+  `target=6` attributes the logit for `[1,1,0]`, whose meaning includes the
+  *absence* of the third label, while the ground-truth mask is the union of two
+  bursts and has no representation of "where the absent evidence isn't" - the
+  explanandum and the ground truth are different objects. Per-label outputs make
+  `target=j` mean "label j is present", which is exactly what its mask marks,
+  and a sample carrying two labels now yields two attributions against two
+  masks instead of one against their union. Measured on the same seed, split and
+  model, accuracy is a wash: subset accuracy 0.7367 -> 0.7167 and mean per-label
+  accuracy 0.8983 -> 0.8967, with the per-label spread shifting rather than
+  narrowing (19 Hz 0.8267 -> 0.7850, 37 Hz 0.9800 -> 0.9967). The formulation is
+  not an accuracy improvement and is not offered as one.
+- **Models declare their output activation, and `predict_probs` reads it.**
+  `output_activation="softmax" | "sigmoid"` is a constructor argument on every
+  built-in model, so it is recorded in the checkpoint's `init_params` and
+  survives a reload; `predict_probs` reads
+  `getattr(model, "output_activation", "softmax")`, which leaves the "any
+  `nn.Module`" contract intact. It has to be a constructor argument rather than
+  a training one: only `init_params` are persisted, so anywhere else a reloaded
+  multi-label checkpoint would be softmaxed across independent outputs with
+  nothing in the checkpoint to catch it. The runner derives it from the target
+  rank.
+- **`evaluate_model` branches on the formulation, not the output width.**
+  A 2-D `labels` array reports subset accuracy, per-label accuracy, the Hamming
+  loss and per-label AUC, with one 2x2 confusion panel per output in place of a
+  K-by-K matrix that cannot describe a sample belonging to several classes at
+  once - one figure per output, named after its class
+  (`<model>_e<epoch>_confusion_matrix_<i>_<class>.png`). The counts come from
+  `sklearn.metrics.multilabel_confusion_matrix`, which returns exactly the
+  `(n_outputs, 2, 2)` stack both the table and the figures read, so the two
+  cannot disagree. Class names are reduced to filesystem-safe characters before
+  they reach a filename, here and in the relevance plots: a name can now be
+  supplied through an encoder's `classes` argument rather than generated, and a
+  `/` would otherwise write into a subdirectory. A generated name - an index,
+  or a dash-joined multi-hot row - slugs to itself, so no existing filename
+  moves. Nothing in the summary is called `accuracy`, deliberately: the same key
+  meaning subset accuracy in one formulation and exact-match accuracy in another
+  is how a comparison goes wrong with nothing looking wrong. This also fixes a
+  latent trap - the branch key was `n_model_classes == 2`, so a two-label
+  problem took the binary path and reported `pos`/`neg` as a class balance that
+  does not exist.
+  The two formulations write the same filename, so their per-class tables now
+  report the same columns: every rate, including a class's own one-vs-rest
+  `accuracy`, is derived in `_rates` and spread into the row by both paths. The
+  single-label table had no `accuracy` column at all, which is the one figure a
+  60-class summary cannot carry and the per-class table exists to hold. Those
+  rates are written as fractions rather than percentages, matching `auc`, and
+  so is every rate in the summary beside them.
+- **A degenerate test split keeps the columns of its problem type.** Only the
+  AUC needs two classes present - every rate is arithmetic over the confusion
+  counts and is `nan` where undefined - but the binary path skipped its whole
+  rate block when the split had one class, so such a row carried `samples`, `pos`,
+  `neg`, `accuracy` and `auc` and nothing else. Since `models.csv` is a union
+  over the rows produced, one degenerate dataset in a benchmark widened the file
+  for every other row too. The rates are now computed either way and only the
+  AUC reports `nan`. A multi-label output with nothing to separate likewise
+  labels the macro AUC `(partial, k/n outputs)` and warns, as an absent
+  single-label class already did, instead of averaging over the rest in silence.
+- **`Explanation` gains `target_mask`, and per-label metric scores fan out.**
+  Under a per-output encoding a prediction is a *set*, so `target: "label"` and
+  `target: "predicted"` stack one attribution per output and mark which apply
+  per sample (`(n_outputs, n_samples)` of `bool`; `None` means all do, which is
+  every existing explanation). `metrics.csv` gains a `target` column and a
+  `samples` column and emits one row per target instead of their mean, which is what makes
+  a per-label spread visible at all. Worth knowing: the ground-truth metrics
+  already dropped samples with no region, so a mask changes their reported
+  `samples`
+  but not their score - it is the perturbation metrics, which had no such
+  filtering, that were scoring every output against every sample.
+  `target: "label"` and `target: "predicted"` were **silently wrong** on a 2-D
+  target before this: the first argmaxed the multi-hot row and explained only
+  its first active label, and the second argmaxed a softmax over outputs that do
+  not compete. Neither was reachable from a shipped config.
 - **Label encoding takes a scikit-learn encoder object, not a string.**
   `DatasetBase.split(encode="label", class_order=None)` becomes
   `split(encoder=None)`, and `load_saved_splits(directory, encode=...)` becomes

@@ -15,12 +15,15 @@ import torch.nn.functional as F  # noqa: N812 — PyTorch ecosystem convention
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     confusion_matrix,
+    multilabel_confusion_matrix,
     roc_auc_score,
     roc_curve,
 )
 from torch import nn, optim
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
+
+from ..utils.utils import _filename_slug
 
 logger = logging.getLogger(__name__)
 
@@ -104,32 +107,91 @@ def _json_safe(value: object) -> bool:
     return True
 
 
+OUTPUT_ACTIVATIONS = ("softmax", "sigmoid")
+"""
+The output activations :func:`predict_probs` knows how to apply.
+
+``"softmax"`` is the single-label default: the outputs compete and a row sums to
+1. ``"sigmoid"`` is the multi-label one: each output is an independent
+probability and a row does not sum to anything in particular.
+"""
+
+
+def check_output_activation(name: str) -> str:
+    """
+    Validate an output-activation name, returning it unchanged.
+
+    Called from a model's constructor rather than from
+    :func:`predict_probs`, so a typo fails when the model is built instead of
+    silently changing every probability the model ever reports.
+
+    Parameters
+    ----------
+    name : str
+        A member of :data:`OUTPUT_ACTIVATIONS`.
+
+    Returns
+    -------
+    str
+        *name*.
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a known activation.
+    """
+    if name not in OUTPUT_ACTIVATIONS:
+        raise ValueError(
+            f"output_activation must be one of {list(OUTPUT_ACTIVATIONS)}, got "
+            f"{name!r}. 'softmax' is for one-of-K outputs, 'sigmoid' for "
+            "independent per-label outputs trained with BCEWithLogitsLoss."
+        )
+    return name
+
+
 def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarray:
     """
-    Return softmax class probabilities for *data* from any :class:`~torch.nn.Module`.
+    Return class probabilities for *data* from any :class:`~torch.nn.Module`.
 
-    Models here emit raw logits from ``forward()`` by contract, so the softmax is
-    applied on the way out. The model's train/eval mode is left untouched and belongs
-    to the caller.
+    Models here emit raw logits from ``forward()`` by contract, so the activation
+    is applied on the way out. Which one comes from the model itself -
+    ``model.output_activation``, defaulting to ``"softmax"`` when a module does
+    not declare one, which keeps the "any ``nn.Module``" contract intact.
+
+    That default is why the attribute belongs on the model's constructor: it is
+    persisted in the checkpoint's ``init_params``, so a reloaded multi-label
+    model still reports independent per-label probabilities. Were it a training
+    argument instead, nothing in the checkpoint would record it and a softmax
+    would be applied to sigmoid outputs with no sign that anything was wrong.
+
+    The model's train/eval mode is left untouched and belongs to the caller.
 
     Parameters
     ----------
     model : torch.nn.Module
-        Model to run. Must return logits of shape ``(n_samples, n_classes)``.
+        Model to run. Must return logits of shape ``(n_samples, n_outputs)``.
     data : np.ndarray or torch.Tensor
         Input samples, shape ``(n_samples, n_channels, n_timesteps)``.
 
     Returns
     -------
     np.ndarray
-        Probabilities of shape ``(n_samples, n_classes)``, rows summing to 1.
+        Probabilities of shape ``(n_samples, n_outputs)``. Rows sum to 1 under
+        ``"softmax"``; under ``"sigmoid"`` each column is independent.
     """
     tensor = torch.as_tensor(data, dtype=torch.float32)
     param = next(model.parameters(), None)
     if param is not None:
         tensor = tensor.to(param.device)
+    activation = getattr(model, "output_activation", "softmax")
     with torch.no_grad():
-        return F.softmax(model(tensor), dim=1).detach().cpu().numpy()
+        logits = model(tensor)
+        probs = (
+            torch.sigmoid(logits)
+            if check_output_activation(activation) == "sigmoid"
+            else F.softmax(logits, dim=1)
+        )
+        return probs.detach().cpu().numpy()
 
 
 def _confusion_counts(cm: np.ndarray) -> list[dict[str, int]]:
@@ -146,7 +208,7 @@ def _confusion_counts(cm: np.ndarray) -> list[dict[str, int]]:
     Returns
     -------
     list of dict
-        One entry per class, in class-index order, with ``support``, ``tp``,
+        One entry per class, in class-index order, with ``samples``, ``tp``,
         ``tn``, ``fp`` and ``fn``.
     """
     cm = np.asarray(cm)
@@ -154,12 +216,12 @@ def _confusion_counts(cm: np.ndarray) -> list[dict[str, int]]:
     counts = []
     for k in range(cm.shape[0]):
         tp = int(cm[k, k])
-        support = int(cm[k, :].sum())
+        samples = int(cm[k, :].sum())
         fp = int(cm[:, k].sum()) - tp
-        fn = support - tp
+        fn = samples - tp
         counts.append(
             {
-                "support": support,
+                "samples": samples,
                 "tp": tp,
                 "tn": total - tp - fp - fn,
                 "fp": fp,
@@ -178,6 +240,14 @@ def _rates(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
     ``nan`` rather than an error, so a degenerate class does not abort the
     evaluation.
 
+    ``accuracy`` is the one-vs-rest accuracy of this class alone, which is the
+    only reading available per class: a class is either right or wrong for every
+    sample, including the ones that belong to another class. For a binary
+    problem class 1's is the overall accuracy, and for a multi-label output it is
+    that output's own, which a subset accuracy hides. It is derived here rather
+    than at the two call sites so the single-label and the per-output tables
+    cannot drift apart on it.
+
     Parameters
     ----------
     tp, tn, fp, fn : int
@@ -186,9 +256,12 @@ def _rates(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
     Returns
     -------
     dict
-        ``sensitivity``, ``specificity``, ``ppv``, ``npv``, ``f1`` and ``mcc``.
+        ``accuracy``, ``sensitivity``, ``specificity``, ``ppv``, ``npv``, ``f1``
+        and ``mcc``.
     """
     nan = float("nan")
+    total = tp + tn + fp + fn
+    accuracy = (tp + tn) / total if total > 0 else nan
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else nan
     specificity = tn / (tn + fp) if (tn + fp) > 0 else nan
     ppv = tp / (tp + fp) if (tp + fp) > 0 else nan
@@ -200,6 +273,7 @@ def _rates(tp: int, tn: int, fp: int, fn: int) -> dict[str, float]:
         (1 - sensitivity) * (1 - specificity) * (1 - npv) * (1 - ppv)
     )
     return {
+        "accuracy": accuracy,
         "sensitivity": sensitivity,
         "specificity": specificity,
         "ppv": ppv,
@@ -297,8 +371,7 @@ class ModelBase(nn.Module, ABC):
     Base class for all time series classification models.
 
     Subclass this to add a custom model to xai4tsc.  Register the subclass
-    with :func:`xai4tsc.register_model` to make it available by name in
-    experiment configs.
+    with :func:`xai4tsc.register_model` to make it available by name.
 
     Subclasses must implement :meth:`forward`.  All training, prediction,
     evaluation, and persistence logic is provided here and inherited.
@@ -657,7 +730,7 @@ class ModelBase(nn.Module, ABC):
                 total += batch_total
 
             epoch_loss = running_loss / len(loader)
-            epoch_acc = 100 * correct / total
+            epoch_acc = correct / total
             epoch_losses.append(epoch_loss)
             epoch_accs.append(epoch_acc)
 
@@ -666,7 +739,7 @@ class ModelBase(nn.Module, ABC):
             monitor_loss = val_loss if val_loss is not None else epoch_loss
             if val_loss is not None:
                 logger.info(
-                    "Epoch %2d/%d  loss: %.4f  %s: %.2f  val_loss: %.4f",
+                    "Epoch %2d/%d  loss: %.4f  %s: %.4f  val_loss: %.4f",
                     epoch + 1,
                     final_epoch,
                     epoch_loss,
@@ -676,7 +749,7 @@ class ModelBase(nn.Module, ABC):
                 )
             else:
                 logger.info(
-                    "Epoch %2d/%d  loss: %.4f  %s: %.2f",
+                    "Epoch %2d/%d  loss: %.4f  %s: %.4f",
                     epoch + 1,
                     final_epoch,
                     epoch_loss,
@@ -1030,6 +1103,25 @@ class ModelBase(nn.Module, ABC):
 
     # ── Evaluation ───────────────────────────────────────────────────────────
 
+    @property
+    def epoch_label(self) -> int:
+        """
+        Epochs of training behind the weights being scored, for file names.
+
+        :attr:`best_epoch` is ``None`` for a model this process never trained
+        and whose checkpoint recorded no epoch, which as a file name reads
+        ``_eNone_``. The result files, figures and log lines written here use
+        this instead, where that case is ``0``. A caller tabulating results
+        wants :attr:`best_epoch` itself, which can say "no epoch is known"
+        without asserting the weights are untrained.
+
+        Returns
+        -------
+        int
+            :attr:`best_epoch`, or ``0`` when it is not set.
+        """
+        return self.best_epoch if self.best_epoch is not None else 0
+
     def evaluate_model(
         self,
         data: np.ndarray,
@@ -1047,15 +1139,31 @@ class ModelBase(nn.Module, ABC):
         the class balance. For more than two classes those two would be the
         counts of class indices 1 and 0, so they are omitted and macro-averaged
         rates reported instead. Either way the one-vs-rest confusion counts of
-        every class are written to a ``*_test_per_class.csv`` beside the summary.
-        Saves ROC and confusion-matrix plots to *save_path*.
+        every class, and every rate derived from them - that class's own
+        accuracy included - are written to a ``*_test_per_class.csv`` beside the
+        summary, which holds only the aggregate. Saves ROC and confusion-matrix
+        plots to *save_path*.
+
+        The summary's columns depend on the formulation, not on the test split:
+        a split with one class present reports a nan AUC and keeps every other
+        column, so two runs of the same problem type return the same keys.
+
+        A 2-D *labels* array is one column per model output, i.e. a multi-label
+        problem, and is dispatched to :meth:`_evaluate_multi_label`: there is no
+        single class per sample to take an argmax of, so it reports subset and
+        bit accuracy, the Hamming loss and the macro AUC over the outputs, and
+        draws a 2x2 panel per output in place of a K-by-K matrix. Its per-output
+        table has the same columns as the per-class one. The formulation picks
+        that branch rather than the output width, so a two-label problem is not
+        mistaken for a binary one.
 
         Parameters
         ----------
         data : np.ndarray
             Test data.
         labels : np.ndarray
-            Integer ground-truth labels.
+            Integer ground-truth labels: 1-D class indices, or a 2-D multi-hot
+            array with one column per model output.
         batchsize : int
             Samples per batch, 8 by default.
         threshold : float
@@ -1101,6 +1209,18 @@ class ModelBase(nn.Module, ABC):
 
         y_true = np.concatenate(y_true).astype(np.int64)
         y_probs = np.concatenate(y_probs_list).astype(np.float32)
+
+        # The FORMULATION picks the branch, not the output width. A 2-D target is
+        # one column per output, and every step below - argmax, exact-match
+        # accuracy, a K-by-K confusion matrix, one-vs-rest AUC by index equality -
+        # assumes exactly one true class per sample. Deciding on the width instead
+        # would send a two-label problem down the binary path, which would report
+        # pos/neg as a class balance that does not exist.
+        if y_true.ndim > 1:
+            return self._evaluate_multi_label(
+                out_dir, y_true, y_probs, threshold, class_names
+            )
+
         unique_classes = np.unique(y_true)
         # Determine binary vs. multiclass from model output size, not test labels,
         # so a 3-class model whose test split happens to have 2 classes still uses
@@ -1140,24 +1260,27 @@ class ModelBase(nn.Module, ABC):
                     y_probs[:, cls].astype(np.float64),
                 )
 
-        results = {"n": n}
+        results = {"samples": n}
         if is_binary:
             # The class balance, which is what pos/neg mean here. For more than
             # two classes they would be the counts of class indices 1 and 0 and
             # read as a binary balance that does not exist, so the per-class
-            # table carries each class's support instead.
-            results |= {"pos": per_class[1]["support"], "neg": per_class[0]["support"]}
-        results["accuracy"] = f"{accuracy * 100:.2f}"
+            # table carries each class's samples instead.
+            results |= {"pos": per_class[1]["samples"], "neg": per_class[0]["samples"]}
+        results["accuracy"] = f"{accuracy:.4f}"
 
         auc = float("nan")
         fpr_tpr_per_class = None
-
-        if len(unique_classes) < 2:
+        # Only the AUC needs two classes to exist; every rate below is arithmetic
+        # over the confusion counts and is nan where undefined. So a degenerate
+        # split takes the same branch as any other and reports a nan AUC, which
+        # keeps the returned keys identical to those of any other split of the
+        # same problem type.
+        degenerate = len(unique_classes) < 2
+        if degenerate:
             logger.warning("AUC undefined: only one class present in test labels.")
-            # Recorded as nan rather than omitted, so a degenerate split's row
-            # has the same columns as every other row of the same problem type.
-            results["auc"] = f"{auc:.4f}"
-        elif is_binary:
+
+        if is_binary:
             # Class 1 is the positive class; its one-vs-rest counts are the
             # binary ones, so they come from the same table the CSV reports.
             tp, tn = per_class[1]["tp"], per_class[1]["tn"]
@@ -1167,51 +1290,48 @@ class ModelBase(nn.Module, ABC):
             specificity = rates["specificity"]
             ppv, npv = rates["ppv"], rates["npv"]
             f1, mcc = rates["f1"], rates["mcc"]
-            auc = roc_auc_score(y_true, y_prob)
+            if not degenerate:
+                auc = roc_auc_score(y_true, y_prob)
             results.update(
                 {
-                    "sensitivity": f"{sensitivity * 100:.2f}",
-                    "specificity": f"{specificity * 100:.2f}",
+                    "sensitivity": f"{sensitivity:.4f}",
+                    "specificity": f"{specificity:.4f}",
                     "auc": f"{auc:.4f}",
-                    "f1": f"{f1 * 100:.2f}",
-                    "mcc": f"{mcc * 100:.2f}",
-                    "ppv": f"{ppv * 100:.2f}",
-                    "npv": f"{npv * 100:.2f}",
+                    "f1": f"{f1:.4f}",
+                    "mcc": f"{mcc:.4f}",
+                    "ppv": f"{ppv:.4f}",
+                    "npv": f"{npv:.4f}",
                     "tp": tp,
                     "tn": tn,
                     "fp": fp,
                     "fn": fn,
                 }
             )
-
         else:
-            partial = len(unique_classes) < n_model_classes
+            partial = not degenerate and len(unique_classes) < n_model_classes
             if partial:
                 logger.warning(
                     "Partial AUC (OvR): %d of %d model classes absent from test data.",
                     n_model_classes - len(unique_classes),
                     n_model_classes,
                 )
-            auc = _macro_auc(class_aucs, unique_classes)
-            fpr_tpr_per_class = []
-            for cls in unique_classes:
-                y_true_bin = (y_true == cls).astype(np.int64)
-                fpr_cls, tpr_cls, _ = roc_curve(y_true_bin, y_probs[:, cls])
-                fpr_tpr_per_class.append((fpr_cls, tpr_cls))
+            if not degenerate:
+                auc = _macro_auc(class_aucs, unique_classes)
+                fpr_tpr_per_class = []
+                for cls in unique_classes:
+                    y_true_bin = (y_true == cls).astype(np.int64)
+                    fpr_cls, tpr_cls, _ = roc_curve(y_true_bin, y_probs[:, cls])
+                    fpr_tpr_per_class.append((fpr_cls, tpr_cls))
+            auc_label = f"{auc:.4f}"
             if partial:
-                auc_label = (
-                    f"{auc:.4f} (partial, "
-                    f"{len(unique_classes)}/{n_model_classes} classes)"
+                auc_label += (
+                    f" (partial, {len(unique_classes)}/{n_model_classes} classes)"
                 )
-            else:
-                auc_label = f"{auc:.4f}"
             results["auc"] = auc_label
-
-        if not is_binary:
             # The binary summary reports the single positive class's rates; the
             # multiclass one averages them, the per-class table holding the rest.
-            results["macro_f1"] = f"{_macro(class_rates, 'f1') * 100:.2f}"
-            results["macro_mcc"] = f"{_macro(class_rates, 'mcc') * 100:.2f}"
+            results["macro_f1"] = f"{_macro(class_rates, 'f1'):.4f}"
+            results["macro_mcc"] = f"{_macro(class_rates, 'mcc'):.4f}"
 
         names = _display_names(class_names, n_model_classes)
 
@@ -1221,22 +1341,22 @@ class ModelBase(nn.Module, ABC):
                 out_dir,
                 fpr_tpr_per_class,
                 auc,
-                self.best_epoch,
+                self.epoch_label,
                 class_labels=[names[int(cls)] for cls in unique_classes],
                 n_model_classes=n_model_classes,
             )
         elif len(unique_classes) > 1:
             fpr, tpr, _ = roc_curve(y_true, y_prob)
-            self._plot_roc(out_dir, fpr, tpr, auc, self.best_epoch)
+            self._plot_roc(out_dir, fpr, tpr, auc, self.epoch_label)
         else:
             # Nothing to separate, so there is no curve.
             logger.warning(
                 "ROC curve not plotted: only one class present in test labels."
             )
-        self._plot_confusion_matrix(out_dir, cm, self.best_epoch, display_labels=names)
+        self._plot_confusion_matrix(out_dir, cm, self.epoch_label, display_labels=names)
 
         df = pd.DataFrame([results])
-        results_path = out_dir / f"{self.name}_e{self.best_epoch}_test_results.csv"
+        results_path = out_dir / f"{self.name}_e{self.epoch_label}_test_results.csv"
         df.to_csv(results_path, index=False)
         logger.info("Test set results saved to %s", results_path)
 
@@ -1246,24 +1366,24 @@ class ModelBase(nn.Module, ABC):
                 "class": k,
                 "name": names[k],
                 **per_class[k],
-                **{key: f"{value * 100:.2f}" for key, value in class_rates[k].items()},
+                **{key: f"{value:.4f}" for key, value in class_rates[k].items()},
                 "auc": f"{class_aucs[k]:.4f}",
             }
             for k in range(n_model_classes)
         ]
-        per_class_path = out_dir / f"{self.name}_e{self.best_epoch}_test_per_class.csv"
+        per_class_path = out_dir / f"{self.name}_e{self.epoch_label}_test_per_class.csv"
         pd.DataFrame(per_class_rows).to_csv(per_class_path, index=False)
         logger.info("Per-class test results saved to %s", per_class_path)
 
         if is_binary:
             counts, rates = per_class[1], class_rates[1]
             logger.info(
-                "Test results Epoch %s: n=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
+                "Test results Epoch %s: samples=%d pos=%d neg=%d | acc=%.4f sens=%.4f "
                 "spec=%.4f auc=%.4f f1=%.4f mcc=%.4f | TP=%d TN=%d FP=%d FN=%d",
-                self.best_epoch,
+                self.epoch_label,
                 n,
-                counts["support"],
-                per_class[0]["support"],
+                counts["samples"],
+                per_class[0]["samples"],
                 accuracy,
                 rates["sensitivity"],
                 rates["specificity"],
@@ -1277,11 +1397,213 @@ class ModelBase(nn.Module, ABC):
             )
         else:
             logger.info(
-                "Test results Epoch %s: n=%d acc=%.4f auc=%.4f",
-                self.best_epoch,
+                "Test results Epoch %s: samples=%d | acc=%.4f auc=%.4f macro_f1=%.4f "
+                "macro_mcc=%.4f",
+                self.epoch_label,
                 n,
                 accuracy,
                 auc,
+                _macro(class_rates, "f1"),
+                _macro(class_rates, "mcc"),
+            )
+
+        return results
+
+    def _evaluate_multi_label(
+        self,
+        out_dir: Path,
+        y_true: np.ndarray,
+        y_probs: np.ndarray,
+        threshold: float,
+        class_names: Sequence[str] | None,
+    ) -> dict:
+        """
+        Evaluate a per-output (multi-label) model and write its results.
+
+        Each output is an independent binary decision, so there is no single
+        "accuracy": the summary reports **subset accuracy** (every output of a
+        sample correct, the strictest reading and the one the single-label path
+        would have reported), **bit accuracy** (the mean over outputs, i.e.
+        ``1 - hamming_loss``) and the Hamming loss itself. None of them is
+        called ``accuracy``, deliberately: the key would then name a different
+        quantity than it does on the single-label path, and nothing in the
+        number itself would say which. The per-output table does carry a plain
+        ``accuracy``, which there means one output's own one-vs-rest accuracy,
+        exactly as it does per class on the single-label path.
+
+        The per-output counts come from the four tallies directly rather than
+        from :func:`_confusion_counts`, which derives ``tn`` from a full matrix
+        total and is only valid for mutually exclusive classes. :func:`_rates`
+        does transfer unchanged, being pure arithmetic over four scalars, so the
+        two tables report the same columns computed the same way.
+
+        Parameters
+        ----------
+        out_dir : Path
+            Directory for the results files and the figure.
+        y_true : np.ndarray
+            Multi-hot ground truth, shape ``(n_samples, n_outputs)``.
+        y_probs : np.ndarray
+            Independent per-output probabilities, same shape.
+        threshold : float
+            Decision threshold applied to every output.
+        class_names : sequence of str, optional
+            One display name per output, as
+            :func:`~xai4tsc.data.base.class_names` returns them. Outputs are
+            named by index when this is not given.
+
+        Returns
+        -------
+        dict
+            The summary metrics. The per-output table is written to file.
+        """
+        n, n_outputs = y_true.shape
+        y_pred = (y_probs >= threshold).astype(np.int64)
+
+        if n:
+            subset_accuracy = float((y_pred == y_true).all(axis=1).mean())
+            hamming = float((y_pred != y_true).mean())
+        else:
+            subset_accuracy = hamming = float("nan")
+
+        # One 2x2 per output, [[tn, fp], [fn, tp]] - which is also the
+        # orientation ConfusionMatrixDisplay reads, so the same arrays are what
+        # gets plotted. _confusion_counts does not transfer here: it derives
+        # `tn` from a full matrix total, which only holds for mutually
+        # exclusive classes.
+        matrices = (
+            multilabel_confusion_matrix(y_true, y_pred)
+            if n
+            else np.zeros((n_outputs, 2, 2), dtype=int)
+        )
+
+        per_output, output_aucs = [], []
+        for j, matrix in enumerate(matrices):
+            (tn, fp), (fn, tp) = matrix
+            per_output.append(
+                {
+                    "samples": int(tp + fn),
+                    "tp": int(tp),
+                    "tn": int(tn),
+                    "fp": int(fp),
+                    "fn": int(fn),
+                }
+            )
+            # An output that is always present or always absent in the test split
+            # has nothing to separate, so it has no AUC and stays nan rather than
+            # excluding the others from the average.
+            truth = y_true[:, j]
+            if np.unique(truth).size < 2:
+                output_aucs.append(float("nan"))
+            else:
+                output_aucs.append(
+                    roc_auc_score(truth, y_probs[:, j].astype(np.float64))
+                )
+
+        # Each output's own (tp + tn) / n - the figure a subset accuracy hides -
+        # comes from `accuracy` in here, the same place the single-label table
+        # reads it from.
+        output_rates = [_rates(c["tp"], c["tn"], c["fp"], c["fn"]) for c in per_output]
+        names = _display_names(class_names, n_outputs)
+
+        # An output with nothing to separate has no AUC, so the macro average is
+        # over the rest and says so - the same partial reading, and the same
+        # label for it, as a class absent from a single-label test split.
+        defined = [j for j in range(n_outputs) if not math.isnan(output_aucs[j])]
+        auc = _macro_auc(output_aucs, np.arange(n_outputs))
+        if len(defined) < n_outputs:
+            logger.warning(
+                "Partial AUC (OvR): %d of %d outputs have only one class in the "
+                "test data.",
+                n_outputs - len(defined),
+                n_outputs,
+            )
+        auc_label = f"{auc:.4f}"
+        if defined and len(defined) < n_outputs:
+            # Labelled only where an average was actually taken; with no output
+            # left to score it is a plain nan, as a degenerate single-label
+            # split reports.
+            auc_label += f" (partial, {len(defined)}/{n_outputs} outputs)"
+
+        results = {
+            "samples": n,
+            "outputs": n_outputs,
+            "subset_accuracy": f"{subset_accuracy:.4f}",
+            "bit_accuracy": f"{(1 - hamming):.4f}",  # = 1 - hamming_loss
+            "hamming_loss": f"{hamming:.4f}",
+            "auc": auc_label,
+            "macro_f1": f"{_macro(output_rates, 'f1'):.4f}",
+            "macro_mcc": f"{_macro(output_rates, 'mcc'):.4f}",
+        }
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if defined:
+            fpr_tpr = [roc_curve(y_true[:, j], y_probs[:, j])[:2] for j in defined]
+            self._plot_roc_multiclass(
+                out_dir,
+                fpr_tpr,
+                auc,
+                self.epoch_label,
+                class_labels=[names[j] for j in defined],
+                n_model_classes=n_outputs,
+            )
+        else:
+            logger.warning(
+                "ROC curve not plotted: no output has both classes in the test labels."
+            )
+        # A K-by-K matrix is meaningless when a sample can be several classes at
+        # once, so each output gets its own 2x2 matrix instead.
+        self._plot_confusion_matrices(out_dir, matrices, self.epoch_label, names)
+
+        results_path = out_dir / f"{self.name}_e{self.epoch_label}_test_results.csv"
+        pd.DataFrame([results]).to_csv(results_path, index=False)
+        logger.info("Test set results saved to %s", results_path)
+
+        per_output_rows = [
+            {
+                "class": j,
+                "name": names[j],
+                **per_output[j],
+                **{key: f"{value:.4f}" for key, value in output_rates[j].items()},
+                "auc": f"{output_aucs[j]:.4f}",
+            }
+            for j in range(n_outputs)
+        ]
+        per_output_path = (
+            out_dir / f"{self.name}_e{self.epoch_label}_test_per_class.csv"
+        )
+        pd.DataFrame(per_output_rows).to_csv(per_output_path, index=False)
+        logger.info("Per-output test results saved to %s", per_output_path)
+
+        logger.info(
+            "Test results Epoch %s: samples=%d outputs=%d | subset_acc=%.4f "
+            "bit_acc=%.4f hamming=%.4f auc=%.4f",
+            self.epoch_label,
+            n,
+            n_outputs,
+            subset_accuracy,
+            1 - hamming,
+            hamming,
+            auc,
+        )
+        # Logged per output, unlike the single-label path: which output lags is
+        # the diagnostic a subset accuracy hides, and it is why this formulation
+        # exists.
+        for j in range(n_outputs):
+            counts = per_output[j]
+            logger.info(
+                "  output %d (%s): samples=%d acc=%.4f f1=%.4f auc=%.4f "
+                "| TP=%d TN=%d FP=%d FN=%d",
+                j,
+                names[j],
+                counts["samples"],
+                output_rates[j]["accuracy"],
+                output_rates[j]["f1"],
+                output_aucs[j],
+                counts["tp"],
+                counts["tn"],
+                counts["fp"],
+                counts["fn"],
             )
 
         return results
@@ -1294,7 +1616,7 @@ class ModelBase(nn.Module, ABC):
         fpr: np.ndarray | list,
         tpr: np.ndarray | list,
         auc: float,
-        best_epoch: int | None,
+        best_epoch: int,
     ) -> None:
         plt.figure(figsize=(5, 5))
         plt.plot(fpr, tpr, color="red", lw=2, label=f"ROC (AUC = {auc:.3f})")
@@ -1316,7 +1638,7 @@ class ModelBase(nn.Module, ABC):
         save_dir: Path,
         fpr_tpr_per_class: list[tuple],
         auc: float,
-        best_epoch: int | None,
+        best_epoch: int,
         class_labels: Sequence[str] | None = None,
         n_model_classes: int | None = None,
     ) -> None:
@@ -1345,16 +1667,70 @@ class ModelBase(nn.Module, ABC):
         self,
         save_dir: Path,
         cm: np.ndarray,
-        best_epoch: int | None,
+        best_epoch: int,
         display_labels: Sequence[str] | None = None,
     ) -> None:
         _fig, ax = plt.subplots(figsize=(5, 5))
         ConfusionMatrixDisplay(cm, display_labels=display_labels).plot(ax=ax)
-        ax.set_title(f"Confusion Matrix — Epoch {best_epoch}")
+        ax.set_title(f"Confusion Matrix - Epoch {best_epoch}")
         path = save_dir / f"{self.name}_e{best_epoch}_confusion_matrix.png"
         plt.savefig(path, dpi=300, bbox_inches="tight")
         logger.info("Confusion matrix saved to %s", path)
         plt.close()
+
+    def _plot_confusion_matrices(
+        self,
+        save_dir: Path,
+        matrices: np.ndarray,
+        best_epoch: int,
+        display_labels: Sequence[str],
+    ) -> None:
+        """
+        Draw one 2x2 confusion matrix per output of a multi-label model.
+
+        A single K-by-K matrix cannot describe a problem where one sample is
+        several classes at once - its rows would not sum to the sample count -
+        so each output gets its own absent/present matrix, in its own file
+        named after the class. Reading them side by side is what shows which
+        label the model has and has not learnt, which a subset accuracy
+        averages away.
+
+        The filename carries the output's index as well as its name: names come
+        from the encoder and may be supplied by the user, so two of them can
+        reduce to the same slug, and the index keeps one from overwriting the
+        other's figure.
+
+        Parameters
+        ----------
+        save_dir : Path
+            Directory to write the figures to.
+        matrices : np.ndarray
+            ``(n_outputs, 2, 2)`` as
+            :func:`~sklearn.metrics.multilabel_confusion_matrix` returns it:
+            rows are the truth and columns the prediction, the same orientation
+            as the single-label matrix.
+        best_epoch : int
+            Epoch the evaluated weights come from, used in the title; ``0``
+            when no epoch is known (see :attr:`ModelBase.epoch_label`).
+        display_labels : sequence of str
+            One name per output, in order.
+        """
+        for index, (matrix, name) in enumerate(
+            zip(matrices, display_labels, strict=True)
+        ):
+            _fig, ax = plt.subplots(figsize=(5, 5))
+            ConfusionMatrixDisplay(matrix, display_labels=["absent", "present"]).plot(
+                ax=ax
+            )
+            ax.set_title(f"Confusion Matrix - {name} - Epoch {best_epoch}")
+            slug = _filename_slug(name, str(index))
+            path = (
+                save_dir
+                / f"{self.name}_e{best_epoch}_confusion_matrix_{index}_{slug}.png"
+            )
+            plt.savefig(path, dpi=300, bbox_inches="tight")
+            logger.info("Confusion matrix for '%s' saved to %s", name, path)
+            plt.close()
 
     def _plot_training_curve(
         self,
@@ -1372,7 +1748,7 @@ class ModelBase(nn.Module, ABC):
         ax1.grid(True, linestyle="--", alpha=0.6)
         ax2.plot(epochs_ran, epoch_accs)
         ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Accuracy (%)")
+        ax2.set_ylabel("Accuracy")
         ax2.set_title("Training Accuracy")
         ax2.grid(True, linestyle="--", alpha=0.6)
         fig.tight_layout()

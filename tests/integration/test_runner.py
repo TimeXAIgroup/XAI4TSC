@@ -15,6 +15,7 @@ from sklearn.preprocessing import LabelEncoder
 
 from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
 from xai4tsc.models.base import ModelBase
+from xai4tsc.models.models import load_model
 
 _TEST_CONFIG = Path(__file__).parent.parent / "fixtures" / "test_config.yaml"
 
@@ -661,6 +662,8 @@ def test_header_only_metrics_csv_when_nothing_succeeds(
         "model",
         "explainer",
         "metric",
+        "target",
+        "samples",
         "seed",
         "status",
         "score",
@@ -1500,3 +1503,163 @@ def test_a_logged_result_is_reproducible_through_the_package(
         "a different samples seed selected the same subset, so this test would "
         "pass even if the seed were ignored"
     )
+
+
+# ── models.csv: test-set model performance ────────────────────────────────────
+
+
+@pytest.mark.integration
+def test_model_performance_reaches_an_aggregate_csv(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """evaluate_model's summary is collected, not left in the model's own folder."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_models_csv"
+
+    config = _resolve_config(cache_root, results_rel)
+    main(str(_write_config(config, tmp_path)))
+
+    experiment_dir = _experiment_dir(results_rel)
+    models_csv = experiment_dir / "models.csv"
+    assert models_csv.exists(), "models.csv missing"
+
+    df = pd.read_csv(models_csv)
+    assert not df.empty
+    for col in ("dataset", "model", "epoch", "status", "detail"):
+        assert col in df.columns
+    assert (df["status"] == "ok").all(), f"unexpected statuses: {set(df['status'])}"
+    # A binary problem, so the columns are the binary ones rather than a
+    # formulation-neutral subset.
+    assert {"accuracy", "auc", "pos", "neg"} <= set(df.columns)
+    # The same numbers the model's own summary file carries - the aggregate is a
+    # collection of them, not a recomputation.
+    own = pd.read_csv(next(experiment_dir.rglob("*_test_results.csv")))
+    assert str(df.loc[0, "accuracy"]) == str(own.loc[0, "accuracy"])
+
+    # Per dataset too, mirroring metrics.csv.
+    per_dataset = next(experiment_dir.glob("*/*_models.csv"))
+    assert not pd.read_csv(per_dataset).empty
+
+
+# ── the per-output (multi-label) formulation ──────────────────────────────────
+
+
+def _multi_label_config(cache_path: Path, results_rel: str, target: str) -> dict:
+    """Build a Synth_Multilabel_Freq run with one output per frequency."""
+    return {
+        "experiment_name": "test_run",
+        "cache_path": str(cache_path),
+        "results_rel_path": results_rel,
+        "general": {"seed": 7, "reproducible": True, "device": "cpu"},
+        "data_config": {
+            "default_settings": {"train_split": 0.7, "val_split": 0.15},
+            "datasets": [
+                {
+                    "dataset": "Synth_Multilabel_Freq",
+                    "encode": "multihot",
+                    "encode_params": {"classes": ["7Hz", "19Hz", "37Hz"]},
+                    "use_predefined_splits": True,
+                    # Restrict rather than regenerate: the generated signals are
+                    # bit-pinned by the digest test, and the bursts have to stay
+                    # intact for Time-Frequency AUC to have anything to localize.
+                    "max_samples": 150,
+                }
+            ],
+        },
+        "train_config": {
+            "default_settings": {
+                "hyperparams": {
+                    "epochs": 1,
+                    "batchsize": 16,
+                    "loss_func": "bcewithlogits",
+                    "optimizer": "adam",
+                },
+                "train": True,
+            },
+            "models": [{"model": "FCN", "init_params": {"filters": [4, 8, 4]}}],
+        },
+        "explanation_config": {
+            "default_settings": {
+                "target": target,
+                "samples": {"type": "random", "count": 6},
+            },
+            "explainers": [
+                {
+                    "method": "FreqRISE",
+                    "domain": "fft",
+                    "num_batches": 4,
+                    "batch_size": 4,
+                    "num_cells": 8,
+                }
+            ],
+        },
+        "evaluation_config": {
+            "default_settings": {"metric_call_params": {"softmax": False}},
+            "metrics": [{"metric": "Time-Frequency AUC"}],
+        },
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("target", ["all", "label"])
+def test_per_output_formulation_end_to_end(tmp_path, monkeypatch, target):
+    """One output per frequency, trained with BCE and scored against its own mask."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = f"tests/_runner_multilabel_{target}"
+
+    config = _multi_label_config(cache_root, results_rel, target)
+    main(str(_write_config(config, tmp_path)))
+
+    experiment_dir = _experiment_dir(results_rel)
+    df = pd.read_csv(experiment_dir / "metrics.csv")
+
+    # One row per output rather than their mean: the per-frequency spread is the
+    # diagnostic this formulation exists to expose, and averaging hid it.
+    scored = df[df["status"] == "ok"]
+    assert not scored.empty, f"no scored rows: {df.to_dict('records')}"
+    assert set(scored["target"]) <= {"7Hz", "19Hz", "37Hz"}
+    assert len(df) == 3, "one row per output, not one for the dataset"
+    # Every scored row has to say what its denominator was: under a per-output
+    # encoding it varies per output, so two scores are not otherwise comparable.
+    assert (scored["samples"] > 0).all()
+    # Time-Frequency AUC needs both a frequency explainer and ground truth, so a
+    # number here is what proves the ground-truth scope reached the metric.
+    assert not scored["score"].isna().any()
+
+    explained = 6  # samples.count
+    if target == "all":
+        # Nothing is masked: every output is explained for every sample.
+        assert set(scored["samples"]) == {explained}
+    else:
+        # Each output is scored only on the samples carrying it. A sample
+        # carries 1.5 of the 3 frequencies on average, so the totals cannot all
+        # reach the explained-sample count - and if they did, the mask would not
+        # be doing anything.
+        assert scored["samples"].sum() < 3 * explained
+        assert (scored["samples"] <= explained).all()
+
+
+@pytest.mark.integration
+def test_a_per_output_checkpoint_reloads_with_its_activation(tmp_path, monkeypatch):
+    """The reason output_activation lives on the constructor, end to end."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_multilabel_ckpt"
+
+    config = _multi_label_config(cache_root, results_rel, "all")
+    main(str(_write_config(config, tmp_path)))
+
+    experiment_dir = _experiment_dir(results_rel)
+    sidecars = list(experiment_dir.rglob("*_config.json"))
+    assert sidecars, "no checkpoint sidecar written"
+    recorded = json.loads(sidecars[0].read_text())["init_params"]
+    # Three frequencies, so three independent outputs - not eight powerset
+    # classes - and a sigmoid rather than a competing softmax.
+    assert recorded["num_classes"] == 3
+    assert recorded["output_activation"] == "sigmoid"
+
+    checkpoint = str(sidecars[0]).replace("_config.json", ".pt")
+    reloaded = load_model({"model": "FCN", "model_ckpt_path": checkpoint}, device="cpu")
+    assert reloaded.output_activation == "sigmoid"

@@ -176,8 +176,8 @@ class UcrUeaDataset(DatasetBase):
                 raise ValueError(
                     f"Dataset '{self.name}' contains variable-length time series "
                     "and cannot be converted to a fixed-shape array.  Set "
-                    "pad_series=True (allow_padding: true in YAML) to zero-pad "
-                    "all series to the maximum length."
+                    "pad_series=True to zero-pad all series to the maximum "
+                    "length."
                 ) from exc
             x_nested, labels = load_UCR_UEA_dataset(
                 name=ucr_name,
@@ -248,8 +248,8 @@ class UcrUeaDataset(DatasetBase):
                 raise ValueError(
                     f"Dataset '{self.name}' contains variable-length time series "
                     "and cannot be converted to a fixed-shape array.  Set "
-                    "pad_series=True (allow_padding: true in YAML) to zero-pad "
-                    "all series to the maximum length."
+                    "pad_series=True to zero-pad all series to the maximum "
+                    "length."
                 ) from exc
             logger.info(
                 "Dataset '%s' has variable-length series; zero-padding to max length.",
@@ -855,7 +855,7 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         Return the generation parameters that define the cached blob's identity.
 
         The partition ratios are deliberately absent: they slice the cached blob
-        rather than change it, so two configs that split it differently share one
+        rather than change it, so two runs that split it differently share one
         generated copy.
 
         Returns
@@ -1128,9 +1128,10 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
             own ``seed``.
         encoder : object, optional
             An sklearn-style target encoder.
-            :class:`~xai4tsc.data.base.MultiHotLabelEncoder` is the fitting choice
-            for this dataset's multi-hot labels and the one that lets a region be
-            scoped to the classes it discriminates.
+            :class:`~xai4tsc.data.base.MultiHotLabelEncoder` (one output per
+            frequency) or :class:`~xai4tsc.data.base.PowersetLabelEncoder` (one
+            class per combination) both fit this dataset's multi-hot labels, and
+            either lets a region be scoped to the classes it discriminates.
         impute_missing : bool
             Accepted for signature parity. Generated data holds no NaN, so there
             is nothing to impute.
@@ -1428,12 +1429,32 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         Returns
         -------
         dict
-            ``{frequency: (class_index, ...)}``, or empty when the encoding is not
-            multi-hot and a frequency therefore says nothing about a class.
+            ``{frequency: (class_index, ...)}``, or empty when the encoding says
+            nothing about which class a frequency discriminates.
         """
         classes = list(getattr(encoder, "classes_", []))
         n_bits = len(self.discriminative_frequencies)
-        if not classes or any(np.ndim(c) != 1 or len(c) != n_bits for c in classes):
+        if not classes:
+            return {}
+
+        # Per-output encoding (MultiHotLabelEncoder): one class per label, so a
+        # frequency's bit index already IS its class index and the powerset
+        # expansion collapses to the identity. This needs its own branch rather
+        # than the empty-dict fallback below, which would silently leave every
+        # region unscoped and hand each class the union of all of them. The
+        # class *names* are irrelevant here - `classes_` may hold "7Hz" rather
+        # than 0 - because what a region's scope is matched against is the
+        # integer index.
+        if all(np.ndim(c) == 0 for c in classes):
+            if len(classes) != n_bits:
+                return {}
+            return {
+                freq: (bit,) for bit, freq in enumerate(self.discriminative_frequencies)
+            }
+
+        # Powerset encoding (PowersetLabelEncoder): each class is a multi-hot
+        # combination, and a frequency marks every combination carrying its bit.
+        if any(np.ndim(c) != 1 or len(c) != n_bits for c in classes):
             return {}
         return {
             freq: tuple(
@@ -1454,14 +1475,14 @@ def register_synthetic_dataset(name: str, dataset_class: type) -> None:
     """
     Register a custom :class:`SyntheticDataset` subclass under *name*.
 
-    The factory :func:`xai4tsc.data.load_dataset` dispatches a YAML
-    ``dataset: <name>`` entry to the registered class (checked before the
-    path/UCR branches), so registering a name makes it usable from config.
+    The factory :func:`xai4tsc.data.load_dataset` dispatches ``name=<name>`` to
+    the registered class (checked before the path/UCR branches), so registering
+    a name makes it loadable by name.
 
     Parameters
     ----------
     name : str
-        Registry key (matched against the YAML ``dataset`` field).
+        Registry key (matched against ``load_dataset``'s *name*).
     dataset_class : type
         A :class:`SyntheticDataset` subclass.
     """
@@ -1551,7 +1572,8 @@ def load_dataset(
             name,
         )
     if name in SYNTHETIC_DATASETS:
-        # Generation params arrive as kwargs (the runner forwards `init_params`).
+        # Generation params arrive as kwargs, so drop the keys that only a
+        # file-backed dataset takes.
         for k in ("data_format", "download"):
             kwargs.pop(k, None)
         return SYNTHETIC_DATASETS[name](

@@ -415,8 +415,8 @@ def resolve_transform(
     Normalise a transform argument to a :class:`DomainTransform` or ``None``.
 
     Accepts an already-built transform (returned as-is), a config dict (built via
-    :func:`get_transform`), or ``None``. Lets explainer constructors take either a
-    Python object (package use) or a YAML config mapping (runner use).
+    :func:`get_transform`), or ``None``. Lets explainer constructors take either
+    the object itself or the plain mapping that describes one.
 
     Parameters
     ----------

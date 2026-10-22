@@ -5,13 +5,17 @@ import pytest
 from experiment_runner.encoders import ENCODERS, build_encoder
 from sklearn.preprocessing import LabelBinarizer, LabelEncoder
 
-from xai4tsc.data import MultiHotLabelEncoder
+from xai4tsc.data import MultiHotLabelEncoder, PowersetLabelEncoder
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("name", "expected"),
-    [("label", LabelEncoder), ("multihot", MultiHotLabelEncoder)],
+    [
+        ("label", LabelEncoder),
+        ("multihot", MultiHotLabelEncoder),
+        ("powerset", PowersetLabelEncoder),
+    ],
 )
 def test_build_encoder_returns_the_named_encoder(name, expected):
     assert isinstance(build_encoder(name), expected)
@@ -103,8 +107,9 @@ def test_the_table_holds_only_target_encoders():
 
 
 @pytest.mark.unit
-def test_label_and_multihot_round_trip_through_the_package():
-    # The two shipped names, exercised end to end on the shape each one reads.
+def test_the_shipped_names_round_trip_through_the_package():
+    # Each shipped name, exercised end to end on the shape it reads and the
+    # target rank it returns: 1-D is class indices, 2-D is one column per output.
     from xai4tsc.data.base import _fit_label_encoder
 
     scalars = np.array([2, 0, 1, 0])
@@ -113,6 +118,45 @@ def test_label_and_multihot_round_trip_through_the_package():
     assert targets.dtype == np.int64
 
     rows = np.array([[0, 1], [1, 1], [0, 1], [0, 0]])
-    encoder, targets = _fit_label_encoder(rows, build_encoder("multihot"))
+
+    encoder, targets = _fit_label_encoder(rows, build_encoder("powerset"))
     assert targets.tolist() == [1, 2, 1, 0]
     np.testing.assert_array_equal(encoder.inverse_transform(targets), rows)
+
+    encoder, targets = _fit_label_encoder(rows, build_encoder("multihot"))
+    np.testing.assert_array_equal(targets, rows)
+    assert targets.dtype == np.int64
+    assert encoder.classes_.tolist() == [0, 1], "one entry per model output"
+
+
+@pytest.mark.unit
+def test_multihot_takes_column_names_through_encode_params():
+    encoder = build_encoder("multihot", {"classes": ["7Hz", "19Hz", "37Hz"]})
+    encoder.fit(np.array([[1, 1, 0], [0, 0, 1]]))
+    assert encoder.classes_.tolist() == ["7Hz", "19Hz", "37Hz"]
+
+
+@pytest.mark.unit
+def test_column_names_of_the_wrong_length_raise():
+    # The columns are positional, so a short list cannot be reordered to fit; it
+    # would name an output after a different output.
+    encoder = build_encoder("multihot", {"classes": ["7Hz", "19Hz"]})
+    with pytest.raises(ValueError, match="class name"):
+        encoder.fit(np.array([[1, 1, 0], [0, 0, 1]]))
+
+
+@pytest.mark.unit
+def test_params_without_a_name_are_an_error():
+    with pytest.raises(ValueError, match="without an encode"):
+        build_encoder(None, {"classes": [0, 1]})
+
+
+@pytest.mark.unit
+def test_multilabelbinarizer_is_reachable_for_set_valued_labels():
+    # Label *sets* are MultiLabelBinarizer's native input and need no encoder of
+    # ours; the dotted path is the documented way to reach it.
+    from sklearn.preprocessing import MultiLabelBinarizer
+
+    encoder = build_encoder("sklearn.preprocessing.MultiLabelBinarizer")
+    assert isinstance(encoder, MultiLabelBinarizer)
+    assert encoder.fit_transform([("b",), ("a", "c")]).shape == (2, 3)

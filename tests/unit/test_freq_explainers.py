@@ -493,7 +493,7 @@ def test_estimator_weights_by_the_logit_not_the_probability():
     )
 
 
-# ── R42: probability_of_keep, with the old spelling deprecated ───────────────
+# ── R42: probability_of_keep ─────────────────────────────────────────────────
 
 
 @pytest.mark.unit
@@ -505,50 +505,3 @@ def test_keep_probability_is_the_mask_keep_rate():
     )
 
     assert masks.mean().item() == pytest.approx(0.9, abs=0.02)
-
-
-@pytest.mark.unit
-def test_deprecated_probability_of_drop_still_works_and_warns(caplog):
-    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
-        explainer = FreqRISEExplainer(domain="fft", probability_of_drop=0.7)
-
-    assert explainer.probability_of_keep == 0.7
-    assert "deprecated" in caplog.text
-    assert "probability_of_keep" in caplog.text
-
-
-@pytest.mark.unit
-def test_the_new_name_warns_about_nothing(caplog):
-    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
-        explainer = FreqRISEExplainer(domain="fft", probability_of_keep=0.7)
-
-    assert explainer.probability_of_keep == 0.7
-    assert "deprecated" not in caplog.text
-
-
-@pytest.mark.unit
-def test_the_rename_is_only_a_rename():
-    """Both spellings must produce byte-identical attributions at the same seed."""
-    data = _bin_signal()
-    model = _FFTBinModel(12)
-    common = dict(domain="fft", num_batches=20, batch_size=8, num_cells=16, seed=0)
-
-    old = FreqRISEExplainer(**common, probability_of_drop=0.7).explain(
-        model, _make_exp(data), "cpu", [1]
-    )
-    new = FreqRISEExplainer(**common, probability_of_keep=0.7).explain(
-        model, _make_exp(data), "cpu", [1]
-    )
-
-    assert np.array_equal(old, new)
-
-
-@pytest.mark.unit
-def test_conflicting_spellings_report_which_one_wins(caplog):
-    with caplog.at_level("WARNING", logger="xai4tsc.xai.freqrise"):
-        explainer = FreqRISEExplainer(
-            domain="fft", probability_of_keep=0.5, probability_of_drop=0.8
-        )
-
-    assert explainer.probability_of_keep == 0.8, "the explicit old spelling wins"
-    assert "disagree" in caplog.text

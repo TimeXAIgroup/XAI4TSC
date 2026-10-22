@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812 — PyTorch ecosystem convention
 from torch import nn
 
-from ..models.base import ModelBase
+from ..models.base import ModelBase, check_output_activation
 from ..utils.utils import dict_to_args, load_class_from_path, merge_dicts
 
 logger = logging.getLogger(__name__)
@@ -80,8 +80,8 @@ def load_ext_model(
     Load an external model class and instantiate a model.
 
     Executes arbitrary Python from *model_path* via
-    :func:`~xai4tsc.utils.utils.load_class_from_path`; the experiment runner
-    gates this behind ``general.allow_external_code``.
+    :func:`~xai4tsc.utils.utils.load_class_from_path`, so the caller is
+    responsible for the consent that function describes.
 
     Parameters
     ----------
@@ -106,7 +106,7 @@ def load_ext_model(
     model = user_model_class(**(filtered_params or {}))
     model.name = model_name
     # An external class is not obliged to call _record_init_params, so fall back
-    # to what the config asked for.  A class that does record its own arguments
+    # to the parameters supplied here.  A class that does record its own arguments
     # captured them more completely, so that record wins.
     if not model._init_params:
         model._init_params = filtered_params
@@ -247,8 +247,8 @@ def load_model(
 
     Resolves the class the weights and reads the constructor arguments back out
     of the ``config.json`` beside them.  Building a *new* model from a registry
-    name is a config-driven fallback for the experiment runner needs.
-    From Python, construct the class and call
+    name is the fallback, for a caller that has a config dict rather than a
+    class.  From Python, construct the class and call
     :meth:`~xai4tsc.models.base.ModelBase.configure` instead:
     ``FCN(in_channels=1, num_classes=2).configure(device="cpu",save_path=out)``,
     which takes plain values rather than a config dict.
@@ -256,7 +256,7 @@ def load_model(
     A ``.pt`` checkpoint may be either the self-describing dict written by
     :func:`save_model` (carrying ``model_class``) or a bare state dict as
     written by :meth:`~xai4tsc.models.base.ModelBase.save_model` - the form of
-    every ``<Model>_epoch_<N>.pt`` the experiment runner produces.  The class to
+    the ``<Model>_epoch_<N>.pt`` files training writes.  The class to
     build is resolved in order from the checkpoint's own ``model_class``, the
     ``model`` registry name, and finally ``class_name`` / ``class_path``.  A
     ``config.json`` beside the checkpoint is merged in and takes precedence, so
@@ -336,8 +336,8 @@ def load_model(
 
             # Load model checkpoint. Either the self-describing dict written by
             # save_model(), or a bare state dict as written by
-            # ModelBase.save_model() - the form every <Model>_epoch_<N>.pt the
-            # experiment runner produces takes.
+            # ModelBase.save_model() - the form every <Model>_epoch_<N>.pt
+            # written during training takes.
             model_ckpt = torch.load(path, map_location=device, weights_only=False)
             wrapped = isinstance(model_ckpt, dict) and "model_state_dict" in model_ckpt
             state_dict = model_ckpt["model_state_dict"] if wrapped else model_ckpt
@@ -466,6 +466,12 @@ class FCN(ModelBase):
         Defaults to ``(128, 256, 128)`` as in the original paper.
     kernel_sizes : tuple[int, int, int]
         Kernel sizes for the three blocks. Defaults to ``(8, 5, 3)``.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -474,9 +480,11 @@ class FCN(ModelBase):
         num_classes: int,
         filters: tuple[int, int, int] = (128, 256, 128),
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         channels = [in_channels, *filters]
         blocks = []
         for i in range(3):
@@ -538,6 +546,12 @@ class LeNet(ModelBase):
         Number of output classes.
     head_hidden : int
         Width of the hidden fully-connected layer. Defaults to 128.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -545,9 +559,11 @@ class LeNet(ModelBase):
         in_channels: int,
         num_classes: int = 2,
         head_hidden: int = 128,
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         channels = [in_channels, 32, 64, 128]
         pools = [nn.MaxPool1d(2), nn.MaxPool1d(2), nn.AdaptiveAvgPool1d(1)]
         blocks = []
@@ -657,6 +673,12 @@ class ResNet(ModelBase):
     kernel_sizes : tuple[int, int, int]
         Kernel sizes of the three convolutions inside each residual block.
         Defaults to ``(8, 5, 3)``.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -665,9 +687,11 @@ class ResNet(ModelBase):
         num_classes: int,
         n_feature_maps: int = 64,
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         self.blocks = nn.Sequential(
             _ResidualBlock(in_channels, n_feature_maps, kernel_sizes),
             _ResidualBlock(n_feature_maps, n_feature_maps * 2, kernel_sizes),
@@ -738,6 +762,12 @@ class LSTM(ModelBase):
     dropout : float
         Dropout applied between stacked LSTM layers (ignored when
         ``num_layers == 1``). Defaults to 0.0.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -748,9 +778,11 @@ class LSTM(ModelBase):
         num_layers: int = 2,
         bidirectional: bool = True,
         dropout: float = 0.0,
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         self.lstm = nn.LSTM(
             input_size=in_channels,
             hidden_size=hidden_size,
@@ -825,6 +857,12 @@ class PatchTST(ModelBase):
         Width of the encoder feed-forward sublayer. Defaults to 256.
     dropout : float
         Dropout used inside the transformer encoder. Defaults to 0.1.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -838,9 +876,11 @@ class PatchTST(ModelBase):
         nhead: int = 8,
         dim_feedforward: int = 256,
         dropout: float = 0.1,
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         if d_model % nhead != 0:
             msg = f"d_model ({d_model}) must be divisible by nhead ({nhead})."
             raise ValueError(msg)
@@ -1038,6 +1078,12 @@ class XLSTM(ModelBase):
         Number of mLSTM heads. Must divide ``embed_dim``. Defaults to 4.
     dropout : float
         Dropout applied to the block residual branches. Defaults to 0.0.
+    output_activation : str
+        ``"softmax"`` (default) or ``"sigmoid"``: what
+        :func:`~xai4tsc.models.base.predict_probs` applies to this model's
+        logits. ``"sigmoid"`` is for independent per-label outputs trained with
+        :class:`~torch.nn.BCEWithLogitsLoss`. It is a constructor argument so it
+        rides into the checkpoint's ``init_params`` and survives a reload.
     """
 
     def __init__(
@@ -1048,9 +1094,11 @@ class XLSTM(ModelBase):
         num_blocks: int = 2,
         num_heads: int = 4,
         dropout: float = 0.0,
+        output_activation: str = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
+        self.output_activation = check_output_activation(output_activation)
         if embed_dim % num_heads != 0:
             msg = (
                 f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})."
@@ -1086,15 +1134,15 @@ def register_model(name: str, model_class: type) -> None:
     """
     Register a custom model class.
 
-    The class must be a :class:`~xai4tsc.models.base.ModelBase` subclass — the
-    runner relies on the training, prediction, and evaluation methods provided
+    The class must be a :class:`~xai4tsc.models.base.ModelBase` subclass: the
+    pipeline calls the training, prediction, and evaluation methods provided
     there, so a plain :class:`torch.nn.Module` is not sufficient. After
-    registration it is available by *name* in experiment configs.
+    registration it is available by *name* in :data:`MODELS`.
 
     Parameters
     ----------
     name:
-        Key used to look up the model (matched case-insensitively in configs).
+        Key used to look up the model (matched case-insensitively).
     model_class:
         A :class:`~xai4tsc.models.base.ModelBase` subclass.
 

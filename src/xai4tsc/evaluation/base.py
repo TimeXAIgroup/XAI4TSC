@@ -52,7 +52,7 @@ eval_metric_defaults = {
     "MPRT": {
         # One score per randomised layer. With return_aggregate (the framework
         # default) Quantus asserts that one of the two correlation reductions is
-        # on; without it the result is a dict, which the runner cannot reduce.
+        # on; without it the result is a dict rather than a score.
         "return_last_correlation": True,
     },
     "SmoothMPRT": {
@@ -60,7 +60,7 @@ eval_metric_defaults = {
     },
 }
 
-# Callable-typed params that can be specified as strings in config.
+# Callable-typed params that may also be given as a string name.
 # A string value is resolved via _resolve_callable_perturb_func and dropped
 # (with a warning) if unresolvable so the metric uses its own default.
 # TODO: extend resolution to other callable params once a canonical resolution
@@ -231,8 +231,8 @@ class EvaluatorBase(ABC):
 
     Read the two together via
     :func:`~xai4tsc.evaluation.evaluate.required_domains_for`, which resolves the
-    native rule against a given data domain; the runner skips a metric whose result
-    does not contain the explanation's domain.
+    native rule against a given data domain. A metric whose result does not
+    contain the explanation's domain cannot score it.
 
     Contract — attributions are real-valued
     ---------------------------------------
@@ -490,8 +490,8 @@ class QuantusEvaluator(EvaluatorBase):
 
         # Quantus keeps a non-empty explain_func_kwargs by reference and writes
         # `device` into it, and only the outer call_params dict was copied on the
-        # way in — so a nested one is still the caller's config object. Copy it
-        # to mitigate changes to the config object.
+        # way in - so a nested one is still the caller's own dict. Copy it so the
+        # call does not mutate what the caller passed.
         if isinstance(call_params.get("explain_func_kwargs"), dict):
             call_params = {
                 **call_params,

@@ -223,7 +223,7 @@ def register_metric(name: str, metric_class: type) -> None:
     Parameters
     ----------
     name:
-        Key used to reference the metric in experiment configs.
+        Key used to reference the metric in :data:`METRICS`.
     metric_class:
         The metric class to register.
 

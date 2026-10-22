@@ -15,7 +15,7 @@ import torch
 from sklearn.preprocessing import LabelEncoder
 from torch import nn
 
-from xai4tsc.data.base import MultiHotLabelEncoder
+from xai4tsc.data.base import MultiHotLabelEncoder, PowersetLabelEncoder
 from xai4tsc.utils import STFTransform
 from xai4tsc.xai import Domain, Explanation, is_multi_target
 from xai4tsc.xai.explain import _get_explanation, plot_exp
@@ -261,7 +261,7 @@ def test_plot_exp_multihot_filenames_need_no_quoting(tmp_path):
     # The raw decoded label is a numpy row, so interpolating it gave names like
     # "relevance_index_7_class_[0 0 1]_points.png": invalid on Windows, and a
     # single `find | xargs` splits one such name across three words.
-    encoder = MultiHotLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
+    encoder = PowersetLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
     exp = _time_exp([0, 1], encoder)
 
     plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
@@ -276,7 +276,7 @@ def test_plot_exp_multihot_filenames_need_no_quoting(tmp_path):
 def test_plot_exp_spells_a_class_the_same_in_both_target_modes(tmp_path):
     # The two paths used to read different helpers: class_names for multi-target
     # (already hyphen-joined) and decode_labels for single-target (a raw row).
-    encoder = MultiHotLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
+    encoder = PowersetLabelEncoder().fit(np.array([[0, 0, 1], [1, 0, 0]]))
     single, multi = tmp_path / "single", tmp_path / "multi"
 
     plot_exp(
@@ -318,3 +318,22 @@ def test_plot_exp_falls_back_to_the_class_index_when_unnamed(tmp_path):
 
     assert list(tmp_path.glob("relevance_index_7_class_0_points*.png"))
     assert list(tmp_path.glob("relevance_index_9_class_1_points*.png"))
+
+
+@pytest.mark.unit
+def test_plot_exp_makes_a_supplied_class_name_safe_for_the_filesystem(tmp_path):
+    # Class names used to be generated - an index, or a dash-joined multi-hot
+    # row - and so were always usable as-is. An encoder's `classes` argument
+    # puts arbitrary text in `classes_`, and a '/' would write into a
+    # subdirectory that does not exist rather than naming the file.
+    encoder = MultiHotLabelEncoder(classes=["a/b", "7 Hz"]).fit(
+        np.array([[1, 0], [0, 1]])
+    )
+    exp = _time_exp([0, 1], encoder)
+
+    plot_exp(exp, save_path=tmp_path, visualization_type=["points"])
+
+    written = [p.name for p in tmp_path.iterdir()]
+    assert written
+    assert not [p for p in written if set(" /[]") & set(p)], written
+    assert any("a_b" in name for name in written)

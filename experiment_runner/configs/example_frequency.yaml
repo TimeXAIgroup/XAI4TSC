@@ -33,7 +33,9 @@ data_config:
     val_split: 0.15
   datasets:
     - dataset: "Synth_Multilabel_Freq"
-      encode: "multihot"
+      encode: "multihot"            # one output per frequency, not one per combo
+      encode_params:
+        classes: ["7Hz", "19Hz", "37Hz"]
       use_predefined_splits: true   # the dataset's own published splits
 
 # --- Model: one architecture (FreqRISE dominates runtime) ---
@@ -42,7 +44,8 @@ train_config:
     hyperparams:
       epochs: 15
       batchsize: 32
-      loss_func: "CrossEntropy"
+      loss_func: "bcewithlogits"   # per-output targets: one independent
+                                  # decision per frequency, not one of K
       optimizer: "adam"
       learn_rate: 0.001
       patience: 3
@@ -95,7 +98,7 @@ evaluation_config:
       disable_warnings: true
       return_aggregate: true
     metric_call_params:
-      softmax: true
+      softmax: false        # independent per-label outputs, already probabilities
   metrics:
     - metric: "Frequency Perturbation"        # needs a FREQUENCY explainer
       metric_class_params:

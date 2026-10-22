@@ -30,7 +30,9 @@ data_config:
     val_split: 0.15
   datasets:
     - dataset: "Synth_Multilabel_Freq"   # SyntheticDataset registry key
-      encode: "multihot"                 # collapse multi-hot combos to class indices
+      encode: "multihot"                 # one output per frequency, not one per combo
+      encode_params:
+        classes: ["7Hz", "19Hz", "37Hz"]  # names the outputs in the per-output results
       use_predefined_splits: true        # the dataset's own published splits
 
 # --- Models: two different architectures, both trained ---
@@ -39,7 +41,8 @@ train_config:
     hyperparams:
       epochs: 10
       batchsize: 32
-      loss_func: "CrossEntropy"
+      loss_func: "bcewithlogits"   # per-output targets: one independent
+                                  # decision per frequency, not one of K
       optimizer: "adam"
       learn_rate: 0.001
       patience: 3
@@ -75,7 +78,8 @@ evaluation_config:
       disable_warnings: true
       return_aggregate: true
     metric_call_params:
-      softmax: true         # score probabilities, not raw logits (models emit logits)
+      softmax: false        # the outputs are independent per-label probabilities
+                            # already; renormalising them would move every score
   metrics:
     - metric: "Complexity"          # cheap: counts non-zero attributions
     - metric: "Pixel-Flipping"      # faithfulness via progressive perturbation

@@ -242,8 +242,9 @@ class TSHAPExplainer(PerturbationExplainer):
     background_data : np.ndarray, optional
         Background samples of shape ``(n, C, T)``.  The centroid
         ``background_data.mean(axis=0)`` is used as the ``"centroid"`` reference.
-        The runner resolves the YAML ``background_data`` selector to this array;
-        passing a non-array raises (selectors are a runner-only concept).
+        Must be the array itself: a selector naming where to take background
+        samples from has to be resolved before it reaches here, and passing one
+        raises.
     seed : int or None
         Seed for the ``"random"`` baseline, :data:`~xai4tsc.DEFAULT_SEED` by
         default. A local generator is built from it on every :meth:`explain`
@@ -275,9 +276,9 @@ class TSHAPExplainer(PerturbationExplainer):
             )
         if background_data is not None and not isinstance(background_data, np.ndarray):
             raise TypeError(
-                "background_data must be a numpy array. The runner resolves the "
-                "'background_data' YAML selector to an array; selectors are a "
-                "runner-only concept and cannot reach the package."
+                "background_data must be a numpy array of shape (n, C, T), not a "
+                "selector naming where to take the samples from. Resolve the "
+                "selector to an array before constructing the explainer."
             )
 
         self.window_length = window_length

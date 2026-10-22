@@ -1229,12 +1229,60 @@ def _validate_encoders(config: dict, issues: ConfigIssues) -> None:
             continue
         name = entry.get("encode")
         try:
-            build_encoder(name)
+            build_encoder(name, entry.get("encode_params"))
         except ValueError as exc:
             issues.error(
                 f"data_config.datasets[{index}] ('{entry.get('dataset', '?')}')",
                 str(exc),
             )
+
+
+def _validate_perturbation_softmax(config: dict, issues: ConfigIssues) -> None:
+    """
+    Warn when perturbation metrics would softmax a per-output model's outputs.
+
+    ``metric_call_params.softmax`` makes the perturbation metrics normalise the
+    model's output before reading the explained class's score. Over a
+    one-of-K head that is right. Over independent per-output heads
+    (``encode: "multihot"``, trained with BCE) it is not: the outputs do not
+    compete, so renormalising them across the row turns one label's confidence
+    into a function of the others and moves every perturbation score.
+
+    A warning rather than an error, because the flag is also meaningful for a
+    model whose ``forward`` already ends in a softmax, which the config cannot
+    tell apart from a mistake. Silence is what would be wrong: nothing about the
+    resulting numbers looks off.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    evaluation = config.get("evaluation_config") or {}
+    call_params = (evaluation.get("default_settings") or {}).get(
+        "metric_call_params"
+    ) or {}
+    if not call_params.get("softmax"):
+        return
+    datasets = (config.get("data_config") or {}).get("datasets") or []
+    per_output = sorted(
+        {
+            str(entry.get("dataset", "?"))
+            for entry in datasets
+            if isinstance(entry, dict) and str(entry.get("encode", "")) == "multihot"
+        }
+    )
+    if per_output:
+        issues.warn(
+            "evaluation_config.default_settings.metric_call_params.softmax",
+            f"true, but {', '.join(per_output)} uses encode: 'multihot', whose "
+            "outputs are independent per-label probabilities rather than a "
+            "distribution over classes. Renormalising them moves every "
+            "perturbation metric's score. Set it to false for a per-output "
+            "formulation",
+        )
 
 
 def _validate_training_lookups(config: dict, issues: ConfigIssues) -> None:
@@ -1436,6 +1484,7 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     _validate_general_seeding(config.get("general", {}), issues)
     _validate_data_splits(config, issues)
     _validate_encoders(config, issues)
+    _validate_perturbation_softmax(config, issues)
     _validate_explanation_samples(config, issues)
     _validate_hyperparams(config, issues)
     _validate_training_lookups(config, issues)

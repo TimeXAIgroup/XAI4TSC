@@ -1,14 +1,19 @@
 """Unit tests for experiment_runner/utils.py - pure helpers, no I/O, no training."""
 
 import numpy as np
+import pandas as pd
 import pytest
 from experiment_runner.config import config_resolve
 from experiment_runner.main import MASTER_CONFIG
 from experiment_runner.utils import (
     _METRICS_COLUMNS,
+    _MODEL_COLUMNS,
     _aggregate_metric,
+    _as_integer_columns,
     _check_sample_indices,
     _format_label_list,
+    _model_frame,
+    _model_row,
     _result_row,
     expand_datasets,
 )
@@ -234,3 +239,155 @@ def test_indices_inherited_from_default_settings_are_checked(tmp_path):
         _check_sample_indices(
             config["explanation_config"], n_test=10, dataset_id="GunPoint"
         )
+
+
+# ── per-target metric rows ────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_the_schema_carries_the_target_and_the_sample_count():
+    assert "target" in _METRICS_COLUMNS
+    assert "samples" in _METRICS_COLUMNS
+    # The dict and the column tuple have to agree, since the CSV is written from
+    # the dict against this tuple.
+    row = _result_row("d", "m", "x", "Complexity", "ok", score=0.5)
+    assert set(row) == set(_METRICS_COLUMNS)
+
+
+@pytest.mark.unit
+def test_a_per_target_row_names_its_target_and_its_denominator():
+    # One row per target rather than their mean is what makes a per-class spread
+    # visible; `samples` is what makes two of those rows comparable, since under
+    # target: "predicted" it moves with the model and the threshold.
+    row = _result_row(
+        "Synth",
+        "FCN",
+        "freqrise",
+        "Time-Frequency AUC",
+        "ok",
+        score=0.91,
+        seed=7,
+        target="7Hz",
+        samples=18,
+    )
+    assert row["target"] == "7Hz"
+    assert row["samples"] == 18
+    assert row["score"] == 0.91
+
+
+@pytest.mark.unit
+def test_a_single_target_row_leaves_the_target_blank():
+    # The explained class varies per sample there, so there is no one target to
+    # name - and an invented one would read as a real scope.
+    row = _result_row("d", "m", "x", "Complexity", "ok", score=0.5, samples=40)
+    assert row["target"] == ""
+    assert row["samples"] == 40
+
+
+# ── models.csv: test-set model performance ────────────────────────────────────
+
+# A different measurement from the XAI metric scores, so a separate file: one
+# row per (dataset, model), and columns that depend on the formulation.
+
+
+@pytest.mark.unit
+def test_a_model_row_starts_with_the_identity_then_the_summary():
+    row = _model_row(
+        "GunPoint",
+        "FCN",
+        "ok",
+        summary={"samples": 20, "accuracy": "75.00", "auc": "0.9100"},
+        epoch=2,
+    )
+    frame = _model_frame([row])
+
+    assert list(frame.columns)[: len(_MODEL_COLUMNS)] == list(_MODEL_COLUMNS)
+    # The summary's own order is kept rather than sorted, so related numbers
+    # stay together instead of interleaving alphabetically.
+    assert list(frame.columns)[len(_MODEL_COLUMNS) :] == ["samples", "accuracy", "auc"]
+    assert frame.loc[0, "epoch"] == 2
+
+
+@pytest.mark.unit
+def test_the_identity_wins_over_a_colliding_summary_key():
+    # Defensive: a summary key named like an identity column must not rename the
+    # row's own dataset or model, which is what makes a row attributable.
+    row = _model_row("GunPoint", "FCN", "ok", summary={"model": "something else"})
+    assert row["model"] == "FCN"
+
+
+@pytest.mark.unit
+def test_the_columns_are_a_union_across_formulations():
+    # A binary and a multi-label model in one experiment report different
+    # metrics, so the file unions them and leaves a cell empty where the
+    # formulation does not define one - rather than dropping either row.
+    binary = _model_row("A", "FCN", "ok", summary={"samples": 20, "accuracy": "75.00"})
+    multi = _model_row(
+        "B", "LeNet", "ok", summary={"samples": 30, "subset_accuracy": "71.67"}
+    )
+    frame = _model_frame([binary, multi])
+
+    assert {"accuracy", "subset_accuracy"} <= set(frame.columns)
+    assert pd.isna(frame.loc[0, "subset_accuracy"])
+    assert pd.isna(frame.loc[1, "accuracy"])
+
+
+@pytest.mark.unit
+def test_a_row_detail_is_collapsed_to_one_line():
+    # A failed model is skipped but still gets a row, and its reason has to
+    # fit one cell - an exception message arrives with newlines in it.
+    row = _model_row("A", "FCN", "failed", detail="broke on\n  the  test split")
+    assert row["status"] == "failed"
+    assert row["detail"] == "broke on the test split", "collapsed to one line"
+
+
+@pytest.mark.unit
+def test_a_header_only_frame_still_has_the_identity_columns():
+    frame = _model_frame([])
+    assert list(frame.columns) == list(_MODEL_COLUMNS)
+
+
+# ── counts stay counts ────────────────────────────────────────────────────────
+# A row that does not define a column leaves a gap, and pandas holds a gap in an
+# int64 column by widening it to float64 - so a sample count reaches the CSV as
+# "9.0" unless the column is a nullable integer.
+
+
+@pytest.mark.unit
+def test_a_gap_does_not_turn_the_model_counts_into_floats():
+    scored = _model_row("A", "FCN", "ok", summary={"samples": 9, "outputs": 3}, epoch=1)
+    failed = _model_row("A", "LeNet", "failed", detail="boom")
+    frame = _model_frame([scored, failed])
+
+    assert str(frame["samples"].dtype) == "Int64"
+    assert str(frame["outputs"].dtype) == "Int64"
+    assert str(frame["epoch"].dtype) == "Int64"
+    csv = frame.to_csv(index=False)
+    assert "9.0" not in csv and "1.0" not in csv
+    # The failed row still leaves those cells empty rather than filling them.
+    assert csv.splitlines()[2].endswith(",,")
+
+
+@pytest.mark.unit
+def test_an_unscored_metric_row_keeps_the_others_counts_integral():
+    rows = [
+        _result_row("d", "m", "x", "Complexity", "ok", score=0.5, samples=40, seed=7),
+        _result_row("d", "m", "x", "Pixel-Flipping", "error", detail="boom"),
+    ]
+    frame = _as_integer_columns(pd.DataFrame(rows, columns=_METRICS_COLUMNS))
+
+    assert str(frame["samples"].dtype) == "Int64"
+    assert str(frame["seed"].dtype) == "Int64"
+    csv = frame.to_csv(index=False)
+    assert ",40,7," in csv
+    # The score is a measurement, not a count, and keeps its float dtype.
+    assert str(frame["score"].dtype) == "float64"
+
+
+@pytest.mark.unit
+def test_a_fractional_value_under_a_count_name_is_left_as_it_is(caplog):
+    # Written once at the end of a run, so one odd column must not cost the file.
+    frame = _as_integer_columns(pd.DataFrame([{"samples": 1.5}]))
+
+    assert frame["samples"].iloc[0] == 1.5
+    assert "not whole numbers" in caplog.text

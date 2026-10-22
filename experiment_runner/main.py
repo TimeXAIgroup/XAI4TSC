@@ -58,8 +58,11 @@ from .seeding import boundary_seed, seed_globals
 from .utils import (
     _METRICS_COLUMNS,
     _aggregate_metric,
+    _as_integer_columns,
     _check_sample_indices,
     _format_label_list,
+    _model_frame,
+    _model_row,
     _result_row,
     expand_datasets,
 )
@@ -196,6 +199,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
     # Start
     logger.info("--- Starting Experiment: %s ---", config["experiment_name"])
     metric_rows = []
+    model_rows = []
 
     cache_path = Path(config["cache_path"]) if config.get("cache_path") else None
     cache_dir = get_dataset_cache_dir(cache_path)
@@ -252,7 +256,9 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             dataset_path = Path(config["results_rel_path"]) / dataset_id
             dataset_path.mkdir(parents=True, exist_ok=True)
 
-            label_encoder = build_encoder(dataset["encode"])
+            label_encoder = build_encoder(
+                dataset["encode"], dataset.get("encode_params")
+            )
 
             if dataset.get("is_presplit"):
                 # Pre-split local data: load directly, skip split() and cache entirely
@@ -375,6 +381,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             for m_ind, model_config in enumerate(t_con["models"]):
                 model_wrapper = None
                 model_log = None
+                model_id = model_ids[m_ind]
                 # Deep-copy so auto-detected values don't persist into the next
                 # dataset iteration via the shared YAML config object.
                 model_config = copy.deepcopy(model_config)
@@ -400,8 +407,21 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             init_params["in_channels"],
                             dataset["dataset"],
                         )
+                    # The target rank says which task is at hand: a 2-D
+                    # target is one column per output, so the outputs do not
+                    # compete and a softmax over them would be wrong everywhere
+                    # predict_probs is read. Derived here rather than configured,
+                    # because the encoder already decided it.
+                    if init_params.get("output_activation") is None:
+                        init_params["output_activation"] = (
+                            "sigmoid" if train_labels.ndim > 1 else "softmax"
+                        )
+                        logger.info(
+                            "Auto-detected output_activation=%s for dataset '%s'",
+                            init_params["output_activation"],
+                            dataset["dataset"],
+                        )
 
-                    model_id = model_ids[m_ind]
                     model_path = dataset_path / model_id
                     model_path.mkdir(parents=True, exist_ok=True)
 
@@ -470,15 +490,25 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                             labels_val=val_labels,
                             save_path=model_path,
                         )
-                        # Evaluate on test data. Only the batch size applies here;
-                        # the rest of the block describes training.
-                        model_wrapper.evaluate_model(
-                            test_data,
-                            test_labels,
-                            batchsize=hyperparams["batchsize"],
-                            save_path=model_path,
-                            class_names=class_names(encoder),
+
+                    # Every model is scored on the test split, whether this run
+                    # trained it or not.
+                    summary = model_wrapper.evaluate_model(
+                        test_data,
+                        test_labels,
+                        batchsize=model_config["hyperparams"]["batchsize"],
+                        save_path=model_path,
+                        class_names=class_names(encoder),
+                    )
+                    model_rows.append(
+                        _model_row(
+                            dataset_id,
+                            model_id,
+                            "ok",
+                            summary=summary,
+                            epoch=model_wrapper.best_epoch,
                         )
+                    )
 
                     if dataset.get("skip_explainers"):
                         logger.info(
@@ -669,26 +699,80 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                     # multi-target stacks are split just like time ones.
                                     multi_target = is_multi_target(explanation)
                                     if multi_target:
-                                        # target="all": one attribution per class.
+                                        # One attribution per class, so one ROW
+                                        # per class: averaging them hid the
+                                        # per-class spread that is the whole
+                                        # point of explaining each one.
+                                        target_names = class_names(encoder)
                                         n_classes = explanation.exp_values.shape[0]
-                                        class_scores = []
                                         for class_idx in range(n_classes):
+                                            target_label = (
+                                                target_names[class_idx]
+                                                if class_idx < len(target_names)
+                                                else str(class_idx)
+                                            )
+                                            # Which samples this class is
+                                            # explained for. All of them under
+                                            # targets="all"; under a per-output
+                                            # encoding with "label"/"predicted",
+                                            # only those carrying the label.
+                                            rows = explanation.rows_for_target(
+                                                class_idx
+                                            )
+                                            n_rows = int(rows.sum())
+                                            if not n_rows:
+                                                metric_rows.append(
+                                                    _result_row(
+                                                        dataset_id,
+                                                        model_id,
+                                                        explainer,
+                                                        metric_id,
+                                                        "skipped-no-targets",
+                                                        seed=metric_seed,
+                                                        target=target_label,
+                                                        samples=0,
+                                                        detail=(
+                                                            "no explained sample "
+                                                            "carries this target"
+                                                        ),
+                                                    )
+                                                )
+                                                continue
+                                            # indices, metadata and labels are
+                                            # aligned to the sample axis and should
+                                            # not drift.
+                                            class_indices = explanation.indices[rows]
                                             class_exp = dataclasses.replace(
                                                 explanation,
                                                 exp_values=explanation.exp_values[
                                                     class_idx
+                                                ][rows],
+                                                indices=class_indices,
+                                                labels=np.asarray(explanation.labels)[
+                                                    rows
                                                 ],
-                                                explained_targets=np.full(
-                                                    len(explanation.indices),
-                                                    class_idx,
-                                                    dtype=int,
+                                                metadata=(
+                                                    None
+                                                    if explanation.metadata is None
+                                                    else [
+                                                        entry
+                                                        for entry, keep in zip(
+                                                            explanation.metadata,
+                                                            rows,
+                                                            strict=True,
+                                                        )
+                                                        if keep
+                                                    ]
                                                 ),
+                                                explained_targets=np.full(
+                                                    n_rows, class_idx, dtype=int
+                                                ),
+                                                target_mask=None,
                                             )
-                                            class_labels = np.full(
-                                                len(explanation.indices), class_idx
-                                            )
-                                            # One row per class, so one seed
-                                            # per class rather than per metric.
+                                            class_labels = np.full(n_rows, class_idx)
+                                            # One seed per class, recorded on
+                                            # that class's own row, which is
+                                            # what makes a result replayable.
                                             class_seed = boundary_seed(
                                                 metric_seed,
                                                 "class",
@@ -700,19 +784,31 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 model=model_wrapper,
                                                 metric_conf=metric_config,
                                                 explanation=class_exp,
-                                                data=exp_data,
+                                                data=test_data[class_indices],
                                                 labels=class_labels,
                                                 device=device,
                                                 seed=class_seed,
                                             )
                                             agg = _aggregate_metric(result)
-                                            if agg is not None:
-                                                class_scores.append(agg)
-                                        score = (
-                                            float(np.mean(class_scores))
-                                            if class_scores
-                                            else None
-                                        )
+                                            metric_rows.append(
+                                                _result_row(
+                                                    dataset_id,
+                                                    model_id,
+                                                    explainer,
+                                                    metric_id,
+                                                    "nan" if agg is None else "ok",
+                                                    seed=class_seed,
+                                                    target=target_label,
+                                                    samples=n_rows,
+                                                    score=agg,
+                                                    detail=(
+                                                        "metric returned an empty "
+                                                        "or all-NaN result"
+                                                        if agg is None
+                                                        else ""
+                                                    ),
+                                                )
+                                            )
                                     else:
                                         seed_globals(metric_seed)
                                         evaluation = _evaluate(
@@ -725,32 +821,22 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             seed=metric_seed,
                                         )
                                         score = _aggregate_metric(evaluation)
-
-                                    if score is None:
                                         metric_rows.append(
                                             _result_row(
                                                 dataset_id,
                                                 model_id,
                                                 explainer,
                                                 metric_id,
-                                                "nan",
+                                                "nan" if score is None else "ok",
                                                 seed=metric_seed,
+                                                samples=len(explanation.indices),
+                                                score=score,
                                                 detail=(
                                                     "metric returned an empty or "
                                                     "all-NaN result"
+                                                    if score is None
+                                                    else ""
                                                 ),
-                                            )
-                                        )
-                                    else:
-                                        metric_rows.append(
-                                            _result_row(
-                                                dataset_id,
-                                                model_id,
-                                                explainer,
-                                                metric_id,
-                                                "ok",
-                                                seed=metric_seed,
-                                                score=score,
                                             )
                                         )
 
@@ -802,13 +888,29 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                         finally:
                             del explanation
                             gc.collect()
-                except Exception:
+                except Exception as exc:
                     failed_models.append(f"{dataset_id}/{model_id}")
                     logger.exception(
                         "Model '%s' failed on dataset '%s', skipping to the next "
                         "model.",
                         model_config["model"],
                         dataset["dataset"],
+                    )
+                    # Append a row for the failure too. Reached for anything in
+                    # the iteration, including a checkpoint whose weights do not fit
+                    # the data, which is only noticed now that every model is evaluated.
+                    model_rows.append(
+                        _model_row(
+                            dataset_id,
+                            model_id,
+                            "failed",
+                            epoch=(
+                                model_wrapper.best_epoch
+                                if model_wrapper is not None
+                                else None
+                            ),
+                            detail=f"{type(exc).__name__}: {exc}",
+                        )
                     )
                 finally:
                     remove_file_log(model_log)
@@ -827,7 +929,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             del ds, splits, encoder, train_data, train_labels, test_data, test_labels
             gc.collect()
 
-    df = pd.DataFrame(metric_rows, columns=_METRICS_COLUMNS)
+    df = _as_integer_columns(pd.DataFrame(metric_rows, columns=_METRICS_COLUMNS))
 
     # Global — all results
     global_path = Path(config["results_rel_path"]) / "metrics.csv"
@@ -863,6 +965,29 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             )
             group.to_csv(path, index=False)
             logger.info("Model metrics saved to %s", path)
+
+    # Model performance, kept apart from the metric scores: a different
+    # measurement, one row per (dataset, model), and its own columns - which
+    # vary by formulation, so they are a union over the rows produced.
+    models_df = _model_frame(model_rows)
+    models_path = Path(config["results_rel_path"]) / "models.csv"
+    models_df.to_csv(models_path, index=False)
+    if model_rows:
+        logger.info("Model performance saved to %s", models_path)
+    else:
+        logger.warning("No models were built; wrote a header-only %s.", models_path)
+
+    if model_rows:
+        for dataset_name, group in models_df.groupby("dataset"):
+            path = (
+                Path(config["results_rel_path"])
+                / dataset_name
+                / f"{dataset_name}_models.csv"
+            )
+            # Every column is a column of this dataset's own rows, so a metric
+            # only another formulation defines would be an all-empty column here.
+            group.dropna(axis=1, how="all").to_csv(path, index=False)
+            logger.info("Dataset model performance saved to %s", path)
 
     # Print dataset summary
     logger.info(

@@ -974,13 +974,14 @@ def test_all_problems_are_reported_in_one_run(caplog):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "config_file", sorted((_RUNNER / "configs").glob("*.yaml")), ids=lambda p: p.name
+    "config_file",
+    # master.yaml is a reference rather than a runnable config, and is refused
+    # on purpose - test_master_config_is_refused covers that.
+    sorted(p for p in (_RUNNER / "configs").glob("*.yaml") if p.name != "master.yaml"),
+    ids=lambda p: p.name,
 )
 def test_shipped_configs_raise_no_entry_warnings(config_file, caplog):
     """The false-positive guard: a shipped config must validate silently."""
-    if config_file.name == "master.yaml":
-        pytest.skip("master.yaml is a reference, not a runnable config")
-
     cfg = config_resolve(yaml.safe_load(config_file.read_text()), MASTER_CONFIG)
     with caplog.at_level("WARNING", logger=_CFG_LOGGER):
         assert config_sanity_check(cfg) is True
@@ -1568,3 +1569,43 @@ def test_a_catch_all_constructor_receives_only_configured_parameters():
         EXPLAINERS.pop("kwargsinit", None)
 
     assert instance.seen == {"my_option": 7}
+
+
+# ── softmax over independent per-output heads ─────────────────────────────────
+
+
+@pytest.mark.unit
+def test_softmax_over_a_per_output_formulation_warns(caplog):
+    # metric_call_params.softmax renormalises the model output across the row
+    # before a perturbation metric reads the explained class's score. Over
+    # independent per-label heads that turns one label's confidence into a
+    # function of the others and moves every perturbation score, with nothing
+    # about the numbers looking wrong.
+    cfg = _valid_config()
+    cfg["data_config"]["datasets"] = [
+        {"dataset": "Synth_Multilabel_Freq", "encode": "multihot"}
+    ]
+    cfg.setdefault("evaluation_config", {}).setdefault("default_settings", {})[
+        "metric_call_params"
+    ] = {"softmax": True}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+
+    with caplog.at_level("WARNING", logger="xai4tsc"):
+        assert config_sanity_check(cfg) is True
+
+    assert "Synth_Multilabel_Freq" in caplog.text
+    assert "independent per-label" in caplog.text
+
+
+@pytest.mark.unit
+def test_softmax_is_not_questioned_for_a_single_label_formulation(caplog):
+    cfg = _valid_config()
+    cfg.setdefault("evaluation_config", {}).setdefault("default_settings", {})[
+        "metric_call_params"
+    ] = {"softmax": True}
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+
+    with caplog.at_level("WARNING", logger="xai4tsc"):
+        config_sanity_check(cfg)
+
+    assert "independent per-label" not in caplog.text

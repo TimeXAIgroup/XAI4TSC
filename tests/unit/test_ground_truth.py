@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from xai4tsc.data import MultiHotLabelEncoder
+from xai4tsc.data import PowersetLabelEncoder
 from xai4tsc.evaluation._ground_truth import (
     GroundTruthRegion,
     coefficient_mask,
@@ -29,7 +29,7 @@ def published_test_split():
 
     ds = SynthMultilabelFreqDataset()
     splits, encoder = ds.split(
-        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+        train_split=0.7, val_split=0.15, encoder=PowersetLabelEncoder()
     )
     return ds, splits[1], encoder
 

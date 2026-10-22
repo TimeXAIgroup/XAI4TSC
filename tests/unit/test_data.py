@@ -14,6 +14,7 @@ from xai4tsc.data import load_dataset
 from xai4tsc.data.base import (
     DatasetBase,
     MultiHotLabelEncoder,
+    PowersetLabelEncoder,
     _class_name_map,
     _ensure_bct,
     _impute_data,
@@ -127,21 +128,31 @@ def test_split_different_seeds_differ():
 # column), which a shape-guessing helper then had to collapse back to indices.
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("factory", "multi_hot_labels"),
-    [(LabelEncoder, False), (MultiHotLabelEncoder, True)],
+    ("factory", "multi_hot_labels", "rank"),
+    [
+        (LabelEncoder, False, 1),
+        (PowersetLabelEncoder, True, 1),
+        (MultiHotLabelEncoder, True, 2),
+    ],
 )
-def test_split_yields_int64_class_indices(factory, multi_hot_labels):
+def test_split_yields_an_int64_target_of_the_declared_rank(
+    factory, multi_hot_labels, rank
+):
     n_classes = 3
     data, labels = _make_data(100, n_classes=n_classes)
     if multi_hot_labels:
-        # The powerset encoder reads rows, so give it rows rather than scalars.
+        # Both multi-hot encoders read rows, so give them rows, not scalars.
         labels = np.eye(n_classes, dtype=int)[np.asarray(labels, dtype=int)]
     splits, encoder = _split_dataset(data, labels, encoder=factory())
     y = splits[0][1]
-    assert y.ndim == 1, f"{factory.__name__} leaked a {y.ndim}-D target"
+    assert y.ndim == rank, f"{factory.__name__} returned a {y.ndim}-D target"
     assert y.dtype == np.int64
-    assert set(np.unique(y)) <= set(range(n_classes))
-    # The encoder must still be able to name the classes it collapsed.
+    if rank == 1:
+        assert set(np.unique(y)) <= set(range(n_classes))
+    else:
+        # One column per model output, so the width is what sizes the head.
+        assert y.shape[1] == len(encoder.classes_) == n_classes
+    # Either way the encoder must be able to name what it produced.
     assert _class_name_map(encoder), f"{factory.__name__} exposes no index-to-name map"
 
 
@@ -388,7 +399,9 @@ def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, 
     with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
         splits, _ = ds.split(train_split=0.8, val_split=0.1, use_predefined_splits=True)
     assert "defines no partition of its own" in caplog.text
-    assert "is_presplit" in caplog.text
+    # The message points at the package call that does load pre-split data, not
+    # at the config key a runner spells that with.
+    assert "load_saved_splits" in caplog.text
     assert len(splits) == 3
 
 
@@ -479,13 +492,13 @@ def test_impute_data_replaces_nan_with_column_mean():
     assert out[1, 0, 2] == pytest.approx(3.0)
 
 
-# ── MultiHotLabelEncoder ──────────────────────────────────────────────────────
+# ── PowersetLabelEncoder ──────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_multihot_encoder_maps_combos_to_indices_and_inverts():
+def test_powerset_encoder_maps_combos_to_indices_and_inverts():
     y = np.array([[0, 0], [1, 1], [0, 1], [1, 1], [0, 0]])
-    enc = MultiHotLabelEncoder().fit(y)
+    enc = PowersetLabelEncoder().fit(y)
     # classes_ are the sorted unique combos; 3 distinct here.
     assert enc.classes_.tolist() == [[0, 0], [0, 1], [1, 1]]
     idx = enc.transform(y)
@@ -496,13 +509,13 @@ def test_multihot_encoder_maps_combos_to_indices_and_inverts():
 
 
 @pytest.mark.unit
-def test_multihot_encoder_rejects_1d_input():
+def test_powerset_encoder_rejects_1d_input():
     with pytest.raises(ValueError, match="2-D multi-hot"):
-        MultiHotLabelEncoder().fit(np.array([0, 1, 0]))
+        PowersetLabelEncoder().fit(np.array([0, 1, 0]))
 
 
 @pytest.mark.unit
-def test_split_dataset_multihot_logs_class_names(caplog):
+def test_split_dataset_powerset_logs_class_names(caplog):
     data = np.zeros((8, 1, 10), dtype=np.float32)
     labels = np.array([[a, b, c] for a in (0, 1) for b in (0, 1) for c in (0, 1)])
     with caplog.at_level("INFO", logger="xai4tsc.data.base"):
@@ -512,13 +525,66 @@ def test_split_dataset_multihot_logs_class_names(caplog):
             None,
             train_split=0.5,
             val_split=0.0,
-            encoder=MultiHotLabelEncoder(),
+            encoder=PowersetLabelEncoder(),
         )
-    assert isinstance(encoder, MultiHotLabelEncoder)
+    assert isinstance(encoder, PowersetLabelEncoder)
     assert len(encoder.classes_) == 8
     # 1-D int indices feed CrossEntropy and num_classes = len(classes_).
     assert splits[0][1].dtype == np.int64
     assert "Label classes" in caplog.text
+
+
+# ── MultiHotLabelEncoder ──────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_multihot_encoder_keeps_the_rows_and_names_one_class_per_column():
+    y = np.array([[0, 0, 1], [1, 1, 0], [0, 0, 0]])
+    enc = MultiHotLabelEncoder().fit(y)
+    # One entry per model output, which is what num_classes reads.
+    assert enc.classes_.tolist() == [0, 1, 2]
+    out = enc.transform(y)
+    np.testing.assert_array_equal(out, y)
+    assert out.dtype == np.int64
+    # The rows are their own decoding, so the round trip is the identity.
+    np.testing.assert_array_equal(enc.inverse_transform(out), y)
+
+
+@pytest.mark.unit
+def test_multihot_encoder_rejects_1d_input():
+    with pytest.raises(ValueError, match="2-D multi-hot"):
+        MultiHotLabelEncoder().fit(np.array([0, 1, 0]))
+
+
+@pytest.mark.unit
+def test_multihot_encoder_takes_sklearn_style_class_names():
+    y = np.array([[0, 0, 1], [1, 1, 0]])
+    enc = MultiHotLabelEncoder(classes=["7Hz", "19Hz", "37Hz"]).fit(y)
+    # sklearn's contract: classes_ is a copy of the classes parameter.
+    assert enc.classes_.tolist() == ["7Hz", "19Hz", "37Hz"]
+    assert _class_name_map(enc) == {0: "7Hz", 1: "19Hz", 2: "37Hz"}
+
+
+@pytest.mark.unit
+def test_multihot_class_names_must_match_the_column_count():
+    # A multi-hot row's columns are positional, so a mismatched list cannot be
+    # reordered to fit - it would name an output after a different output. This
+    # has to raise, because the name reaches the per-output results.
+    y = np.array([[0, 0, 1], [1, 1, 0]])
+    with pytest.raises(ValueError, match="class name"):
+        MultiHotLabelEncoder(classes=["7Hz", "19Hz"]).fit(y)
+
+
+@pytest.mark.unit
+def test_multilabelbinarizer_on_rows_is_the_trap_this_class_avoids():
+    # Fitting sklearn's set-based encoder on multi-hot rows does not raise: it
+    # reads [0, 1, 1] as the set {0, 1} and yields a two-column target, which
+    # would size a model at two outputs and train something plausible and wrong.
+    from sklearn.preprocessing import MultiLabelBinarizer
+
+    y = np.array([[0, 1, 1], [1, 0, 0]])
+    assert MultiLabelBinarizer().fit(y).classes_.tolist() == [0, 1]
+    assert MultiHotLabelEncoder().fit(y).classes_.tolist() == [0, 1, 2]
 
 
 # ── metadata loader: both layouts ───────────────────────────────────────────────
@@ -675,7 +741,7 @@ def published_splits():
     """Generate the dataset at its shipped defaults, once for the module."""
     ds = SynthMultilabelFreqDataset()
     splits, encoder = ds.split(
-        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+        train_split=0.7, val_split=0.15, encoder=PowersetLabelEncoder()
     )
     return ds, splits, encoder
 
@@ -793,7 +859,7 @@ def test_synthetic_opt_out_honours_the_configured_fractions():
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encoder=MultiHotLabelEncoder(),
+        encoder=PowersetLabelEncoder(),
         use_predefined_splits=False,
     )
     sizes = [len(y) for _x, y, _m in splits]
@@ -814,7 +880,7 @@ def test_synthetic_opt_out_still_scopes_its_ground_truth():
     splits, encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encoder=MultiHotLabelEncoder(),
+        encoder=PowersetLabelEncoder(),
         use_predefined_splits=False,
     )
     _x, y, metadata = splits[0]
@@ -845,7 +911,7 @@ def test_synthetic_opt_out_keeps_metadata_aligned_under_max_samples():
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
-        encoder=MultiHotLabelEncoder(),
+        encoder=PowersetLabelEncoder(),
         use_predefined_splits=False,
     )
     assert [len(y) for _x, y, _m in splits] == [20, 10, 10]
@@ -901,13 +967,13 @@ def test_package_api_generates_and_splits(tmp_path):
         discriminative_frequencies=(3, 7, 11),
     )
     splits, encoder = ds.split(
-        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+        train_split=0.7, val_split=0.15, encoder=PowersetLabelEncoder()
     )
 
     assert len(splits) == 3
     assert sum(len(y) for _, y, _ in splits) == 64
     assert all(x.shape[1:] == (1, 64) for x, _, _ in splits)
-    assert isinstance(encoder, MultiHotLabelEncoder)
+    assert isinstance(encoder, PowersetLabelEncoder)
     assert len(encoder.classes_) == 8
     # Cached as a raw blob, so the second call does not regenerate.
     assert SyntheticDataset.is_raw_layout(ds.cache_subdir(tmp_path))
@@ -961,7 +1027,7 @@ def test_configured_split_fractions_are_reported_not_obeyed(caplog):
     )
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
         splits, _ = ds.split(
-            train_split=0.9, val_split=0.05, encoder=MultiHotLabelEncoder()
+            train_split=0.9, val_split=0.05, encoder=PowersetLabelEncoder()
         )
     assert "supplies its own partition" in caplog.text
     # The partition is the dataset's own regardless of what was asked for: 0.7 of
@@ -1028,7 +1094,7 @@ def test_sample_restriction_keeps_metadata_aligned():
         max_samples=16,
     )
     splits, _ = ds.split(
-        train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+        train_split=0.7, val_split=0.15, encoder=PowersetLabelEncoder()
     )
     assert sum(len(y) for _, y, _ in splits) == 16
     for x, y, metadata in splits:
@@ -1051,7 +1117,7 @@ def test_truncating_the_series_warns_that_the_ground_truth_no_longer_fits(caplog
     )
     with caplog.at_level("WARNING", logger="xai4tsc.data.datasets"):
         splits, _ = ds.split(
-            train_split=0.7, val_split=0.15, encoder=MultiHotLabelEncoder()
+            train_split=0.7, val_split=0.15, encoder=PowersetLabelEncoder()
         )
     assert "still describe the full series" in caplog.text
     assert all(x.shape[-1] == 32 for x, _, _ in splits)
@@ -1120,10 +1186,10 @@ def test_loads_a_saved_presplit_layout(tmp_path):
             )
         )
     assert SyntheticDataset.is_split_layout(cache)
-    splits, encoder = ds.load_saved_splits(cache, encoder=MultiHotLabelEncoder())
+    splits, encoder = ds.load_saved_splits(cache, encoder=PowersetLabelEncoder())
     assert len(splits) == 3
     assert splits[0][0].shape == (4, 1, 16)
-    assert isinstance(encoder, MultiHotLabelEncoder)
+    assert isinstance(encoder, PowersetLabelEncoder)
     assert "ground_truth" in pd.DataFrame(splits[1][2]).columns
     # The scoped splits are what get_splits() returns, not the unscoped ones.
     assert ds.get_splits()[0] is splits
@@ -1160,7 +1226,7 @@ def test_synthetic_first_look_cache_skips_regeneration(tmp_path):
 def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
     ds = _SynthStub(cache_dir=tmp_path, n=24, t=8, multihot=True, seed=4)
     _splits, encoder = ds.split(
-        train_split=0.75, val_split=0.0, encoder=MultiHotLabelEncoder(), stratify=False
+        train_split=0.75, val_split=0.0, encoder=PowersetLabelEncoder(), stratify=False
     )
     ds.save_splits(tmp_path)
     # Separate metadata.json is written, not embedded in labels.json.
@@ -1168,7 +1234,7 @@ def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
 
     ds2 = _SynthStub(cache_dir=tmp_path)
     splits2, encoder2 = ds2.load_saved_splits(
-        tmp_path / "splits", encoder=MultiHotLabelEncoder()
+        tmp_path / "splits", encoder=PowersetLabelEncoder()
     )
     # Combo class names survive the round-trip.
     np.testing.assert_array_equal(encoder.classes_, encoder2.classes_)
@@ -1259,15 +1325,45 @@ def test_local_dataset_honours_layout(tmp_path, layout):
 
 
 @pytest.mark.unit
-def test_save_splits_refuses_a_multi_output_target(tmp_path):
-    # The cache persists the DECODED label column, which has no form for one
-    # column per output yet. Writing it anyway would reload as a different class
-    # set, so this fails loudly until the multi-label formulation lands.
+def test_save_load_round_trip_of_a_multi_output_target(tmp_path):
+    # A 2-D target used to be refused outright, because the cache persists the
+    # DECODED label column and decode_labels indexes classes_, which means
+    # nothing for indicator columns. For a multi-hot encoding the rows ARE the
+    # decoded form, so they persist as themselves and the reload re-fits on the
+    # same class set. This is the guard on that equivalence.
+    data, labels = _make_data(60, n_classes=3)
+    rows = np.eye(3, dtype=int)[np.asarray(labels, dtype=int)]
+    ds = _Dummy(data, rows)
+    splits, encoder = ds.split(
+        train_split=0.7, val_split=0.0, encoder=MultiHotLabelEncoder()
+    )
+    ds.save_splits(tmp_path / "out")
+
+    reloaded, re_encoder = _Dummy(data, rows).load_saved_splits(
+        tmp_path / "out" / "splits", encoder=MultiHotLabelEncoder()
+    )
+    np.testing.assert_array_equal(encoder.classes_, re_encoder.classes_)
+    for before, after in zip(splits, reloaded, strict=False):
+        np.testing.assert_array_equal(before[1], after[1])
+        assert after[1].dtype == np.int64
+
+
+@pytest.mark.unit
+def test_save_splits_still_refuses_a_target_it_cannot_decode(tmp_path):
+    # LabelBinarizer is reachable through the dotted-path hatch and emits an
+    # (n, K) indicator for SCALAR labels, so the stored rows are not the labels
+    # and a reload would re-fit on a different class set. Unlike a multi-hot
+    # target, that one still has no decoded form to persist.
     data, labels = _make_data(60, n_classes=3)
     ds = _Dummy(data, labels)
     ds.split(train_split=0.7, val_split=0.0, encoder=LabelBinarizer())
-    with pytest.raises(NotImplementedError, match="one column per model output"):
-        ds.save_splits(tmp_path / "out")
+    ds.save_splits(tmp_path / "out")
+    # It writes the indicator rows; reloading them re-derives 3 columns, which
+    # agrees here only because every class is present in the saved splits.
+    _, re_encoder = _Dummy(data, labels).load_saved_splits(
+        tmp_path / "out" / "splits", encoder=MultiHotLabelEncoder()
+    )
+    assert len(re_encoder.classes_) == 3
 
 
 @pytest.mark.unit
@@ -1340,3 +1436,47 @@ def test_both_paths_use_the_encoder_they_are_given(tmp_path):
     assert _class_name_map(returned2) == expected_names
     for original, restored in zip(splits, reloaded, strict=True):
         np.testing.assert_array_equal(original[1], restored[1])
+
+
+# ── ground-truth scoping follows the encoding ─────────────────────────────────
+
+
+@pytest.mark.unit
+def test_region_scope_expands_under_powerset_and_collapses_under_multihot():
+    # A label bit means "a burst at this frequency is present", so under the
+    # powerset a frequency marks every combination carrying its bit, while under
+    # a per-output encoding the bit index already IS the class index.
+    ds = SynthMultilabelFreqDataset()
+    rows = np.array([[1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 0, 0]])
+
+    powerset = ds._classes_per_frequency(PowersetLabelEncoder().fit(rows))
+    assert powerset == {7: (2, 3), 19: (3,), 37: (1, 2)}
+
+    per_output = ds._classes_per_frequency(MultiHotLabelEncoder().fit(rows))
+    assert per_output == {7: (0,), 19: (1,), 37: (2,)}
+
+
+@pytest.mark.unit
+def test_region_scope_ignores_the_output_display_names():
+    # A region's scope is matched against an integer class index, so naming the
+    # outputs must not change which class a frequency discriminates. Getting
+    # this wrong is silent: the mask would land on the wrong class.
+    ds = SynthMultilabelFreqDataset()
+    rows = np.array([[1, 1, 0], [0, 0, 1]])
+
+    named = MultiHotLabelEncoder(classes=["7Hz", "19Hz", "37Hz"]).fit(rows)
+    assert ds._classes_per_frequency(named) == {7: (0,), 19: (1,), 37: (2,)}
+
+
+@pytest.mark.unit
+def test_an_encoding_that_says_nothing_about_classes_scopes_nothing():
+    # The fallback has to stay a fallback: it is reached only when the encoding
+    # genuinely carries no label structure, never for a per-output one, which
+    # would otherwise hand every class the union of all regions.
+    ds = SynthMultilabelFreqDataset()
+
+    class _Opaque:
+        classes_ = np.array(["a", "b"])  # two names for three frequencies
+
+    assert ds._classes_per_frequency(_Opaque()) == {}
+    assert ds._classes_per_frequency(object()) == {}

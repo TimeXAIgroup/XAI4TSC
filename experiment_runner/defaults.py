@@ -54,6 +54,7 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     ("train_config", "hyperparams.patience"): (ModelBase.train_model, "patience"),
     ("train_config", "hyperparams.save_best"): (ModelBase.train_model, "save_best"),
     ("explanation_config", "target"): (generate_explanation, "targets"),
+    ("explanation_config", "threshold"): (generate_explanation, "threshold"),
     ("explanation_config", "visualization_type"): (
         generate_explanation,
         "visualization_type",
@@ -74,8 +75,11 @@ _RUNNER_OWNED: frozenset[tuple[str, str]] = frozenset(
         ("data_config", "is_presplit"),
         # The encoder is an object in the package signature, so there is no
         # parameter default to read: the string is the runner's own, and it also
-        # names the split-cache folder.
+        # names the split-cache folder. `encode_params` is free-form - a
+        # third-party encoder has arguments master cannot enumerate - and is
+        # consumed by the runner rather than passed to the package.
         ("data_config", "encode"),
+        ("data_config", "encode_params"),
         ("explanation_config", "save_exp_values"),
         ("train_config", "train"),
         # The loss and the optimizer are objects in the package signature, whose

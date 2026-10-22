@@ -92,17 +92,57 @@ def _impute_data(data: np.ndarray) -> np.ndarray:
     return imputed.reshape(b, c, t).astype(np.float32)
 
 
-class MultiHotLabelEncoder:
+def _multi_hot_rows(y: np.ndarray, encoder_name: str) -> np.ndarray:
+    """
+    Return *y* as a 2-D multi-hot array, raising if it is not one.
+
+    Shared by the two encoders that consume multi-hot rows, so both report the
+    same shape complaint.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Labels as given.
+    encoder_name : str
+        Name used in the error message.
+
+    Returns
+    -------
+    np.ndarray
+        *y* as an array, guaranteed 2-D.
+
+    Raises
+    ------
+    ValueError
+        If *y* is not 2-D.
+    """
+    arr = np.asarray(y)
+    if arr.ndim != 2:
+        raise ValueError(
+            f"{encoder_name} expects 2-D multi-hot labels (n, n_attrs); "
+            f"got shape {arr.shape}."
+        )
+    return arr
+
+
+class PowersetLabelEncoder:
     """
     Collapse multi-hot label rows to single class indices, preserving the combos.
 
     Multi-label datasets emit a multi-hot label row per sample (e.g.
-    ``[0, 1, 1]`` = attributes 1 and 2 present). Training uses
-    :class:`~torch.nn.CrossEntropyLoss` on 1-D integer class indices, so each
-    distinct combination is mapped to one class index. The combination itself is
-    kept as the **class name** (``classes_``) so predictions can be decoded back
-    to multi-hot later; :func:`_split_dataset` / :meth:`DatasetBase.load_saved_splits`
-    log the index→name mapping.
+    ``[0, 1, 1]`` = attributes 1 and 2 present). Training with
+    :class:`~torch.nn.CrossEntropyLoss` needs 1-D integer class indices, so each
+    distinct combination is mapped to one class index - the label-powerset
+    reduction. The combination itself is kept as the **class name**
+    (``classes_``) so predictions can be decoded back to multi-hot later;
+    :func:`_split_dataset` / :meth:`DatasetBase.load_saved_splits` log the
+    index→name mapping.
+
+    The cost is that the number of outputs grows as ``2**L`` while the
+    supervision per output shrinks, and that an attribution explains a
+    *combination* - whose meaning includes the absence of the labels it omits -
+    rather than one label. :class:`MultiHotLabelEncoder` is the alternative that
+    keeps one output per label.
 
     Implements the small subset of the sklearn encoder interface the framework
     uses (``fit`` / ``transform`` / ``fit_transform`` / ``inverse_transform`` and
@@ -110,14 +150,9 @@ class MultiHotLabelEncoder:
     :class:`~sklearn.preprocessing.LabelEncoder`.
     """
 
-    def fit(self, y: np.ndarray) -> "MultiHotLabelEncoder":
+    def fit(self, y: np.ndarray) -> "PowersetLabelEncoder":
         """Record the sorted unique multi-hot rows as ``classes_``."""
-        arr = np.asarray(y)
-        if arr.ndim != 2:
-            raise ValueError(
-                f"MultiHotLabelEncoder expects 2-D multi-hot labels (n, n_attrs); "
-                f"got shape {arr.shape}."
-            )
+        arr = _multi_hot_rows(y, type(self).__name__)
         self.classes_ = np.unique(arr, axis=0)
         self._index = {
             tuple(int(v) for v in row): i for i, row in enumerate(self.classes_)
@@ -138,6 +173,79 @@ class MultiHotLabelEncoder:
     def inverse_transform(self, indices: np.ndarray) -> np.ndarray:
         """Map class indices back to their multi-hot rows."""
         return self.classes_[np.asarray(indices, dtype=np.int64)]
+
+
+class MultiHotLabelEncoder:
+    """
+    Keep multi-hot label rows as one target column per model output.
+
+    A multi-label dataset emits a multi-hot row per sample (e.g. ``[0, 1, 1]`` =
+    labels 1 and 2 present), which already *is* the indicator matrix a per-output
+    head is trained against with :class:`~torch.nn.BCEWithLogitsLoss`. So there
+    is nothing to compute here: the targets are the stored labels. The class
+    exists to supply the encoder contract the rest of the framework reads off
+    it - ``fit`` / ``transform``, and the ``classes_`` that names each output.
+
+    scikit-learn has no target encoder for this input.
+    :class:`~sklearn.preprocessing.LabelBinarizer` takes 1-D labels, and
+    :class:`~sklearn.preprocessing.MultiLabelBinarizer` takes label *sets*:
+    fitting it on multi-hot rows does not raise, it reads ``[0, 1, 1]`` as the
+    set ``{0, 1}`` and yields ``classes_ = [0 1]``, a two-column target that
+    would size a model at two outputs. Pass ``MultiLabelBinarizer`` itself when
+    the labels really are sets.
+
+    Parameters
+    ----------
+    classes : array-like, optional
+        The label identities in column order, with scikit-learn's meaning:
+        ``classes_`` becomes a copy of this. The columns of a multi-hot row are
+        positional, so unlike
+        :class:`~sklearn.preprocessing.MultiLabelBinarizer` this cannot
+        *determine* how many there are - it has to agree with the row width, and
+        a mismatch raises rather than attaching the wrong name to an output.
+        Omitted, ``classes_`` is ``arange(n_outputs)``.
+
+    See Also
+    --------
+    PowersetLabelEncoder : collapses the same rows to one index per combination.
+    """
+
+    def __init__(self, classes: object | None = None) -> None:
+        self.classes = None if classes is None else list(classes)
+
+    def fit(self, y: np.ndarray) -> "MultiHotLabelEncoder":
+        """Record the label identity of each column as ``classes_``."""
+        width = _multi_hot_rows(y, type(self).__name__).shape[1]
+        if self.classes is None:
+            self.classes_ = np.arange(width)
+        elif len(self.classes) != width:
+            raise ValueError(
+                f"{type(self).__name__} was given {len(self.classes)} class name(s) "
+                f"{self.classes} for a {width}-column multi-hot target. The columns "
+                "are positional, so a mismatched list cannot be reordered to fit - "
+                "it would label an output with another output's name."
+            )
+        else:
+            self.classes_ = np.asarray(self.classes)
+        return self
+
+    def transform(self, y: np.ndarray) -> np.ndarray:
+        """Return the multi-hot rows as an int64 target, one column per output."""
+        arr = _multi_hot_rows(y, type(self).__name__)
+        if arr.shape[1] != len(self.classes_):
+            raise ValueError(
+                f"{type(self).__name__} was fitted on {len(self.classes_)} outputs "
+                f"but given a {arr.shape[1]}-column target."
+            )
+        return arr.astype(np.int64, copy=False)
+
+    def fit_transform(self, y: np.ndarray) -> np.ndarray:
+        """Fit then transform in one call."""
+        return self.fit(y).transform(y)
+
+    def inverse_transform(self, rows: np.ndarray) -> np.ndarray:
+        """Return the multi-hot rows unchanged; they are their own decoding."""
+        return np.asarray(rows, dtype=np.int64)
 
 
 def _resolve_encoder(encoder: object | None) -> object:
@@ -192,8 +300,9 @@ def _reject_feature_encoder(encoder: object) -> None:
             f"{type(encoder).__name__} is a scikit-learn feature encoder (it encodes "
             "columns of X and exposes 'categories_'), but labels are a target. Pass a "
             "target encoder instead: LabelEncoder for class indices, LabelBinarizer "
-            "or MultiLabelBinarizer for one column per output, or "
-            "MultiHotLabelEncoder for the label-powerset reduction."
+            "or MultiLabelBinarizer for one column per output, MultiHotLabelEncoder "
+            "to keep multi-hot rows as they are, or PowersetLabelEncoder for the "
+            "label-powerset reduction."
         )
 
 
@@ -311,7 +420,7 @@ def _fit_label_encoder(labels: np.ndarray, encoder: object | None = None) -> tup
     labels : np.ndarray
         Raw labels in the form the encoder consumes: scalars for
         :class:`~sklearn.preprocessing.LabelEncoder`, multi-hot rows for
-        :class:`MultiHotLabelEncoder`.
+        :class:`MultiHotLabelEncoder` and :class:`PowersetLabelEncoder`.
     encoder : object or None
         An sklearn-style target encoder. ``None`` uses
         :class:`~sklearn.preprocessing.LabelEncoder`.
@@ -747,8 +856,8 @@ class DatasetBase(ABC):
             logger.warning(
                 "'%s' defines no partition of its own, so "
                 "use_predefined_splits=True is ignored and the data is split by "
-                "the configured fractions. Pre-split data on disk is loaded with "
-                "load_saved_splits() (is_presplit: true in YAML) instead.",
+                "the requested fractions. Pre-split data on disk is loaded with "
+                "load_saved_splits() instead.",
                 getattr(self, "name", type(self).__name__),
             )
         rng = resolve_rng(random_state, rng)
@@ -771,7 +880,8 @@ class DatasetBase(ABC):
                 raise ValueError(
                     f"Dataset contains {n_nan} NaN value(s). "
                     "Remove missing values before training, or set "
-                    "impute_missing=True (allow_imputation: true in YAML)."
+                    "impute_missing=True to replace them with the per-channel "
+                    "mean."
                 )
             logger.info("Imputing %d NaN value(s) with per-channel mean.", n_nan)
             data = _impute_data(data)
@@ -837,17 +947,14 @@ class DatasetBase(ABC):
             labels_arr = split[1]
             metadata = split[2] if len(split) > 2 else None
             if np.ndim(labels_arr) > 1:
-                # A 2-D target is one column per model output, and what gets
-                # persisted here is the *decoded* label column, which has no form
-                # for that yet: reloading would re-fit the encoder on decoded rows
-                # and quietly derive a different class set. Fail instead.
-                raise NotImplementedError(
-                    f"{type(self._encoder).__name__} produced a "
-                    f"{np.shape(labels_arr)} target (one column per model output), "
-                    "which the split cache cannot persist yet. Run with "
-                    "reproducible: false, or save the splits yourself."
-                )
-            decoded = decode_labels(self._encoder, labels_arr)
+                # A 2-D target is one column per model output, which for a
+                # multi-hot encoding already *is* the stored label row.
+                # decode_labels cannot help: it indexes classes_, and these are
+                # indicator columns rather than indices. Persisting the rows is
+                # also what a reload re-fits on, so the class set round-trips.
+                decoded = np.asarray(labels_arr)
+            else:
+                decoded = decode_labels(self._encoder, labels_arr)
             if np.ndim(decoded) > 1:  # multi-hot rows
                 label_col = [row.tolist() for row in decoded]
             else:

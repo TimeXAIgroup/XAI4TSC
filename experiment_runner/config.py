@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 
 import yaml
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from xai4tsc.utils.utils import merge_dicts
 
@@ -1121,6 +1123,59 @@ def _configured_data_domains(config: dict) -> set:
     return domains or {Domain.TIME}
 
 
+def _validate_framework_version(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check that the installed xai4tsc fits the config's ``xai4tsc_version``.
+
+    The value is a PEP 440 specifier; a bare version means exactly that version.
+    Pre-releases are compared by their order, so ``>=2.0.0`` admits the
+    ``2.0.0.dev`` development build.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    import xai4tsc
+
+    spec = config.get("xai4tsc_version")
+    if spec is None:
+        issues.warn(
+            "xai4tsc_version",
+            "not set, so the config is not checked against the installed "
+            f"xai4tsc {xai4tsc.__version__}.",
+        )
+        return
+    spec = str(spec)
+    try:
+        specifier = SpecifierSet(f"=={Version(spec)}")
+    except InvalidVersion:
+        try:
+            specifier = SpecifierSet(spec)
+        except InvalidSpecifier:
+            issues.error(
+                "xai4tsc_version",
+                f"{spec!r} is neither a version nor a PEP 440 specifier "
+                '(e.g. ">=2.0,<3").',
+            )
+            return
+    # The fallback version of an uninstalled package says nothing about the code.
+    if xai4tsc.__version__ == "0.0.0+unknown":
+        issues.warn(
+            "xai4tsc_version",
+            "xai4tsc is not installed, so its version cannot be checked.",
+        )
+        return
+    if not specifier.contains(xai4tsc.__version__, prereleases=True):
+        issues.error(
+            "xai4tsc_version",
+            f"the config requires xai4tsc {spec}, but {xai4tsc.__version__} is "
+            "installed.",
+        )
+
+
 def _validate_general_seeding(general: dict, issues: ConfigIssues) -> None:
     """
     Check that ``general.seed`` and ``general.reproducible`` have usable types.
@@ -1480,6 +1535,7 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     own_report = issues is None
     issues = ConfigIssues() if issues is None else issues
 
+    _validate_framework_version(config, issues)
     _normalize_train_switch(config["train_config"], issues)
     _validate_general_seeding(config.get("general", {}), issues)
     _validate_data_splits(config, issues)

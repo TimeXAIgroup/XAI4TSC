@@ -8,6 +8,7 @@
 # per-member overrides; everything else runs at full size.
 # =============================================================================
 experiment_name: "uea_benchmark"
+xai4tsc_version: ">=2.0.0,<3"
 
 general:
   device: "use_available"

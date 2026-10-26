@@ -15,6 +15,12 @@
 
 experiment_name: null       # REQUIRED in your own config
 
+# The xai4tsc versions this config is written for, as a PEP 440 specifier, e.g.
+# ">=2.0.0,<3". A bare version such as "2.0.0" means exactly that version.
+# The config check rejects the run when the installed xai4tsc does not fit.
+# Omitted or null skips the check with a warning.
+xai4tsc_version: null
+
 results_rel_path: null      # REQUIRED in your own config, e.g. "./experiments/results/"
 
 # Path to the cache directory.  If set, UCR downloads and dataset splits are

@@ -999,6 +999,7 @@ def test_settings_and_entry_problems_share_one_report(caplog):
     issues = ConfigIssues()
     user = _minimal_user_config()
     user["bogus_top_level"] = 1
+    user["xai4tsc_version"] = ">=0"
     user["general"]["bogus_general"] = 1
     user["explanation_config"]["explainers"] = [
         {"method": "Integrated_Gradients", "nsteps": 3}
@@ -1110,6 +1111,36 @@ def test_null_general_seed_is_accepted():
     cfg["general"] = {"seed": None}
     cfg = config_resolve(cfg, MASTER_CONFIG)
     assert config_sanity_check(cfg) is True
+
+
+# ── xai4tsc_version ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("spec", "errors", "warnings"),
+    [
+        (">=2.0.0,<3", 0, 0),  # pre-release admitted by order
+        ("2.0.0.dev", 0, 0),  # bare version means ==
+        ("2.0.0", 1, 0),
+        (">=3", 1, 0),
+        ("two", 1, 0),
+        (None, 0, 1),
+    ],
+)
+def test_framework_version(monkeypatch, spec, errors, warnings):
+    """The installed xai4tsc must fit the config's specifier; none only warns."""
+    import xai4tsc
+
+    monkeypatch.setattr(xai4tsc, "__version__", "2.0.0.dev")
+    cfg = _valid_config()
+    cfg["xai4tsc_version"] = spec
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    issues = ConfigIssues()
+    config_sanity_check(cfg, issues)
+    version_errors = [e for e in issues.errors if e.startswith("xai4tsc_version")]
+    version_warnings = [w for w in issues.warnings if w.startswith("xai4tsc_version")]
+    assert (len(version_errors), len(version_warnings)) == (errors, warnings)
 
 
 # ── split fractions and sample selection ──────────────────────────────────────

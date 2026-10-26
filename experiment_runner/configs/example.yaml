@@ -13,6 +13,7 @@
 # For an annotated reference of every available option, see `master.yaml`.
 # =============================================================================
 experiment_name: "example_time"
+xai4tsc_version: ">=2.0.0,<3"
 
 # Generated datasets, splits, and checkpoints are cached here and reused.
 cache_path: "./cache/"

@@ -8,7 +8,7 @@
 # metric. Datasets are downloaded once into cache_path and reused.
 # =============================================================================
 experiment_name: "ucr_benchmark"
-xai4tsc_version: ">=2.0.0,<3"
+xai4tsc_version: ">=2.0.0.dev0,<3"
 
 general:
   device: "use_available"

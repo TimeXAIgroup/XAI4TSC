@@ -1120,11 +1120,13 @@ def test_null_general_seed_is_accepted():
 @pytest.mark.parametrize(
     ("spec", "errors", "warnings"),
     [
-        (">=2.0.0,<3", 0, 0),  # pre-release admitted by order
+        (">=2.0.0.dev0,<3", 0, 0),  # pre-release admitted by order
+        (">=2.0.0,<3", 1, 0),  # the dev build sorts before 2.0.0
         ("2.0.0.dev", 0, 0),  # bare version means ==
         ("2.0.0", 1, 0),
         (">=3", 1, 0),
         ("two", 1, 0),
+        (2.1, 1, 0),  # unquoted YAML number
         (None, 0, 1),
     ],
 )

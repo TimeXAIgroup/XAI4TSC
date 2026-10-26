@@ -16,7 +16,9 @@
 experiment_name: null       # REQUIRED in your own config
 
 # The xai4tsc versions this config is written for, as a PEP 440 specifier, e.g.
-# ">=2.0.0,<3". A bare version such as "2.0.0" means exactly that version.
+# ">=2.0.0.dev0,<3" (a plain ">=2.0.0" excludes the 2.0.0.dev builds). A bare
+# version such as "2.0.0" means exactly that version. Quote the value: YAML
+# reads an unquoted 2.10 as the number 2.1.
 # The config check rejects the run when the installed xai4tsc does not fit.
 # Omitted or null skips the check with a warning.
 xai4tsc_version: null

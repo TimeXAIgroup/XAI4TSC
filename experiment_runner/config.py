@@ -1128,8 +1128,8 @@ def _validate_framework_version(config: dict, issues: ConfigIssues) -> None:
     Check that the installed xai4tsc fits the config's ``xai4tsc_version``.
 
     The value is a PEP 440 specifier; a bare version means exactly that version.
-    Pre-releases are compared by their order, so ``>=2.0.0`` admits the
-    ``2.0.0.dev`` development build.
+    Pre-releases are compared by their order, so ``>=2.0.0.dev0`` admits the
+    ``2.0.0.dev`` development build, which ``>=2.0.0`` does not.
 
     Parameters
     ----------
@@ -1148,7 +1148,13 @@ def _validate_framework_version(config: dict, issues: ConfigIssues) -> None:
             f"xai4tsc {xai4tsc.__version__}.",
         )
         return
-    spec = str(spec)
+    # YAML reads an unquoted 2.10 as the float 2.1, a different version.
+    if not isinstance(spec, str):
+        issues.error(
+            "xai4tsc_version",
+            f"must be a quoted string, got {type(spec).__name__} ({spec!r}).",
+        )
+        return
     try:
         specifier = SpecifierSet(f"=={Version(spec)}")
     except InvalidVersion:

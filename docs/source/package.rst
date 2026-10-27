@@ -122,22 +122,22 @@ Registry key   Class
 
 **Explainers** (``xai4tsc.EXPLAINERS``)
 
-==========================  ==================================================================================
-Registry key                 Class
-==========================  ==================================================================================
-``integrated_gradients``    :class:`~xai4tsc.xai.feature_attribution.IntegratedGradientsExplainer`
-``guided_backpropagation``  :class:`~xai4tsc.xai.feature_attribution.GuidedBackpropagationExplainer`
-``deconvolution``           :class:`~xai4tsc.xai.feature_attribution.DeconvolutionExplainer`
-``deeplift``                :class:`~xai4tsc.xai.feature_attribution.DeepLiftExplainer`
-``occlusion``               :class:`~xai4tsc.xai.feature_attribution.OcclusionExplainer`
-``tshap``                   :class:`~xai4tsc.xai.feature_attribution.TSHAPExplainer`
-``sign``                    :class:`~xai4tsc.xai.wrappers.SignExplainer`
-``freqrise``                :class:`~xai4tsc.xai.freqrise.FreqRISEExplainer`
-``frequency``               :class:`~xai4tsc.xai.explanation_domains.FrequencyExplainer`
-``timefrequency``           :class:`~xai4tsc.xai.explanation_domains.TimeFrequencyExplainer`
-``random_frequency``        :class:`~xai4tsc.xai.random_baseline.RandomFrequencyExplainer`
-``random_timefrequency``    :class:`~xai4tsc.xai.random_baseline.RandomTimeFreqExplainer`
-==========================  ==================================================================================
+===========================  =========================================================================  ============
+Registry key                 Class                                                                      Data
+===========================  =========================================================================  ============
+``integrated_gradients``     :class:`~xai4tsc.xai.feature_attribution.IntegratedGradientsExplainer`     agnostic
+``guided_backpropagation``   :class:`~xai4tsc.xai.feature_attribution.GuidedBackpropagationExplainer`   agnostic
+``deconvolution``            :class:`~xai4tsc.xai.feature_attribution.DeconvolutionExplainer`           agnostic
+``deeplift``                 :class:`~xai4tsc.xai.feature_attribution.DeepLiftExplainer`                agnostic
+``occlusion``                :class:`~xai4tsc.xai.feature_attribution.OcclusionExplainer`               agnostic
+``tshap``                    :class:`~xai4tsc.xai.feature_attribution.TSHAPExplainer`                   time series
+``sign``                     :class:`~xai4tsc.xai.wrappers.SignExplainer`                               as its base
+``freqrise``                 :class:`~xai4tsc.xai.freqrise.FreqRISEExplainer`                           time series
+``frequency``                :class:`~xai4tsc.xai.explanation_domains.FrequencyExplainer`               time series
+``timefrequency``            :class:`~xai4tsc.xai.explanation_domains.TimeFrequencyExplainer`           time series
+``random_frequency``         :class:`~xai4tsc.xai.random_baseline.RandomFrequencyExplainer`             time series
+``random_timefrequency``     :class:`~xai4tsc.xai.random_baseline.RandomTimeFreqExplainer`              time series
+===========================  =========================================================================  ============
 
 **Metrics** (``xai4tsc.METRICS``)
 
@@ -149,14 +149,18 @@ classes (listed in ``xai4tsc.QUANTUS_METRICS``, e.g. ``"Complexity"``,
 :class:`~xai4tsc.evaluation.base.QuantusEvaluator` (bound to the metric name); see the
 Quantus documentation for those. The xai4tsc-native metrics are:
 
-===========================================  ============================================================================
-Registry key                                  Class
-===========================================  ============================================================================
-``Frequency Perturbation``                   :class:`~xai4tsc.evaluation.frequency_evaluate.FrequencyEvaluator`
-``Time-Frequency Perturbation``              :class:`~xai4tsc.evaluation.timefrequency_perturbation.TimeFrequencyEvaluator`
-``Time-Frequency Perturbation Gaussian``     :class:`~xai4tsc.evaluation.timefrequency_perturbation.TimeFrequencyEvaluatorGaussian`
-``Time-Frequency AUC``                       :class:`~xai4tsc.evaluation.timefrequency_auc.TimeFrequencyAUCEvaluator`
-===========================================  ============================================================================
+=========================================  =======================================================================================  ============
+Registry key                               Class                                                                                    Data
+=========================================  =======================================================================================  ============
+``Frequency Perturbation``                 :class:`~xai4tsc.evaluation.frequency_evaluate.FrequencyEvaluator`                       time series
+``Time-Frequency Perturbation``            :class:`~xai4tsc.evaluation.timefrequency_perturbation.TimeFrequencyEvaluator`           time series
+``Time-Frequency Perturbation Gaussian``   :class:`~xai4tsc.evaluation.timefrequency_perturbation.TimeFrequencyEvaluatorGaussian`   time series
+``Time-Frequency AUC``                     :class:`~xai4tsc.evaluation.timefrequency_auc.TimeFrequencyAUCEvaluator`                 time series
+=========================================  =======================================================================================  ============
+
+The Data column is the class's ``data_applicability`` (``xai4tsc.DataType``):
+``agnostic`` methods work on any input type, ``time series`` ones only on time
+series; it is declared, not enforced.
 
 Data domain
 ~~~~~~~~~~~

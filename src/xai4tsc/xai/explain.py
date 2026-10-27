@@ -58,7 +58,9 @@ def generate_explanation(
     data : np.ndarray
         Dataset to generate an explanation for.
     labels : np.ndarray, optional
-        Labels of the dataset, by default None
+        Labels of the dataset, by default None. Required for
+        ``targets="label"``. Without them a per-output (multi-label) model is
+        recognised by its ``output_activation="sigmoid"``.
     targets : str, optional
         Which class to explain: ``"predicted"`` (default), ``"label"``
         (ground truth), or ``"all"`` (one explanation per class). Under a
@@ -79,7 +81,8 @@ def generate_explanation(
         explanation so the re-explaining metrics replay the same call.
     encoder : object, optional
         Fitted label encoder, used to name the explained classes. ``None`` by
-        default.
+        default, in which case classes are named by index and the class count
+        is the model's output width.
     indices : list, optional
         Indices of samples to explain, by default None
     n_samples : int, optional
@@ -107,6 +110,11 @@ def generate_explanation(
         An object of the Explanation dataclass.
     """
     prng = resolve_rng(DEFAULT_SEED, prng)
+    if labels is None and targets == "label":
+        raise ValueError(
+            "targets='label' explains each sample's true class, so it needs "
+            "'labels'; pass them, or use targets='predicted' or 'all'."
+        )
 
     model.eval()
     # Samples to explain are in list form
@@ -114,7 +122,7 @@ def generate_explanation(
         indices = np.arange(len(data))
         prng.shuffle(indices)
         indices = indices[:n_samples]
-    elif len(indices) == 0:
+    elif indices is None or len(indices) == 0:
         if n_samples <= 0:
             logger.warning(
                 "Supplied no indices to explain nor a sample count for "
@@ -140,7 +148,7 @@ def generate_explanation(
         method=method,
         model=model,
         data=data[indices],
-        labels=labels[indices],
+        labels=None if labels is None else labels[indices],
         encoder=encoder,
         params=params,
         call_params=call_params,
@@ -324,22 +332,33 @@ def _get_explanation(
     # and was silently wrong - "label" argmaxed the multi-hot row and explained
     # only its first active output, and "predicted" argmaxed a softmax over
     # outputs that do not compete.
-    per_output = np.ndim(labels) > 1
+    # Without labels, a sigmoid head is what says the outputs are per-label.
+    per_output = (
+        np.ndim(labels) > 1
+        if labels is not None
+        else getattr(model, "output_activation", "softmax") == "sigmoid"
+    )
 
     if targets == "all" or per_output:
         # One attribution per class, stacked on a leading axis. The container is
         # derived from what the explainer actually returns, not from `data`:
         # frequency is (n, C, F), time-frequency is (n, C, n_freq, n_time), and
         # freq/TF outputs may be complex.
-        classes = encoder.classes_
+        # Without an encoder the model's output width is the class count, and
+        # plots name the classes by index.
+        n_classes = (
+            len(encoder.classes_)
+            if encoder is not None
+            else predict_probs(model, exp.data[:1]).shape[1]
+        )
         exp_values = None
-        for ind in range(len(classes)):
+        for ind in range(n_classes):
             relevance = explainer_instance.explain(
                 model, exp, device, [ind] * len(data), **exp.explainer_call_params
             )
             if exp_values is None:
                 exp_values = np.empty(
-                    (len(classes), *relevance.shape), dtype=relevance.dtype
+                    (n_classes, *relevance.shape), dtype=relevance.dtype
                 )
             exp_values[ind] = relevance
         exp.exp_values = exp_values

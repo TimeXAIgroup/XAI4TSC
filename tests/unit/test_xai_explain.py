@@ -109,6 +109,52 @@ def test_empty_indices_nonpositive_samples_returns_none(monkeypatch, caplog):
     assert "aborting" in caplog.text.lower()
 
 
+@pytest.mark.unit
+def test_no_indices_and_no_sample_count_returns_none(monkeypatch, caplog):
+    # indices=None used to reach len(None) instead of the warning above.
+    _patch_get_explanation(monkeypatch)
+    with caplog.at_level("WARNING", logger="xai4tsc.xai.explain"):
+        result = generate_explanation(
+            method="integrated_gradients",
+            model=_DummyModel(),
+            data=np.zeros((5, 1, 4), dtype=np.float32),
+            indices=None,
+            n_samples=0,
+        )
+    assert result is None
+    assert "aborting" in caplog.text.lower()
+
+
+@pytest.mark.unit
+def test_labels_are_optional_for_predicted_targets(monkeypatch):
+    recorded = {}
+
+    def _recorder(**kwargs):
+        recorded["labels"] = kwargs["labels"]
+        return "SENTINEL"
+
+    monkeypatch.setattr(xai_explain, "_get_explanation", _recorder)
+    result = generate_explanation(
+        method="integrated_gradients",
+        model=_DummyModel(),
+        data=np.zeros((5, 1, 4), dtype=np.float32),
+        n_samples=2,
+    )
+    assert result == "SENTINEL"
+    assert recorded["labels"] is None
+
+
+@pytest.mark.unit
+def test_label_targets_without_labels_raise():
+    with pytest.raises(ValueError, match=r"targets='label'.*needs 'labels'"):
+        generate_explanation(
+            method="integrated_gradients",
+            model=_DummyModel(),
+            data=np.zeros((5, 1, 4), dtype=np.float32),
+            targets="label",
+        )
+
+
 # ── explainer validation & registry ──────────────────────────────────────────────
 
 
@@ -419,3 +465,44 @@ def test_label_targets_pass_1d_class_indices_through_unchanged():
     assert exp.exp_values.shape == (3, 1, 4)
     assert exp.target_mask is None
     assert exp.explained_targets.tolist() == [2, 0, 1]
+
+
+@pytest.mark.unit
+def test_without_an_encoder_the_model_output_width_is_the_class_count(monkeypatch):
+    recorded = _register_recording_explainer(monkeypatch)
+    model = _FixedProbs([[1.0, 2.0, 3.0, 4.0]] * 2)
+    model.output_activation = "softmax"
+    try:
+        exp = _get_explanation(
+            method="_RecorderXAI",
+            model=model,
+            data=np.zeros((2, 1, 4), dtype=np.float32),
+            labels=None,
+            encoder=None,
+            params={},
+            targets="all",
+        )
+    finally:
+        EXPLAINERS.pop("_recorderxai", None)
+    assert exp.exp_values.shape[0] == 4
+    assert len(recorded["targets"]) == 4
+
+
+@pytest.mark.unit
+def test_without_labels_a_sigmoid_head_is_explained_per_output(monkeypatch):
+    # Argmaxing independent sigmoids would explain one label per sample.
+    _register_recording_explainer(monkeypatch)
+    model = _FixedProbs([[5.0, -5.0, 5.0]])
+    try:
+        exp = _get_explanation(
+            method="_RecorderXAI",
+            model=model,
+            data=np.zeros((1, 1, 4), dtype=np.float32),
+            labels=None,
+            encoder=None,
+            params={},
+            targets="predicted",
+        )
+    finally:
+        EXPLAINERS.pop("_recorderxai", None)
+    np.testing.assert_array_equal(exp.target_mask, np.array([[True], [False], [True]]))

@@ -55,8 +55,9 @@ class Explanation:
         alone.
     data : np.ndarray
         Original input samples that were explained, shape ``(N, C, T)``.
-    labels : np.ndarray
-        Class labels for each sample in ``data``.
+    labels : np.ndarray or None
+        Class labels for each sample in ``data``; ``None`` when the explanation
+        was generated without labels.
     indices : np.ndarray
         Indices into the test set from which ``data`` was drawn.
     encoder : object
@@ -107,7 +108,7 @@ class Explanation:
     explanation_type: str
     exp_values: np.ndarray
     data: np.ndarray
-    labels: np.ndarray
+    labels: np.ndarray | None
     indices: np.ndarray
     encoder: object
     meta: dict

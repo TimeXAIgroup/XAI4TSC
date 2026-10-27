@@ -91,6 +91,24 @@ def test_min_delta_decides_what_counts_as_an_improvement(tmp_path, caplog):
     assert "Early stopping at epoch 3 (patience=3, min_delta=1e+06)" in caplog.text
 
 
+@pytest.mark.unit
+def test_a_negative_min_delta_still_stops_early(tmp_path, caplog):
+    # Read as -0.005 the check would count a flat loss as improving forever.
+    data, labels = _batch()
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        _model(tmp_path).train_model(
+            data,
+            labels,
+            epochs=12,
+            batchsize=8,
+            patience=3,
+            learn_rate=0.0,
+            min_delta=-5e-3,
+            save_best=False,
+        )
+    assert "Early stopping at epoch 4" in caplog.text
+
+
 # ── the loss: default, object, and the two compatibility layers ───────────────
 
 

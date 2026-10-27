@@ -629,7 +629,7 @@ class ModelBase(nn.Module, ABC):
         min_delta : float
             How far the monitored loss has to fall below its best value to count
             as an improvement, ``5e-3`` by default. An absolute difference, not a
-            fraction of the loss.
+            fraction of the loss; the sign is ignored, so ``-5e-3`` means the same.
         save_best : bool
             Whether to write a checkpoint whenever the monitored loss improves,
             ``True`` by default.
@@ -761,7 +761,8 @@ class ModelBase(nn.Module, ABC):
                     epoch_acc,
                 )
 
-            if monitor_loss < (best_loss - min_delta):
+            # abs(): a negative value would count a worse loss as an improvement.
+            if monitor_loss < (best_loss - abs(min_delta)):
                 cur_patience = 0
                 # Tracked whatever save_best says: patience counts from it.
                 best_loss = monitor_loss

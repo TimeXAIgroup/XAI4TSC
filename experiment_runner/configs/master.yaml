@@ -223,7 +223,8 @@ train_config:
       learn_rate: 0.001     # optimizer learning rate
       patience: 3           # epochs without an improvement before early stopping
       min_delta: 0.005      # how far the monitored loss must fall below its best value
-                            #   to count as an improvement (absolute, not relative)
+                            #   to count as an improvement (absolute, not relative;
+                            #   the sign is ignored)
       save_best: true       # true = keep the best epoch by validation loss (training loss
                             #   when there is no val split); false = keep the final epoch
     train: true             # switch: true trains, false (or omitting the key) does not.

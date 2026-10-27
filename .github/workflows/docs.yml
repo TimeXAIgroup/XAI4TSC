@@ -23,21 +23,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-          cache: pip
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          pip install -r docs/requirements.txt
-          pip install -e .
+        run: uv sync --locked --group docs
 
       - name: Build docs
         run: |
           cd docs
-          make html
+          uv run make html
           touch build/html/.nojekyll
 
       - name: Upload Pages artifact

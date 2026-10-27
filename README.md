@@ -20,39 +20,16 @@ The documentation can be found here: https://timexaigroup.github.io/XAI4TSC/
 
 ### Standalone (experiment runner)
 
-We use Poetry for package management inside a Conda environment:
+We use [uv](https://docs.astral.sh/uv/) for package management. It installs a matching Python (3.12 or 3.13) if needed:
 
-1. Clone the repository:
-	```bash
-	git clone https://github.com/TimeXAI-group/XAI4TSC.git
-	cd XAI4TSC
-	```
-2. Create a python environment (choose one of the following):  
-	2.1. Using python:
-   ```bash
-   python -m venv .venv			 # Use python 3.12 or 3.13
-   source .venv/bin/activate
-   ```
-	2.2. Using conda:
-	 ```bash
-   conda env create          # picks up environment.yml
-   conda activate xai4tsc
-   ```
+```bash
+git clone https://github.com/TimeXAI-group/XAI4TSC.git
+cd XAI4TSC
+uv sync --group runner        # creates .venv from uv.lock
+source .venv/bin/activate
+```
 
-3. Install the dependencies (choose one of the following):  
-	3.1. Using poetry:
-   ```bash
-   pip install poetry # only needed if the local python .venv is used
-   poetry install
-   ```
-	3.2. Using pip and PyPI:
-   ```bash
-   pip install xai4tsc
-   ```
-	3.3. Using pip and a local installation:
-   ```bash
-   pip install -e . 
-   ```
+Without uv, `pip install -e . --group runner` (pip 25.1 or newer) in a Python 3.12 or 3.13 environment installs the same version ranges, without the lockfile.
 
 ### Package only
 

@@ -24,19 +24,17 @@ duplicates.
 
 ## Development setup
 
-Dependencies are managed with [Poetry](https://python-poetry.org/) inside a Conda
-environment. From the repository root:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). From the
+repository root:
 
 ```bash
-conda env create            # uses environment.yml -> creates the "xai4tsc" env
-conda activate xai4tsc
-python -m venv .venv
+uv sync --group dev --group runner   # runtime, runner and dev tools in .venv
 source .venv/bin/activate
-poetry install --with dev   # runtime + dev tools (ruff, pytest-cov)
 ```
 
 To build the documentation locally, also install the docs group
-(`poetry install --with dev,docs`) and run `make html` from `docs/`.
+(`uv sync --group dev --group docs --group runner`) and run `make html` from
+`docs/`.
 
 If you only want the package (no experiment runner), an editable install is
 enough:
@@ -45,27 +43,15 @@ enough:
 pip install -e .
 ```
 
-After adding new source files under `src/xai4tsc/`, reinstall in editable mode
-(`pip install -e .`) so they are importable.
-
 ### Dependencies
 
-`pyproject.toml` is the single source of truth for dependencies; `poetry.lock`
-pins the exact resolved versions. `requirements.txt` is a **generated**
-convenience for plain-pip users — it mirrors the direct runtime dependencies in
-`[project.dependencies]` as version ranges (it is *not* a pinned lockfile
-export).
-
-If you change a dependency in `pyproject.toml`, regenerate `requirements.txt`
-rather than editing it by hand:
-
-```bash
-python scripts/generate_requirements.py
-```
-
-The `Tests` workflow's `deps` job enforces this: it fails if `poetry.lock` is
-out of sync with `pyproject.toml` (run `poetry lock`) or if `requirements.txt`
-no longer matches `[project.dependencies]` (rerun the script above).
+`pyproject.toml` is the single source of truth for dependencies: runtime
+dependencies under `[project.dependencies]`, and the runner's own (pyyaml,
+packaging), the dev and the docs tools as groups under `[dependency-groups]`.
+The runner is not part of the published package, so its dependencies are not
+either. `uv.lock` pins the exact resolved versions. After
+changing a dependency, run `uv lock` and commit `uv.lock`; CI installs with
+`uv sync --locked` and fails if the lockfile is out of date.
 
 ### Code style and the quality gate
 
@@ -201,8 +187,7 @@ Before opening a pull request, confirm:
 - [ ] `pytest -m unit` passes (and `pytest -m integration` if you touched the
       pipeline).
 - [ ] The documentation is updated.
-- [ ] If dependencies changed: `poetry.lock` is updated (`poetry lock`) and
-      `requirements.txt` is regenerated (`python scripts/generate_requirements.py`).
+- [ ] If dependencies changed: `uv.lock` is updated (`uv lock`).
 - [ ] For a re-implemented method: the paper is cited and any known deviation
       from the original is noted.
 
@@ -213,6 +198,13 @@ Before opening a pull request, confirm:
 3. Open the PR — the template pre-fills the checklist above.
 4. CI must pass: the `Tests` workflow runs Ruff lint + format and the unit
    suite on every push and pull request.
+
+## Releasing
+
+Releases go through GitHub only: set the version in `pyproject.toml`, then
+publish a GitHub Release with a matching tag (`v<version>`). The `Publish to
+PyPI` workflow builds the package with `uv build`, checks that the tag matches
+the version, and uploads it via Trusted Publishing.
 
 ## License
 

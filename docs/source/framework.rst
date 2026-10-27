@@ -13,11 +13,8 @@ Installation
 
    git clone https://github.com/TimeXAI-group/XAI4TSC.git
    cd XAI4TSC
-   conda env create          # picks up environment.yml
-   conda activate xai4tsc
-   python -m venv .venv
+   uv sync --group runner    # creates .venv from uv.lock
    source .venv/bin/activate
-   poetry install
 
 Getting Started
 ---------------

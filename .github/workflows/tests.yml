@@ -14,63 +14,6 @@ permissions:
   contents: read
 
 jobs:
-  deps:
-    name: Dependency consistency
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install Poetry
-        run: pipx install poetry
-
-      # Fail fast if poetry.lock drifted from pyproject.toml — i.e. a dependency
-      # constraint changed without re-running `poetry lock`. Offline hash check,
-      # no resolution or network.
-      - name: Lockfile consistent with pyproject
-        run: poetry check --lock
-
-      # requirements.txt is a hand-maintained mirror of [project.dependencies]
-      # (ranges, for plain-pip users). Fail if the two drift apart. Uses only the
-      # stdlib (tomllib, 3.11+) — no project install needed.
-      - name: requirements.txt mirrors [project.dependencies]
-        run: |
-          python - <<'PY'
-          import sys, tomllib
-
-          def norm(s):
-              # Poetry writes "name (>=x,<y)"; requirements.txt uses "name>=x,<y".
-              # Both are PEP 508 — strip spaces/parens so the constraints compare equal.
-              return s.replace(" ", "").replace("(", "").replace(")", "").strip()
-
-          with open("pyproject.toml", "rb") as f:
-              proj = {norm(d) for d in tomllib.load(f)["project"]["dependencies"]}
-
-          req = set()
-          with open("requirements.txt") as f:
-              for line in f:
-                  line = line.strip()
-                  if line and not line.startswith("#"):
-                      req.add(norm(line))
-
-          if proj != req:
-              for d in sorted(proj - req):
-                  print(f"::error::Missing from requirements.txt (in pyproject): {d}")
-              for d in sorted(req - proj):
-                  print(f"::error::In requirements.txt but not in pyproject [project.dependencies]: {d}")
-              print(
-                  "requirements.txt must mirror [project.dependencies]; "
-                  "edit requirements.txt to match pyproject.toml."
-              )
-              sys.exit(1)
-          print(f"requirements.txt is in sync with [project.dependencies] ({len(proj)} deps).")
-          PY
-
   lint:
     name: Ruff lint + format
     runs-on: ubuntu-latest
@@ -88,10 +31,10 @@ jobs:
         run: pip install "ruff>=0.15,<0.16"
 
       - name: Lint
-        run: ruff check src/ experiment_runner/ tests/ examples/ scripts/
+        run: ruff check src/ experiment_runner/ tests/ examples/
 
       - name: Format check
-        run: ruff format --check src/ experiment_runner/ tests/ examples/ scripts/
+        run: ruff format --check src/ experiment_runner/ tests/ examples/
 
   unit:
     name: Unit tests + coverage
@@ -100,30 +43,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
+          enable-cache: true
 
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Configure Poetry for local venv
-        run: poetry config virtualenvs.in-project true
-
-      - name: Cache Poetry virtualenv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
-          restore-keys: venv-${{ runner.os }}-
-
+      # --locked fails when uv.lock is out of date with pyproject.toml.
       - name: Install dependencies
-        run: poetry install --with dev
+        run: uv sync --locked --group dev --group runner
 
       - name: Run unit tests with coverage
         run: >
-          poetry run pytest -m unit
+          uv run pytest -m unit
           --cov=xai4tsc --cov=experiment_runner
           --cov-report=term-missing --cov-report=xml
 
@@ -144,26 +76,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
+          enable-cache: true
 
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Configure Poetry for local venv
-        run: poetry config virtualenvs.in-project true
-
-      - name: Cache Poetry virtualenv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
-          restore-keys: venv-${{ runner.os }}-
-
+      # --locked fails when uv.lock is out of date with pyproject.toml.
       - name: Install dependencies
-        run: poetry install --with dev
+        run: uv sync --locked --group dev --group runner
 
       - name: Run integration tests
-        run: poetry run pytest -m integration
+        run: uv run pytest -m integration

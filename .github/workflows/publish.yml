@@ -1,6 +1,6 @@
 name: Publish to PyPI
 
-# Builds the package with Poetry and uploads it to PyPI via Trusted Publishing
+# Builds the package with uv and uploads it to PyPI via Trusted Publishing
 # (OIDC) — no API token is stored as a secret. Triggered when a GitHub Release
 # is published, so the released code matches the tag.
 on:
@@ -20,20 +20,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
-
-      - name: Install Poetry
-        run: pipx install poetry
 
       # Guard against PyPI/GitHub version drift: on a release, the tag (e.g.
       # v1.0.0) must match the version in pyproject.toml (1.0.0).
       - name: Verify tag matches package version
         if: github.event_name == 'release'
         run: |
-          PKG_VERSION="$(poetry version --short)"
+          PKG_VERSION="$(uv version --short)"
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           echo "pyproject version: $PKG_VERSION"
           echo "release tag:       $TAG_VERSION"
@@ -43,7 +40,7 @@ jobs:
           fi
 
       - name: Build sdist and wheel
-        run: poetry build
+        run: uv build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

@@ -133,7 +133,7 @@ def _perturbation_curve(
 
     curve = np.stack(preds, axis=1)
     if return_aoc:
-        auc = np.trapz(curve, axis=1)
+        auc = np.trapezoid(curve, axis=1)
         result = [float(1.0 - (a_ / n_steps)) for a_ in auc]
     else:
         result = curve.tolist()

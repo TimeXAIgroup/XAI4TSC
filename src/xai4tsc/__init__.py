@@ -39,13 +39,7 @@ from .evaluation import (
     evaluate,
     register_metric,
 )
-from .logging_config import (
-    add_file_log,
-    disable_logging,
-    enable_logging,
-    file_log,
-    remove_file_log,
-)
+from .logging_config import disable_logging, enable_logging
 from .models import (
     FCN,
     LSTM,
@@ -126,9 +120,6 @@ __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
     # Logging
     "enable_logging",
     "disable_logging",
-    "add_file_log",
-    "remove_file_log",
-    "file_log",
     # Registries
     "MODELS",
     "EXPLAINERS",

@@ -34,7 +34,6 @@ from xai4tsc.data import (
 )
 from xai4tsc.evaluation.evaluate import ground_truth_missing, required_domains_for
 from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
-from xai4tsc.logging_config import add_file_log, remove_file_log
 from xai4tsc.models.models import load_model
 from xai4tsc.utils import resolve_rng
 from xai4tsc.xai import is_multi_target
@@ -51,7 +50,7 @@ from .download_datasets import ensure_datasets_cached
 from .encoders import build_encoder
 from .evaluate import _animate, _evaluate
 from .explain import _explainer_display_name, _generate_explanation
-from .log_setup import _add_file_logging, _setup_console_logging
+from .log_setup import _setup_console_logging, add_file_log, remove_file_log
 from .losses import build_loss
 from .optimizers import build_optimizer
 from .seeding import boundary_seed, seed_globals
@@ -1104,7 +1103,7 @@ def initial_setup(
             sys.exit(1)
 
     # Add file logging now that the results directory exists
-    run_log = _add_file_logging(debug, log_path=path / "experiment.log")
+    run_log = add_file_log(path / "experiment.log")
 
     return config, run_log
 

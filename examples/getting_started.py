@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 
 import xai4tsc
@@ -24,7 +26,7 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
         Test-set metrics from :meth:`~xai4tsc.ModelBase.evaluate_model`.
     """
     # Enable package logging to the console and to <out_dir>/xai4tsc.log
-    xai4tsc.enable_logging(out_dir)
+    xai4tsc.enable_logging(Path(out_dir) / "xai4tsc.log")
 
     # Set the global torch seed
     seed = 0xDEADBEEF

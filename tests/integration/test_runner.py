@@ -112,6 +112,11 @@ def test_runner_end_to_end(ucr_dataset_path, tmp_path, monkeypatch):
     exp_dirs = list(model_dir.glob("explanations/explanations_*"))
     assert exp_dirs, "No explanation sub-folder found"
 
+    # The per-model log holds this model's part of the run.
+    model_log = (model_dir / "GunPoint_FCN.log").read_text()
+    assert "Now also logging to file" in model_log
+    assert "FCN" in model_log
+
 
 # ── caching ───────────────────────────────────────────────────────────────────
 

@@ -5,7 +5,6 @@ Resolves user YAML against ``master.yaml``, applies per-method defaults,
 and validates model and explainer names against the live runtime registries.
 """
 
-import copy
 import difflib
 import inspect
 import logging
@@ -238,7 +237,7 @@ def _merge_warn_drop(
                 # Master cannot enumerate these keys, so filtering against it
                 # would silently drop every parameter it does not happen to list.
                 # Its own entries still apply as defaults underneath.
-                result[key] = merge_dicts(copy.deepcopy(value), master[key])
+                result[key] = merge_dicts(value, master[key])
             else:
                 result[key] = _merge_warn_drop(
                     value, master[key], f"{context}.{key}", issues
@@ -389,13 +388,9 @@ def _resolve_entries(config: dict) -> None:
     there is no single block to merge from: ``train_split`` has no business in a
     model entry.
 
-    Both sides are deep-copied, and both copies are needed.
-    :func:`~xai4tsc.utils.utils.merge_dicts` writes into its first argument, so
-    without copying the entry the raw config would be mutated; and for a key the
-    entry does not have it inserts the default's own object, so without copying
-    the defaults every entry that inherited ``samples`` or ``hyperparams`` would
-    share one dict with the defaults block and with its siblings, and a later
-    write to one would reach them all.
+    :func:`~xai4tsc.utils.utils.merge_dicts` returns a fresh copy, so no entry
+    shares an inherited ``samples`` or ``hyperparams`` dict with the defaults
+    block or its siblings, and the raw config is not mutated.
 
     Parameters
     ----------
@@ -415,7 +410,7 @@ def _resolve_entries(config: dict) -> None:
                 # Left as-is for _validate_entries to report by position.
                 resolved_entries.append(entry)
                 continue
-            resolved = merge_dicts(copy.deepcopy(entry), copy.deepcopy(defaults))
+            resolved = merge_dicts(entry, defaults)
             # Set correct train values for checkpoints without training:
             # Presence of `train` on the raw entry decides whether a checkpoint
             # retrains, and the merge is about to make every entry carry it.

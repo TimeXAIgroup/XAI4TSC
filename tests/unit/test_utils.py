@@ -79,6 +79,26 @@ def test_merge_dicts_base_not_mutated():
     assert base == base_copy
 
 
+@pytest.mark.unit
+def test_merge_dicts_leaves_inputs_unchanged_and_shares_nothing():
+    prio = {"hp": {"lr": 0.01}}
+    base = {"hp": {"lr": 0.001, "epochs": 10}, "samples": {"count": 5}}
+    result = merge_dicts(prio, base)
+    assert prio == {"hp": {"lr": 0.01}}
+    assert base == {"hp": {"lr": 0.001, "epochs": 10}, "samples": {"count": 5}}
+    result["samples"]["count"] = 99
+    result["hp"]["lr"] = 1.0
+    assert base["samples"]["count"] == 5
+    assert prio["hp"]["lr"] == 0.01
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [3, None])
+def test_merge_dicts_non_dict_prio_value_replaces_a_dict(value):
+    result = merge_dicts({"a": value}, {"a": {"x": 1}, "b": 2})
+    assert result == {"a": value, "b": 2}
+
+
 # ── rescale_array ─────────────────────────────────────────────────────────────
 
 

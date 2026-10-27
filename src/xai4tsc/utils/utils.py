@@ -1,5 +1,6 @@
 """Low-level utilities: ``dict_to_args``, ``merge_dicts``, and ``rescale_array``."""
 
+import copy
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -62,6 +63,11 @@ def merge_dicts(prio: dict, base: dict) -> dict:
     """
     Recursively merge two dictionaries where the values of prio take precedence.
 
+    Neither input is modified, and the result shares no objects with them. Two
+    dicts under one key are merged recursively; any other value in *prio*,
+    including ``None``, replaces the one in *base*. Keys keep *prio*'s order,
+    followed by the keys only *base* has.
+
     Parameters
     ----------
     prio : dict
@@ -72,17 +78,15 @@ def merge_dicts(prio: dict, base: dict) -> dict:
     Returns
     -------
     dict
-        A merged dictionary containing all keys.
+        A new merged dictionary containing all keys.
     """
-    # Update hyperparameters
-    for param, value in base.items():
-        # Take base, if not defined for the model
-        if param not in prio:
-            prio.update({param: value})
-        # Call recursively if the prioritized dict contains another dict.
-        elif isinstance(value, dict) and param in base:
-            prio[param] = merge_dicts(prio[param], value)
-    return prio
+    merged = copy.deepcopy(prio)
+    for key, value in base.items():
+        if key not in merged:
+            merged[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(merged[key], dict):
+            merged[key] = merge_dicts(merged[key], value)
+    return merged
 
 
 def load_class_from_path(path: str | Path, class_name: str) -> type:

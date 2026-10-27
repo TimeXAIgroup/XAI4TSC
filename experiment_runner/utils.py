@@ -11,7 +11,6 @@ This is the runner's own helper module and is unrelated to
 :mod:`xai4tsc.utils`, which serves the importable package.
 """
 
-import copy
 import logging
 
 import numpy as np
@@ -76,7 +75,7 @@ def expand_datasets(datasets: list[dict]) -> list[dict]:
                 member = {**base, "dataset": name}
                 if name in overrides:
                     # overrides[name] wins over the entry's inline settings.
-                    member = merge_dicts(copy.deepcopy(overrides[name]), member)
+                    member = merge_dicts(overrides[name], member)
                 expanded.append(member)
         else:
             if overrides:

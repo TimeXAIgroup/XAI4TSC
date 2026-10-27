@@ -227,9 +227,8 @@ def test_resolved_entries_share_no_nested_objects():
     """
     Two entries inheriting one nested default must not share the object.
 
-    merge_dicts inserts the default's own dict for a key the entry lacks, so
-    without a copy on both sides `samples` would be one object shared by the
-    defaults block and every entry, and a later write would reach them all.
+    Otherwise `samples` would be one object shared by the defaults block and
+    every entry, and a later write would reach them all.
     """
     user = _minimal_user_config(
         explanation_config={

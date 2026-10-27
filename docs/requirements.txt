@@ -1,8 +1,8 @@
 # Documentation build dependencies (used by .github/workflows/docs.yml).
 #
 # GENERATED FILE — do not edit by hand.
-# Regenerate after changing the docs dependencies in pyproject.toml
-# ([tool.poetry.group.docs.dependencies]):
+# Regenerate after changing the docs dependencies in pyproject.toml:
+#
 #     python scripts/generate_requirements.py
 
 sphinx>=9.1.0,<10.0.0

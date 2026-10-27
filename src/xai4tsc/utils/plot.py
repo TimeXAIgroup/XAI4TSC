@@ -14,6 +14,41 @@ from .utils import rescale_array
 logger = logging.getLogger(__name__)
 
 
+def _sample_paths(
+    save_path: Path | str | None, batch_size: int, default_suffix: str = ""
+) -> list[Path | None]:
+    """
+    Return the file path for each sample of a batch plot.
+
+    A single sample keeps *save_path* as given. With more than one sample a
+    directory named after *save_path* (without its suffix) is created and sample
+    ``i`` is written to ``<dir>/<stem><i><suffix>``.
+
+    Parameters
+    ----------
+    save_path : Path or str or None
+        Requested file path; ``None`` means the plots are shown, not saved.
+    batch_size : int
+        Number of samples in the batch.
+    default_suffix : str
+        Suffix to use when *save_path* has none.
+
+    Returns
+    -------
+    list of Path or None
+        One path per sample, or ``None`` per sample when *save_path* is ``None``.
+    """
+    if save_path is None:
+        return [None] * batch_size
+    save_path = Path(save_path)
+    stem, suffix = save_path.stem, save_path.suffix or default_suffix
+    if batch_size == 1:
+        return [save_path.parent / f"{stem}{suffix}"]
+    out_dir = save_path.with_suffix("")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return [out_dir / f"{stem}{i}{suffix}" for i in range(batch_size)]
+
+
 def plot_relevance(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
@@ -122,30 +157,13 @@ def plot_relevance(
     channels = signal.shape[1]
     timesteps = signal.shape[2]
 
-    if save_path is not None:
-        save_path = Path(save_path) if isinstance(save_path, str) else save_path
-        # if multiple plots are generated, create a directory
-        if batch_size > 1:
-            out_dir = save_path.with_suffix("")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            save_name = save_path.name
-            save_path = out_dir / save_name
-
-        # setup of save path
-        save_name = save_path.stem
-        save_filetype = save_path.suffix
-        out_dir = save_path.parent
+    sample_paths = _sample_paths(save_path, batch_size)
 
     # plot each sample from the batch
     for s_idx, (sample, sample_relevance) in enumerate(
         zip(signal, relevance, strict=True)
     ):
-        if save_path is not None:
-            # Index the filename only for multi-sample batches (which also get
-            # their own directory above); a single sample keeps the caller's name
-            # verbatim, with no stray trailing "0".
-            suffix = f"{s_idx}" if batch_size > 1 else ""
-            save_path = out_dir / (save_name + suffix + save_filetype)
+        save_path = sample_paths[s_idx]
         nrows, ncols = channels, 1
         figsize = (10, 2.5)
         fig, axes = plt.subplots(
@@ -361,7 +379,7 @@ def plot_relevance_f(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
     rel_type: str = "points",
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
     **kwargs: object,
 ) -> Path | None:
     """
@@ -380,7 +398,7 @@ def plot_relevance_f(
         Relevance values matching *signal* (possibly complex).
     rel_type : str
         Visualisation style forwarded to :func:`plot_relevance`.
-    save_path : Path, optional
+    save_path : Path or str, optional
         File path to save the figure; shown interactively if ``None``.
     **kwargs : object
         Extra keyword arguments forwarded to :func:`plot_relevance`.
@@ -406,7 +424,7 @@ def plot_relevance_f(
 def plot_relevance_tf(
     signal: np.ndarray,
     relevance: np.ndarray,
-    save_path: Path | None = None,
+    save_path: Path | str | None = None,
     title: str | None = None,
     signal_cmap: str = "viridis",
     relevance_cmap: str = "Reds",
@@ -425,9 +443,10 @@ def plot_relevance_tf(
         Spectrograms of shape ``(B, C, n_freq, n_time)`` (possibly complex).
     relevance : np.ndarray
         Relevance of shape ``(B, C, n_freq, n_time)`` (possibly complex).
-    save_path : Path, optional
-        File path to save the figure. With more than one sample a directory is
-        created and per-sample files are written. Shown interactively if ``None``.
+    save_path : Path or str, optional
+        File path to save the figure (``.png`` if it has no suffix). With more
+        than one sample a directory is created and per-sample files are written.
+        Shown interactively if ``None``.
     title : str, optional
         Figure title.
     signal_cmap : str
@@ -453,16 +472,7 @@ def plot_relevance_tf(
 
     batch_size, channels = signal.shape[0], signal.shape[1]
 
-    out_dir = save_name = save_filetype = None
-    if save_path is not None:
-        if batch_size > 1:
-            base = save_path.with_suffix("")
-            base.mkdir(parents=True, exist_ok=True)
-            save_path = base / save_path.name
-        save_name = save_path.stem
-        save_filetype = save_path.suffix or ".png"
-        out_dir = save_path.parent
-
+    sample_paths = _sample_paths(save_path, batch_size, default_suffix=".png")
     last_path: Path | None = None
     for s_idx in range(batch_size):
         fig, axes = plt.subplots(
@@ -490,9 +500,8 @@ def plot_relevance_tf(
                     ax.set_title(panel_title)
                 fig.colorbar(im, ax=ax)
 
-        if save_path is not None:
-            suffix = f"{s_idx}" if batch_size > 1 else ""
-            last_path = out_dir / f"{save_name}{suffix}{save_filetype}"
+        if sample_paths[s_idx] is not None:
+            last_path = sample_paths[s_idx]
             plt.savefig(last_path, dpi=300)
             plt.close()
         else:

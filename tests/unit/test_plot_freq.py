@@ -90,6 +90,41 @@ def test_plot_relevance_tf_writes_file(tmp_path, channels):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("as_str", [False, True])
+@pytest.mark.parametrize(
+    ("plot", "shape", "name", "expected"),
+    [
+        (plot_relevance, (1, 20), "r.png", {1: ["r.png"], 2: ["r/r0.png", "r/r1.png"]}),
+        (
+            plot_relevance_tf,
+            (1, 9, 13),
+            "tf.png",
+            {1: ["tf.png"], 2: ["tf/tf0.png", "tf/tf1.png"]},
+        ),
+        # Without a suffix the time-frequency plot defaults to .png.
+        (
+            plot_relevance_tf,
+            (1, 9, 13),
+            "tf",
+            {1: ["tf.png"], 2: ["tf/tf0.png", "tf/tf1.png"]},
+        ),
+    ],
+)
+def test_save_path_names_per_sample(tmp_path, as_str, plot, shape, name, expected):
+    for batch, files in expected.items():
+        out_dir = tmp_path / f"batch{batch}"
+        out_dir.mkdir()
+        data = np.ones((batch, *shape), dtype=np.float32)
+        save_path = out_dir / name
+        out = plot(data, data, save_path=str(save_path) if as_str else save_path)
+        written = sorted(
+            f.relative_to(out_dir).as_posix() for f in out_dir.rglob("*.*")
+        )
+        assert written == files
+        assert out == out_dir / files[-1]
+
+
+@pytest.mark.unit
 def test_plot_relevance_tf_rejects_non_4d(tmp_path):
     bad = np.zeros((1, 1, 10), dtype=np.float32)
     assert plot_relevance_tf(bad, bad, save_path=tmp_path / "x.png") is None

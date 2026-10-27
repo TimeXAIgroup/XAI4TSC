@@ -16,8 +16,7 @@ has historically produced inconsistent results, so this module standardises on
 from abc import ABC, abstractmethod
 
 import torch
-from scipy.signal.windows import boxcar, tukey
-from torch.signal.windows import hann
+from scipy.signal import get_window
 
 
 def _get_window(
@@ -31,7 +30,8 @@ def _get_window(
     Parameters
     ----------
     window : str
-        Window name: ``"hann"``, ``"boxcar"``/``"rectangle"``, or ``"tukey"``.
+        Any window name :func:`scipy.signal.get_window` accepts, e.g. ``"hann"``,
+        ``"boxcar"`` or ``"tukey"``. The window is symmetric (``fftbins=False``).
     win_length : int
         Length of the window in samples.
     device : str or torch.device
@@ -44,19 +44,11 @@ def _get_window(
 
     Raises
     ------
-    NotImplementedError
-        If *window* is not a supported window name.
+    ValueError
+        If scipy does not know *window*.
     """
-    if window == "hann":
-        win = hann(win_length)
-    elif window in ("boxcar", "rectangle"):
-        win = torch.tensor(boxcar(win_length))
-    elif window == "tukey":
-        win = torch.tensor(tukey(win_length))
-    else:
-        raise NotImplementedError(f"Window {window} not supported.")
-
-    return win.to(device).to(torch.float32)
+    win = get_window(window, win_length, fftbins=False)
+    return torch.as_tensor(win, dtype=torch.float32, device=device)
 
 
 class DomainTransform(ABC):
@@ -81,17 +73,9 @@ class FourierTransform(DomainTransform):
     """
     Discrete Fourier transform and its inverse.
 
-    Wraps :func:`torch.fft.fft` / :func:`torch.fft.ifft` (full complex FFT).
-
-    Parameters
-    ----------
-    n : int, optional
-        Signal length passed to the underlying FFT (``None`` uses the input
-        length).
+    Wraps :func:`torch.fft.fft` / :func:`torch.fft.ifft` (full complex FFT) on
+    the last axis.
     """
-
-    def __init__(self, n: int | None = None) -> None:
-        self.n = n
 
     def forward(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
         """
@@ -101,28 +85,20 @@ class FourierTransform(DomainTransform):
         ----------
         x : torch.Tensor
             Input of shape ``(B, ..., T)`` where ``B`` is the batch dimension.
-            Higher-dimensional inputs are flattened so every series is
-            transformed independently.
+            Every series along the last axis is transformed independently.
         **kwargs : object
             Extra keyword arguments forwarded to :func:`torch.fft.fft`.
 
         Returns
         -------
         torch.Tensor
-            Complex frequencies of shape ``(B, -1, n_freq)``.
+            Complex frequencies of shape ``(B, ..., T)``.
         """
         if x.dim() <= 1:
             raise ValueError(
                 f"Input signals must have dimension 2 or higher, got {x.dim()}."
             )
-
-        batch_size = x.shape[0]
-        timeseries_len = x.shape[-1]
-        x = x.reshape(-1, timeseries_len)
-
-        frequencies = torch.fft.fft(x, **kwargs)
-
-        return frequencies.reshape(batch_size, -1, frequencies.shape[-1])
+        return torch.fft.fft(x, dim=-1, **kwargs)
 
     def inverse(self, x: torch.Tensor, **kwargs: object) -> torch.Tensor:
         """
@@ -131,28 +107,21 @@ class FourierTransform(DomainTransform):
         Parameters
         ----------
         x : torch.Tensor
-            Frequencies of shape ``(B, ..., n_freq)``. Higher-dimensional inputs
-            are flattened so every spectrum is transformed independently.
+            Frequencies of shape ``(B, ..., n_freq)``. Every spectrum along the
+            last axis is transformed independently.
         **kwargs : object
             Extra keyword arguments forwarded to :func:`torch.fft.ifft`.
 
         Returns
         -------
         torch.Tensor
-            Reconstructed signals of shape ``(B, -1, T)``.
+            Reconstructed signals of shape ``(B, ..., T)``.
         """
         if x.dim() <= 1:
             raise ValueError(
                 f"Input frequencies must have dimension 2 or higher, got {x.dim()}."
             )
-
-        batch_size = x.shape[0]
-        num_frequencies = x.shape[-1]
-        x = x.reshape(-1, num_frequencies)
-
-        signals = torch.fft.ifft(x, **kwargs)
-
-        return signals.reshape(batch_size, -1, signals.shape[-1])
+        return torch.fft.ifft(x, dim=-1, **kwargs)
 
 
 class RFFTransform(DomainTransform):
@@ -184,27 +153,21 @@ class RFFTransform(DomainTransform):
         ----------
         x : torch.Tensor
             Input of shape ``(B, ..., T)``. Records ``T`` as the inverse length.
+            Every series along the last axis is transformed independently.
         **kwargs : object
             Extra keyword arguments forwarded to :func:`torch.fft.rfft`.
 
         Returns
         -------
         torch.Tensor
-            Complex coefficients of shape ``(B, -1, T // 2 + 1)``.
+            Complex coefficients of shape ``(B, ..., T // 2 + 1)``.
         """
         if x.dim() <= 1:
             raise ValueError(
                 f"Input signals must have dimension 2 or higher, got {x.dim()}."
             )
-
-        batch_size = x.shape[0]
-        timeseries_len = x.shape[-1]
-        self.n = timeseries_len
-        x = x.reshape(-1, timeseries_len)
-
-        frequencies = torch.fft.rfft(x, **kwargs)
-
-        return frequencies.reshape(batch_size, -1, frequencies.shape[-1])
+        self.n = x.shape[-1]
+        return torch.fft.rfft(x, dim=-1, **kwargs)
 
     def inverse(
         self, x: torch.Tensor, length: int | None = None, **kwargs: object
@@ -225,21 +188,14 @@ class RFFTransform(DomainTransform):
         Returns
         -------
         torch.Tensor
-            Real signals of shape ``(B, -1, length)``.
+            Real signals of shape ``(B, ..., length)``.
         """
         if x.dim() <= 1:
             raise ValueError(
                 f"Input frequencies must have dimension 2 or higher, got {x.dim()}."
             )
-
         n = length if length is not None else self.n
-        batch_size = x.shape[0]
-        num_frequencies = x.shape[-1]
-        x = x.reshape(-1, num_frequencies)
-
-        signals = torch.fft.irfft(x, n=n, **kwargs)
-
-        return signals.reshape(batch_size, -1, signals.shape[-1])
+        return torch.fft.irfft(x, n=n, dim=-1, **kwargs)
 
 
 class STFTransform(DomainTransform):
@@ -258,7 +214,8 @@ class STFTransform(DomainTransform):
         Distance between neighbouring sliding window frames. Defaults to
         ``floor(win_length / 2)``.
     window : str
-        Window function name (see :func:`_get_window`). Default ``"hann"``.
+        Any :func:`scipy.signal.get_window` name, built symmetric (see
+        :func:`_get_window`). Default ``"hann"``.
     """
 
     def __init__(

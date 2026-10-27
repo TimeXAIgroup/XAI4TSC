@@ -75,6 +75,19 @@ def test_stft_default_hop_length():
 
 
 @pytest.mark.unit
+def test_stft_takes_any_scipy_window_symmetric():
+    from scipy.signal import get_window
+
+    st = STFTransform(n_fft=16, win_length=16, hop_length=4, window="blackman")
+    expected = get_window("blackman", 16, fftbins=False)
+    assert st.window.dtype == torch.float32
+    assert np.allclose(st.window.numpy(), expected)
+    x = torch.randn(3, 1, 64)
+    recon = st.inverse(st.forward(x))
+    assert torch.allclose(recon, x, atol=1e-4)
+
+
+@pytest.mark.unit
 def test_stft_rejects_2d():
     with pytest.raises(ValueError, match="dimension 3 or higher"):
         STFTransform(n_fft=16, win_length=16).inverse(torch.randn(4, 16))

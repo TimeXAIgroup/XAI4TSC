@@ -594,6 +594,7 @@ class ModelBase(nn.Module, ABC):
         batchsize: int = 8,
         learn_rate: float = 1e-3,
         patience: int = 3,
+        min_delta: float = 5e-3,
         save_best: bool = True,
         loss_func: nn.Module | None = None,
         optimizer: Callable[..., Optimizer] | Optimizer | None = None,
@@ -625,6 +626,10 @@ class ModelBase(nn.Module, ABC):
             Optimizer learning rate, ``1e-3`` by default.
         patience : int
             Epochs without improvement before early stopping, 3 by default.
+        min_delta : float
+            How far the monitored loss has to fall below its best value to count
+            as an improvement, ``5e-3`` by default. An absolute difference, not a
+            fraction of the loss.
         save_best : bool
             Whether to write a checkpoint whenever the monitored loss improves,
             ``True`` by default.
@@ -703,7 +708,6 @@ class ModelBase(nn.Module, ABC):
         best_loss = 1e6
         best_path = None
         cur_patience = 0
-        p_tol = 5e-3
         epoch_losses = []
         epoch_accs = []
         epoch = start_epoch - 1
@@ -757,8 +761,10 @@ class ModelBase(nn.Module, ABC):
                     epoch_acc,
                 )
 
-            if monitor_loss < (best_loss - p_tol):
+            if monitor_loss < (best_loss - min_delta):
                 cur_patience = 0
+                # Tracked whatever save_best says: patience counts from it.
+                best_loss = monitor_loss
                 if save_best:
                     if best_path is not None:
                         best_path.unlink()
@@ -766,17 +772,16 @@ class ModelBase(nn.Module, ABC):
                         # otherwise stale configs accumulate in the directory.
                         self.config_path_for(best_path).unlink(missing_ok=True)
                     best_path = self.save_path / f"{self.name}_epoch_{epoch + 1}.pt"
-                    best_loss = monitor_loss
                     self.best_epoch = epoch + 1
                     self.save_model(best_path)
             else:
                 cur_patience += 1
                 if cur_patience == patience:
                     logger.info(
-                        "Early stopping at epoch %d (patience=%d, tol=%.4f)",
+                        "Early stopping at epoch %d (patience=%d, min_delta=%.4g)",
                         epoch + 1,
                         patience,
-                        p_tol,
+                        min_delta,
                     )
                     break
 

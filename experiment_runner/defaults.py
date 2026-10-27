@@ -52,6 +52,7 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     ("train_config", "hyperparams.batchsize"): (ModelBase.train_model, "batchsize"),
     ("train_config", "hyperparams.learn_rate"): (ModelBase.train_model, "learn_rate"),
     ("train_config", "hyperparams.patience"): (ModelBase.train_model, "patience"),
+    ("train_config", "hyperparams.min_delta"): (ModelBase.train_model, "min_delta"),
     ("train_config", "hyperparams.save_best"): (ModelBase.train_model, "save_best"),
     ("explanation_config", "target"): (generate_explanation, "targets"),
     ("explanation_config", "threshold"): (generate_explanation, "threshold"),

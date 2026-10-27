@@ -49,6 +49,48 @@ def test_target_tensor_dtype_follows_the_rank():
     assert _target_tensor(np.array([[0, 1], [1, 0]])).dtype == torch.float32
 
 
+# ── early stopping ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("save_best", [True, False])
+def test_early_stopping_does_not_depend_on_save_best(tmp_path, caplog, save_best):
+    # A zero learning rate keeps the loss flat: epoch 1 improves on the start
+    # value, the next `patience` epochs do not. Once, best_loss was only updated
+    # when save_best was set, so without it every epoch counted as improving.
+    data, labels = _batch()
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        _model(tmp_path).train_model(
+            data,
+            labels,
+            epochs=12,
+            batchsize=8,
+            patience=3,
+            learn_rate=0.0,
+            save_best=save_best,
+        )
+    assert "Early stopping at epoch 4" in caplog.text
+
+
+@pytest.mark.unit
+def test_min_delta_decides_what_counts_as_an_improvement(tmp_path, caplog):
+    # The best loss starts at 1e6, so a min_delta that large makes even the first
+    # epoch no improvement and training stops one epoch before the default does.
+    data, labels = _batch()
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        _model(tmp_path).train_model(
+            data,
+            labels,
+            epochs=12,
+            batchsize=8,
+            patience=3,
+            learn_rate=0.0,
+            min_delta=1e6,
+            save_best=False,
+        )
+    assert "Early stopping at epoch 3 (patience=3, min_delta=1e+06)" in caplog.text
+
+
 # ── the loss: default, object, and the two compatibility layers ───────────────
 
 

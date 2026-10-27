@@ -288,17 +288,24 @@ def load_model(
     ValueError
         If no class can be resolved for a supplied checkpoint, or if neither a
         checkpoint path nor a registered ``model`` name is given.  The message
-        names whichever of the two is missing.
+        names whichever of the two is missing.  Also raised for a checkpoint that
+        is not a ``.pt`` file.
+    pickle.UnpicklingError
+        If the checkpoint holds anything but tensors and plain containers.
+        Weights are loaded with ``weights_only=True``, so a checkpoint cannot run
+        code on load.
     """
     model = None
     if "model_ckpt_path" in model_config:
         # A checkpoint is supplied
         path = Path(model_config["model_ckpt_path"]).absolute()
         format = path.suffix
-        if format == ".h5":
-            # TODO implement
-            logger.info("Model datatype not implemented, please use .pt")
-        elif format == ".pt":
+        if format != ".pt":
+            raise ValueError(
+                f"Unsupported checkpoint format '{format}' for '{path}': only .pt "
+                "checkpoints can be loaded."
+            )
+        else:
             if not path.is_file():
                 siblings = (
                     sorted(f.name for f in path.parent.glob("*.pt"))
@@ -338,7 +345,7 @@ def load_model(
             # save_model(), or a bare state dict as written by
             # ModelBase.save_model() - the form every <Model>_epoch_<N>.pt
             # written during training takes.
-            model_ckpt = torch.load(path, map_location=device, weights_only=False)
+            model_ckpt = torch.load(path, map_location=device, weights_only=True)
             wrapped = isinstance(model_ckpt, dict) and "model_state_dict" in model_ckpt
             state_dict = model_ckpt["model_state_dict"] if wrapped else model_ckpt
             ckpt_class = (
@@ -414,9 +421,6 @@ def load_model(
                     "and no 'class_name'/'class_path' was supplied. "
                     f"Registered models: {sorted(MODELS)}."
                 )
-        elif format == ".ckpt":
-            # TODO implement
-            logger.info("Model datatype not implemented, please use .pt")
     elif model_config["model"].lower() in MODELS:
         model_class = MODELS[model_config["model"].lower()]
         model_params = model_config.get("init_params")

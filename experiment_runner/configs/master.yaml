@@ -221,7 +221,9 @@ train_config:
       optimizer_params: {}  # constructor arguments beyond the learning rate, e.g.
                             #   {momentum: 0.9, nesterov: true} for sgd
       learn_rate: 0.001     # optimizer learning rate
-      patience: 3           # epochs without a >0.005 improvement before early stopping
+      patience: 3           # epochs without an improvement before early stopping
+      min_delta: 0.005      # how far the monitored loss must fall below its best value
+                            #   to count as an improvement (absolute, not relative)
       save_best: true       # true = keep the best epoch by validation loss (training loss
                             #   when there is no val split); false = keep the final epoch
     train: true             # switch: true trains, false (or omitting the key) does not.

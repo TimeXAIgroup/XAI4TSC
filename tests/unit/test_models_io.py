@@ -1,6 +1,7 @@
 """Unit tests for model persistence/registry — light torch use, no training."""
 
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -670,23 +671,24 @@ def test_wagner_models_save_then_load_round_trip(tmp_path, config):
 
 
 @pytest.mark.unit
-def test_load_model_h5_returns_none_with_info(tmp_path, caplog):
-    ckpt = tmp_path / "model.h5"
+@pytest.mark.parametrize("suffix", [".h5", ".ckpt"])
+def test_load_model_rejects_a_non_pt_checkpoint(tmp_path, suffix):
+    ckpt = tmp_path / f"model{suffix}"
     ckpt.write_bytes(b"not a real checkpoint")
-    with caplog.at_level("INFO", logger="xai4tsc.models.models"):
-        model = load_model({"model": "x", "model_ckpt_path": str(ckpt)})
-    assert model is None
-    assert "not implemented" in caplog.text.lower()
+    with pytest.raises(ValueError, match=r"only \.pt"):
+        load_model({"model": "x", "model_ckpt_path": str(ckpt)})
+
+
+class _Payload:
+    """Stands in for any object a malicious checkpoint could pickle."""
 
 
 @pytest.mark.unit
-def test_load_model_ckpt_returns_none_with_info(tmp_path, caplog):
-    ckpt = tmp_path / "model.ckpt"
-    ckpt.write_bytes(b"not a real checkpoint")
-    with caplog.at_level("INFO", logger="xai4tsc.models.models"):
-        model = load_model({"model": "x", "model_ckpt_path": str(ckpt)})
-    assert model is None
-    assert "not implemented" in caplog.text.lower()
+def test_load_model_refuses_a_checkpoint_holding_a_pickled_object(tmp_path):
+    ckpt = tmp_path / "FCN_epoch_1.pt"
+    torch.save({"model_state_dict": {}, "payload": _Payload()}, ckpt)
+    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
+        load_model({**_TINY_FCN, "model_ckpt_path": str(ckpt)})
 
 
 # ── load_model: bare state-dict checkpoints (R22) ─────────────────────────────

@@ -93,7 +93,8 @@ def load_json(path: Path) -> tuple:
     ValueError
         If no ``"label"`` key is found.
     """
-    loaded = pd.read_json(path, orient="records")
+    # pd.read_json would infer dtypes and turn the label "01" into the int 1.
+    loaded = pd.DataFrame.from_records(json.loads(Path(path).read_text()))
     metadata = pd.DataFrame()
     labels = None
 

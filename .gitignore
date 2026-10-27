@@ -12,6 +12,7 @@ docs/agents
 /docs/adr/
 /GLOSSARY.md
 /migration/
+/sandbox/
 
 # tests
 tests/_runner*

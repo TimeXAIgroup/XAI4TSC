@@ -235,6 +235,24 @@ def test_save_load_round_trip(tmp_path):
 
 
 @pytest.mark.unit
+def test_string_labels_keep_their_identity_through_the_split_cache(tmp_path):
+    # pd.read_json once read "01" back as 1, so a cache hit had other classes.
+    data, ints = _make_data(50)
+    labels = np.array(["01", "02"])[ints]
+    ds = _Dummy(data, labels)
+    _, encoder = ds.split(
+        train_split=0.8, val_split=0.0, random_state=42, encoder=LabelEncoder()
+    )
+    ds.save_splits(tmp_path)
+
+    _, cached = _Dummy(data, labels).load_saved_splits(
+        tmp_path / "splits", encoder=LabelEncoder()
+    )
+
+    assert list(cached.classes_) == list(encoder.classes_) == ["01", "02"]
+
+
+@pytest.mark.unit
 def test_save_splits_before_split_raises(tmp_path):
     data, labels = _make_data(50)
     ds = _Dummy(data, labels)

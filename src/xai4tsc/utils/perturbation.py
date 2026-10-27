@@ -106,7 +106,7 @@ def baseline_replacement(
     return out
 
 
-def resolve_perturb_func(value: str | Callable) -> Callable | None:
+def resolve_perturb_func(value: str | Callable) -> Callable:
     """
     Resolve *value* to a perturbation callable.
 
@@ -123,8 +123,14 @@ def resolve_perturb_func(value: str | Callable) -> Callable | None:
 
     Returns
     -------
-    callable or None
-        The resolved callable, or ``None`` if a string could not be resolved.
+    callable
+        The resolved callable.
+
+    Raises
+    ------
+    ValueError
+        If a string resolves to nothing. Falling back to a default would run a
+        different perturbation than the one configured.
     """
     if callable(value):
         return value
@@ -147,5 +153,7 @@ def resolve_perturb_func(value: str | Callable) -> Callable | None:
                 return candidate
         except (ImportError, AttributeError):
             pass
-    logger.warning("Could not resolve perturb_func '%s'.", value)
-    return None
+    raise ValueError(
+        f"Could not resolve perturb_func {value!r}: it is not a baseline name "
+        f"({sorted(BASELINES)}), a quantus function, or a dotted path to a callable."
+    )

@@ -303,14 +303,7 @@ class TSHAPExplainer(PerturbationExplainer):
         if perturb_func is None:
             self._perturb_func: Callable = baseline_replacement
         else:
-            resolved = resolve_perturb_func(perturb_func)
-            if resolved is None:
-                logger.warning(
-                    "Could not resolve perturb_func %r; using baseline_replacement.",
-                    perturb_func,
-                )
-                resolved = baseline_replacement
-            self._perturb_func = resolved
+            self._perturb_func = resolve_perturb_func(perturb_func)
         self._is_baseline_func = self._perturb_func is baseline_replacement
 
     # ── public API ───────────────────────────────────────────────────────────

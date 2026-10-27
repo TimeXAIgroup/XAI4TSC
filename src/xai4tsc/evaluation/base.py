@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 
 from ..models.base import predict_probs
-from ..utils.perturbation import resolve_perturb_func
+from ..utils.perturbation import BASELINES, resolve_perturb_func
 from ..utils.utils import dict_to_args
 from ..xai._types import DataType, Domain
 
@@ -60,9 +60,8 @@ eval_metric_defaults = {
     },
 }
 
-# Callable-typed params that may also be given as a string name.
-# A string value is resolved via _resolve_callable_perturb_func and dropped
-# (with a warning) if unresolvable so the metric uses its own default.
+# Callable-typed params that may also be given as a string name, resolved via
+# _resolve_callable_perturb_func; an unresolvable one raises.
 # TODO: extend resolution to other callable params once a canonical resolution
 #       strategy and signature tests are in place:
 #       similarity_func, norm_numerator, norm_denominator, aggregate_func,
@@ -71,25 +70,38 @@ eval_metric_defaults = {
 _RESOLVABLE_CALLABLE_PARAMS: frozenset[str] = frozenset({"perturb_func"})
 
 
-def _resolve_callable_perturb_func(value: str) -> Callable | None:
+def _resolve_callable_perturb_func(value: str) -> Callable:
     """
-    Resolve a string name to a perturbation callable.
+    Resolve a string name to a Quantus perturbation callable.
 
     Thin wrapper over :func:`xai4tsc.utils.perturbation.resolve_perturb_func`
-    (the single, shared resolver): a built-in baseline name, the top-level
-    ``quantus`` namespace, then a dotted import path (e.g. ``"mymodule.fn"``).
-    Returns ``None`` if unresolvable so the caller can drop the param and let
-    the metric use its own default.
+    (the single, shared resolver): the top-level ``quantus`` namespace, then a
+    dotted import path (e.g. ``"mymodule.fn"``). Baseline names are refused:
+    they resolve to TSHAP's :func:`~xai4tsc.utils.perturbation.baseline_replacement`,
+    which takes one ``(C, T)`` series and time indices, while Quantus calls a
+    ``perturb_func`` with ``(B, C*T)`` rows and passes the baseline separately.
 
     Parameters
     ----------
     value : str
-        Baseline name, function name, or dotted import path.
+        Function name or dotted import path.
 
     Returns
     -------
-    callable or None
+    callable
+
+    Raises
+    ------
+    ValueError
+        If *value* is a baseline name or resolves to nothing.
     """
+    if value in BASELINES:
+        raise ValueError(
+            f"perturb_func {value!r} is a TSHAP baseline name, not a Quantus "
+            "perturbation function. For a Quantus metric write "
+            "perturb_func: baseline_replacement_by_indices with "
+            f"perturb_baseline: {value}."
+        )
     return resolve_perturb_func(value)
 
 
@@ -128,9 +140,6 @@ def _resolve_string_callables(params: dict, class_name: str) -> dict:
     """
     Replace string values for callable params with resolved callables.
 
-    Unresolvable strings are dropped and a warning is logged so the metric
-    falls back to its own default.
-
     Parameters
     ----------
     params : dict
@@ -141,22 +150,20 @@ def _resolve_string_callables(params: dict, class_name: str) -> dict:
     Returns
     -------
     dict
-        Copy of *params* with strings resolved (or dropped).
+        Copy of *params* with strings resolved.
+
+    Raises
+    ------
+    ValueError
+        If a string cannot be resolved; the message names *class_name*.
     """
     result = {}
     for k, v in params.items():
         if k in _RESOLVABLE_CALLABLE_PARAMS and isinstance(v, str):
-            resolved = _resolve_callable_perturb_func(v)
-            if resolved is not None:
-                result[k] = resolved
-            else:
-                logger.warning(
-                    "Could not resolve '%s' for param '%s' of %s — param "
-                    "dropped, metric uses its own default.",
-                    v,
-                    k,
-                    class_name,
-                )
+            try:
+                result[k] = _resolve_callable_perturb_func(v)
+            except ValueError as exc:
+                raise ValueError(f"{class_name}: {exc}") from exc
         else:
             result[k] = v
     return result

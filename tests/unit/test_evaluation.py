@@ -104,9 +104,19 @@ def test_resolve_perturb_func_from_dotted_path():
 
 
 @pytest.mark.unit
-def test_resolve_perturb_func_unresolvable_returns_none():
-    assert _resolve_callable_perturb_func("no_such_module.no_such_func") is None
-    assert _resolve_callable_perturb_func("definitely_not_a_function") is None
+def test_resolve_perturb_func_unresolvable_raises():
+    for name in ("no_such_module.no_such_func", "definitely_not_a_function"):
+        with pytest.raises(ValueError, match="Could not resolve"):
+            _resolve_callable_perturb_func(name)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["black", "white", "mean", "centroid", "random"])
+def test_a_baseline_name_is_not_a_quantus_perturb_func(name):
+    # These resolve to TSHAP's (C, T) baseline_replacement, which Quantus would
+    # call with (B, C*T) rows; the message says what to write instead.
+    with pytest.raises(ValueError, match=f"perturb_baseline: {name}"):
+        _resolve_callable_perturb_func(name)
 
 
 # ── _resolve_string_callables ─────────────────────────────────────────────────
@@ -119,11 +129,11 @@ def test_resolve_string_callables_replaces_resolvable_string():
 
 
 @pytest.mark.unit
-def test_resolve_string_callables_drops_unresolvable_and_warns(caplog):
-    with caplog.at_level("WARNING"):
-        out = _resolve_string_callables({"perturb_func": "garbage"}, "AnyMetric")
-    assert "perturb_func" not in out  # dropped so metric uses its own default
-    assert "garbage" in caplog.text
+def test_resolve_string_callables_raises_on_unresolvable():
+    with pytest.raises(
+        ValueError, match="AnyMetric: Could not resolve perturb_func 'garbage'"
+    ):
+        _resolve_string_callables({"perturb_func": "garbage"}, "AnyMetric")
 
 
 @pytest.mark.unit

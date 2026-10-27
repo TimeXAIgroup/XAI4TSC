@@ -118,7 +118,8 @@ def test_resolve_perturb_func():
 
     assert resolve_perturb_func(custom) is custom
     assert resolve_perturb_func("mean") is baseline_replacement
-    assert resolve_perturb_func("definitely_not_resolvable") is None
+    with pytest.raises(ValueError, match="definitely_not_resolvable"):
+        resolve_perturb_func("definitely_not_resolvable")
 
 
 # ── Shapley correctness ───────────────────────────────────────────────────────

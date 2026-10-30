@@ -11,7 +11,8 @@ spectra it is the frequency domain, and these metrics apply there instead. Quant
 itself draws no such distinction - every metric inherits one ``__call__`` that
 asserts the attribution and the input correspond - so it is recorded here.
 
-The four groups are disjoint and cover every key of ``QUANTUS_METRICS``:
+The tables here are keyed by the Quantus metric class. The four groups are disjoint
+and cover every class in ``QUANTUS_METRICS``:
 
 =======================  ===========================  ===  ===========================
 group                    its own code reads           n    explanation domain
@@ -39,6 +40,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+import quantus as q
+
 
 class QuantusGroup(Enum):
     """Which inputs a Quantus metric's own code reads; see the module docstring."""
@@ -56,50 +59,50 @@ class QuantusGroup(Enum):
     """Re-explains perturbed or randomised inputs via ``explain_func``."""
 
 
-QUANTUS_GROUPS: dict[str, QuantusGroup] = {
+QUANTUS_GROUPS: dict[type[q.Metric], QuantusGroup] = {
     # Attribution-only: domain-agnostic.
-    "Complexity": QuantusGroup.ATTRIBUTION_ONLY,
-    "Effective Complexity": QuantusGroup.ATTRIBUTION_ONLY,
-    "Sparseness": QuantusGroup.ATTRIBUTION_ONLY,
+    q.Complexity: QuantusGroup.ATTRIBUTION_ONLY,
+    q.EffectiveComplexity: QuantusGroup.ATTRIBUTION_ONLY,
+    q.Sparseness: QuantusGroup.ATTRIBUTION_ONLY,
     # Model perturbation.
-    "Completeness": QuantusGroup.MODEL_PERTURBATION,
-    "Consistency": QuantusGroup.MODEL_PERTURBATION,
-    "Faithfulness Correlation": QuantusGroup.MODEL_PERTURBATION,
-    "Faithfulness Estimate": QuantusGroup.MODEL_PERTURBATION,
-    "Focus": QuantusGroup.MODEL_PERTURBATION,
-    "IROF": QuantusGroup.MODEL_PERTURBATION,
-    "Infidelity": QuantusGroup.MODEL_PERTURBATION,
-    "Monotonicity-Arya": QuantusGroup.MODEL_PERTURBATION,
-    "Monotonicity-Nguyen": QuantusGroup.MODEL_PERTURBATION,
-    "NonSensitivity": QuantusGroup.MODEL_PERTURBATION,
-    "Pixel-Flipping": QuantusGroup.MODEL_PERTURBATION,
-    "ROAD": QuantusGroup.MODEL_PERTURBATION,
-    "Region Segmentation": QuantusGroup.MODEL_PERTURBATION,
-    "Selectivity": QuantusGroup.MODEL_PERTURBATION,
-    "SensitivityN": QuantusGroup.MODEL_PERTURBATION,
-    "Sufficiency": QuantusGroup.MODEL_PERTURBATION,
+    q.Completeness: QuantusGroup.MODEL_PERTURBATION,
+    q.Consistency: QuantusGroup.MODEL_PERTURBATION,
+    q.FaithfulnessCorrelation: QuantusGroup.MODEL_PERTURBATION,
+    q.FaithfulnessEstimate: QuantusGroup.MODEL_PERTURBATION,
+    q.Focus: QuantusGroup.MODEL_PERTURBATION,
+    q.IROF: QuantusGroup.MODEL_PERTURBATION,
+    q.Infidelity: QuantusGroup.MODEL_PERTURBATION,
+    q.Monotonicity: QuantusGroup.MODEL_PERTURBATION,
+    q.MonotonicityCorrelation: QuantusGroup.MODEL_PERTURBATION,
+    q.NonSensitivity: QuantusGroup.MODEL_PERTURBATION,
+    q.PixelFlipping: QuantusGroup.MODEL_PERTURBATION,
+    q.ROAD: QuantusGroup.MODEL_PERTURBATION,
+    q.RegionPerturbation: QuantusGroup.MODEL_PERTURBATION,
+    q.Selectivity: QuantusGroup.MODEL_PERTURBATION,
+    q.SensitivityN: QuantusGroup.MODEL_PERTURBATION,
+    q.Sufficiency: QuantusGroup.MODEL_PERTURBATION,
     # Localisation: needs ground-truth masks.
-    "AUC": QuantusGroup.LOCALISATION,
-    "Attribution Localisation": QuantusGroup.LOCALISATION,
-    "Pointing Game": QuantusGroup.LOCALISATION,
-    "Relevance Mass Accuracy": QuantusGroup.LOCALISATION,
-    "Relevance Rank Accuracy": QuantusGroup.LOCALISATION,
-    "Top-K Intersection": QuantusGroup.LOCALISATION,
+    q.AUC: QuantusGroup.LOCALISATION,
+    q.AttributionLocalisation: QuantusGroup.LOCALISATION,
+    q.PointingGame: QuantusGroup.LOCALISATION,
+    q.RelevanceMassAccuracy: QuantusGroup.LOCALISATION,
+    q.RelevanceRankAccuracy: QuantusGroup.LOCALISATION,
+    q.TopKIntersection: QuantusGroup.LOCALISATION,
     # Re-explain: needs an explain_func.
-    "Avg-Sensitivity": QuantusGroup.RE_EXPLAIN,
-    "Continuity Test": QuantusGroup.RE_EXPLAIN,
-    "Efficient MPRT": QuantusGroup.RE_EXPLAIN,
-    "InputInvariance": QuantusGroup.RE_EXPLAIN,
-    "Local Lipschitz Estimate": QuantusGroup.RE_EXPLAIN,
-    "MPRT": QuantusGroup.RE_EXPLAIN,
-    "Max-Sensitivity": QuantusGroup.RE_EXPLAIN,
-    "Random Logit": QuantusGroup.RE_EXPLAIN,
-    "Relative Input Stability": QuantusGroup.RE_EXPLAIN,
-    "Relative Output Stability": QuantusGroup.RE_EXPLAIN,
-    "Relative Representation Stability": QuantusGroup.RE_EXPLAIN,
-    "Smooth MPRT": QuantusGroup.RE_EXPLAIN,
+    q.AvgSensitivity: QuantusGroup.RE_EXPLAIN,
+    q.Continuity: QuantusGroup.RE_EXPLAIN,
+    q.EfficientMPRT: QuantusGroup.RE_EXPLAIN,
+    q.InputInvariance: QuantusGroup.RE_EXPLAIN,
+    q.LocalLipschitzEstimate: QuantusGroup.RE_EXPLAIN,
+    q.MPRT: QuantusGroup.RE_EXPLAIN,
+    q.MaxSensitivity: QuantusGroup.RE_EXPLAIN,
+    q.RandomLogit: QuantusGroup.RE_EXPLAIN,
+    q.RelativeInputStability: QuantusGroup.RE_EXPLAIN,
+    q.RelativeOutputStability: QuantusGroup.RE_EXPLAIN,
+    q.RelativeRepresentationStability: QuantusGroup.RE_EXPLAIN,
+    q.SmoothMPRT: QuantusGroup.RE_EXPLAIN,
 }
-"""Group of every metric in ``QUANTUS_METRICS``, keyed by the same display name."""
+"""Group of every metric class in ``QUANTUS_METRICS``."""
 
 
 _NATIVE_DOMAIN_GROUPS = frozenset(
@@ -112,56 +115,56 @@ _NATIVE_DOMAIN_GROUPS = frozenset(
 """Groups whose metrics need the explanation in the model-native domain."""
 
 
-def quantus_requires_native_domain(name: str) -> bool:
+def quantus_requires_native_domain(quantus_class: type[q.Metric]) -> bool:
     """
-    Return whether the named Quantus metric needs the model-native domain.
+    Return whether a Quantus metric class needs the model-native domain.
 
     Parameters
     ----------
-    name : str
-        A key of ``QUANTUS_METRICS`` (the metric's display name).
+    quantus_class : type[quantus.Metric]
+        The Quantus metric class, e.g. ``quantus.PixelFlipping``.
 
     Returns
     -------
     bool
         ``True`` if the explanation must be in the same domain as the model's
         inputs, ``False`` if the metric applies in any domain. An unclassified
-        name is treated as needing the native domain, the conservative choice.
+        class is treated as needing the native domain, the conservative choice.
     """
-    group = QUANTUS_GROUPS.get(name)
+    group = QUANTUS_GROUPS.get(quantus_class)
     if group is None:
         return True
     return group in _NATIVE_DOMAIN_GROUPS
 
 
-def quantus_requires_explain_func(name: str) -> bool:
+def quantus_requires_explain_func(quantus_class: type[q.Metric]) -> bool:
     """
-    Return whether the named Quantus metric re-explains and so needs an explain func.
+    Return whether a Quantus metric class re-explains and so needs an explain func.
 
     Parameters
     ----------
-    name : str
-        A key of ``QUANTUS_METRICS`` (the metric's display name).
+    quantus_class : type[quantus.Metric]
+        The Quantus metric class, e.g. ``quantus.PixelFlipping``.
 
     Returns
     -------
     bool
-        ``True`` for the ``RE_EXPLAIN`` group only. An unclassified name is treated
+        ``True`` for the ``RE_EXPLAIN`` group only. An unclassified class is treated
         as not requiring one: supplying the callable to a metric that ignores it is
         harmless, whereas demanding one that is never used would refuse a metric
         that works.
     """
-    return QUANTUS_GROUPS.get(name) is QuantusGroup.RE_EXPLAIN
+    return QUANTUS_GROUPS.get(quantus_class) is QuantusGroup.RE_EXPLAIN
 
 
-def quantus_requires_s_batch(name: str) -> bool:
+def quantus_requires_s_batch(quantus_class: type[q.Metric]) -> bool:
     """
-    Return whether the named Quantus metric scores against ground-truth masks.
+    Return whether a Quantus metric class scores against ground-truth masks.
 
     Parameters
     ----------
-    name : str
-        A key of ``QUANTUS_METRICS`` (the metric's display name).
+    quantus_class : type[quantus.Metric]
+        The Quantus metric class, e.g. ``quantus.PixelFlipping``.
 
     Returns
     -------
@@ -171,36 +174,36 @@ def quantus_requires_s_batch(name: str) -> bool:
         they are unusable without one — unlike the other groups, which need
         nothing but the model and the attribution.
     """
-    return QUANTUS_GROUPS.get(name) is QuantusGroup.LOCALISATION
+    return QUANTUS_GROUPS.get(quantus_class) is QuantusGroup.LOCALISATION
 
 
-BLOCKED_BY_BACKEND: dict[str, str] = {
-    "Continuity Test": (
+BLOCKED_BY_BACKEND: dict[type[q.Metric], str] = {
+    q.Continuity: (
         "it reshapes a (B, C, T) batch to (B, C, 1, T) and feeds that to the model, "
         "which a 1-D convolutional model cannot accept"
     ),
-    "Focus": (
+    q.Focus: (
         "it splits the attribution into four quadrants, which needs a second "
         "spatial axis that a (B, C, T) series does not have"
     ),
-    "IROF": (
+    q.IROF: (
         "it segments the input into super-pixels, which needs a 2-D image "
         "rather than a series"
     ),
-    "Infidelity": (
+    q.Infidelity: (
         "it pads over two spatial axes, so the pad width never matches the "
         "axes of a (B, C, T) series"
     ),
-    "ROAD": (
+    q.ROAD: (
         "its imputation resolves pixel neighbours from a second spatial axis "
         "that a (B, C, T) series does not have"
     ),
-    "Smooth MPRT": (
+    q.SmoothMPRT: (
         "its implementation calls the library's own explain function directly "
         "instead of the one it was given, so it would silently score a vanilla "
         "gradient rather than the explainer under evaluation"
     ),
-    "InputInvariance": (
+    q.InputInvariance: (
         "it reads 'out_channels' off the model's second named module, which is a "
         "container rather than a conv layer in every model shipped here"
     ),
@@ -213,7 +216,7 @@ somewhere inside the library. Refusing them here turns an obscure ``IndexError``
 or shape assertion into a stated reason, and keeps them out of the error column
 where they look like something worth fixing.
 
-``Smooth MPRT`` is the dangerous one and the reason this table is not just about
+``SmoothMPRT`` is the dangerous one and the reason this table is not just about
 shapes: it *returns a number*. It calls the library's own explain function
 instead of the one it is given, so without this entry it would report a
 plausible score for an explainer it never ran.

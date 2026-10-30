@@ -2,15 +2,22 @@
 
 import numpy as np
 import pytest
+import quantus as q
 import torch
 from sklearn.preprocessing import LabelEncoder
 
-import xai4tsc
 from xai4tsc.data.datasets import LocalDataset
-from xai4tsc.evaluation.evaluate import evaluate
+from xai4tsc.evaluation import QuantusEvaluator, evaluate
+from xai4tsc.evaluation.frequency_evaluate import FrequencyEvaluator
+from xai4tsc.evaluation.timefrequency_perturbation import TimeFrequencyEvaluator
 from xai4tsc.models.models import load_model
+from xai4tsc.utils import FourierTransform, STFTransform
 from xai4tsc.xai import is_multi_target
-from xai4tsc.xai.explain import generate_explanation
+from xai4tsc.xai.explain import EXPLAINERS, generate_explanation
+from xai4tsc.xai.feature_attribution import (
+    IntegratedGradientsExplainer,
+    OcclusionExplainer,
+)
 
 
 @pytest.mark.integration
@@ -92,7 +99,7 @@ def test_lstm_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     assert out_classes.shape[0] == len(test_data)
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
@@ -140,7 +147,7 @@ def test_patchtst_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     assert out_classes.shape[0] == len(test_data)
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
@@ -186,7 +193,7 @@ def test_xlstm_trains_predicts_and_is_attributable(split_dataset, tmp_path):
     assert out_classes.shape[0] == len(test_data)
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
@@ -205,7 +212,7 @@ def test_explanation_shape_and_validity(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=trained_model,
         data=test_data,
         labels=test_labels,
@@ -226,7 +233,7 @@ def test_evaluation_returns_score(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=trained_model,
         data=test_data,
         labels=test_labels,
@@ -236,19 +243,19 @@ def test_evaluation_returns_score(trained_model, split_dataset):
     )
 
     score = evaluate(
+        QuantusEvaluator(
+            q.Complexity,
+            normalise=True,
+            abs=True,
+            disable_warnings=True,
+            return_aggregate=True,
+        ),
         model=trained_model,
-        metric="Complexity",
         explanation=exp,
         data=test_data[exp.indices],
         labels=test_labels[exp.indices],
-        metric_class_params={
-            "normalise": True,
-            "abs": True,
-            "disable_warnings": True,
-            "return_aggregate": True,
-        },
-        metric_call_params={"softmax": False},
         device="cpu",
+        call_params={"softmax": False},
     )
 
     assert score is not None
@@ -265,7 +272,7 @@ def test_explanation_target_modes(trained_model, split_dataset, targets):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=trained_model,
         data=test_data,
         labels=test_labels,
@@ -295,7 +302,7 @@ def test_plot_exp_saves_pngs(trained_model, split_dataset, tmp_path, targets):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=trained_model,
         data=test_data,
         labels=test_labels,
@@ -340,7 +347,7 @@ def test_all_explainers_produce_valid_attributions(
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method=method,
+        explainer=EXPLAINERS[method](),
         model=trained_model,
         data=test_data,
         labels=test_labels,
@@ -353,35 +360,49 @@ def test_all_explainers_produce_valid_attributions(
     assert np.all(np.isfinite(exp.exp_values))
 
 
-_STFT = {"name": "stft", "params": {"n_fft": 16, "win_length": 16, "hop_length": 8}}
-_FFT = {"name": "fft", "params": {}}
+def _stft():
+    return STFTransform(n_fft=16, win_length=16, hop_length=8)
+
+
+def _fft():
+    return FourierTransform()
 
 
 _FREQRISE_FFT = {"domain": "fft", "num_batches": 5, "batch_size": 4, "seed": 0}
 # Small STFT grid (n_fft=16 → 9 freq bins), so num_cells must stay small.
-_FREQRISE_STFT = {**_FREQRISE_FFT, "domain": "stft", "transform": _STFT, "num_cells": 4}
+_FREQRISE_STFT = {
+    **_FREQRISE_FFT,
+    "domain": "stft",
+    "transform": _stft(),
+    "num_cells": 4,
+}
 
 
 @pytest.mark.integration
 @pytest.mark.parametrize(
     ("method", "params", "expected_domain", "expected_ndim"),
     [
-        ("freqrise", _FREQRISE_FFT, "Frequency", 3),
-        ("freqrise", _FREQRISE_STFT, "Time-Frequency", 4),
+        ("freqrise", _FREQRISE_FFT, "frequency", 3),
+        ("freqrise", _FREQRISE_STFT, "time_frequency", 4),
         (
             "frequency",
-            {"base": "integrated_gradients", "transform": _FFT},
-            "Frequency",
+            {"transform": _fft()},
+            "frequency",
             3,
         ),
         (
             "timefrequency",
-            {"base": "guided_backpropagation", "transform": _STFT},
-            "Time-Frequency",
+            {"transform": _stft()},
+            "time_frequency",
             4,
         ),
-        ("random_frequency", {"transform": _FFT, "seed": 0}, "Frequency", 3),
-        ("random_timefrequency", {"transform": _STFT, "seed": 0}, "Time-Frequency", 4),
+        ("random_frequency", {"transform": _fft(), "seed": 0}, "frequency", 3),
+        (
+            "random_timefrequency",
+            {"transform": _stft(), "seed": 0},
+            "time_frequency",
+            4,
+        ),
     ],
 )
 def test_freq_explainers_produce_valid_attributions(
@@ -392,12 +413,11 @@ def test_freq_explainers_produce_valid_attributions(
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method=method,
+        explainer=EXPLAINERS[method](**params),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
-        params=params,
         indices=[0, 1],
         device="cpu",
     )
@@ -422,19 +442,19 @@ def test_freq_explainers_produce_valid_attributions(
                 "num_cells": 8,
                 "seed": 0,
             },
-            "Frequency Perturbation",
+            FrequencyEvaluator,
         ),
         # Explanation-space wrapper (complex relevance, reduced at the boundary).
         (
             "frequency",
-            {"base": "integrated_gradients", "transform": _FFT},
-            "Frequency Perturbation",
+            {"transform": _fft()},
+            FrequencyEvaluator,
         ),
         # Time-frequency wrapper → TF metric.
         (
             "timefrequency",
-            {"base": "guided_backpropagation", "transform": _STFT},
-            "Time-Frequency Perturbation",
+            {"transform": _stft()},
+            TimeFrequencyEvaluator,
         ),
     ],
 )
@@ -444,23 +464,21 @@ def test_freq_metric_end_to_end(trained_model, split_dataset, method, params, me
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method=method,
+        explainer=EXPLAINERS[method](**params),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
-        params=params,
         indices=[0, 1],
         device="cpu",
     )
     result = np.asarray(
         evaluate(
+            metric(features_in_step=5),
             model=trained_model,
-            metric=metric,
             explanation=exp,
             data=test_data[exp.indices],
             labels=test_labels[exp.indices],
-            metric_class_params={"features_in_step": 5},
         )
     )
     assert result.shape[0] == 2
@@ -473,12 +491,12 @@ def test_freq_metric_end_to_end(trained_model, split_dataset, method, params, me
     [
         (
             "frequency",
-            {"base": "integrated_gradients", "transform": _FFT},
+            {"transform": _fft()},
             "*frequency*.png",
         ),
         (
             "timefrequency",
-            {"base": "guided_backpropagation", "transform": _STFT},
+            {"transform": _stft()},
             "*timefrequency*.png",
         ),
     ],
@@ -494,12 +512,11 @@ def test_freq_explanation_saves_plots(
     test_data, test_labels = splits[1][0], splits[1][1]
 
     generate_explanation(
-        method=method,
+        explainer=EXPLAINERS[method](**params),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
-        params=params,
         indices=[0, 1],
         device="cpu",
         save_path=tmp_path,
@@ -514,18 +531,17 @@ def test_integrated_gradients_param_branches(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(
+            n_steps=10,
+            integration_method="riemann_trapezoid",
+            internal_batch_size=4,
+            multiply_by_inputs=False,
+        ),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
         indices=[0, 1],
-        params={
-            "n_steps": 10,
-            "integration_method": "riemann_trapezoid",
-            "internal_batch_size": 4,
-            "multiply_by_inputs": False,
-        },
         device="cpu",
     )
 
@@ -540,13 +556,12 @@ def test_occlusion_window_and_strides(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="occlusion",
+        explainer=OcclusionExplainer(window_shape=[1, 3], strides=2, baseline=0),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
         indices=[0, 1],
-        params={"window_shape": [1, 3], "strides": 2, "baseline": 0},
         device="cpu",
     )
 
@@ -555,24 +570,21 @@ def test_occlusion_window_and_strides(trained_model, split_dataset):
 
 
 @pytest.mark.integration
-def test_custom_explainer_registration(trained_model, split_dataset):
-    """A custom GradientExplainer subclass can be registered and used."""
+def test_custom_explainer(trained_model, split_dataset):
+    """A custom GradientExplainer subclass is used by passing an instance."""
     from captum.attr import Saliency
 
-    from xai4tsc import GradientExplainer, register_explainer
+    from xai4tsc import GradientExplainer
 
     class SaliencyExplainer(GradientExplainer):
         def _get_captum_attribution(self, model):
             return Saliency(model)
 
-    register_explainer("saliency", SaliencyExplainer)
-    assert "saliency" in xai4tsc.EXPLAINERS
-
     splits, encoder = split_dataset
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="saliency",
+        explainer=SaliencyExplainer(),
         model=trained_model,
         data=test_data,
         labels=test_labels,

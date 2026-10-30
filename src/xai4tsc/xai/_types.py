@@ -7,19 +7,18 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .._domains import DATA_DOMAINS, DataType, Domain, resolve_data_domain
+from .._domains import DataType, Domain
 
 __all__ = [
-    "DATA_DOMAINS",
     "DataType",
     "Domain",
     "Explanation",
     "is_multi_target",
-    "resolve_data_domain",
 ]
 
 if TYPE_CHECKING:
     from xai4tsc.utils.fourier_transforms import DomainTransform
+    from xai4tsc.xai.base import ExplainerBase
 
 
 @dataclass
@@ -29,16 +28,13 @@ class Explanation:
 
     Attributes
     ----------
-    explainer : str
-        Name of the explainer method that produced this explanation.
-    explainer_params : dict
-        Parameters the explainer was built with, as supplied. Lets a consumer
-        rebuild an equivalently configured explainer via
-        :func:`~xai4tsc.xai.explain.build_explainer`, which is what the
-        re-explaining evaluation metrics need. Empty when none were given.
+    explainer : ExplainerBase
+        The explainer instance that produced this explanation. The
+        re-explaining evaluation metrics run a deep copy of it, so they use the
+        same method with the same settings and leave this one untouched.
     explainer_call_params : dict
         Per-call options ``explain()`` was called with, beside the construction
-        options in ``explainer_params``. Recorded so the re-explaining metrics
+        options held by ``explainer``. Recorded so the re-explaining metrics
         replay the same call: an attribution scored with one set of call options
         and re-computed with another would make the metric report a configuration
         difference as a property of the explainer. Empty when none were given.
@@ -103,8 +99,7 @@ class Explanation:
         says which of its rows mean anything. :meth:`rows_for_target` reads it.
     """
 
-    explainer: str
-    explainer_params: dict
+    explainer: ExplainerBase
     explanation_type: str
     exp_values: np.ndarray
     data: np.ndarray

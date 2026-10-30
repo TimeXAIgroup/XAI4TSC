@@ -1,5 +1,5 @@
 """
-The ``DataType`` and ``Domain`` enums, plus the data-domain string spellings.
+The ``DataType`` and ``Domain`` enums.
 
 Datasets declare which signal domain their arrays are expressed in, explainers declare
 which domains they consume and produce, and metrics declare which they can score.
@@ -8,7 +8,7 @@ It lives in a dependency-free module so every layer can import it -
 package and the docs use.
 """
 
-from enum import Enum
+from enum import Enum, StrEnum
 
 
 class DataType(Enum):
@@ -27,7 +27,7 @@ class DataType(Enum):
     """Specific to time series classification."""
 
 
-class Domain(Enum):
+class Domain(StrEnum):
     """
     Signal domain a piece of data or an explanation lives in.
 
@@ -37,52 +37,36 @@ class Domain(Enum):
     ``data_domain`` / ``explanation_domain``, by the explainer capability set
     :attr:`xai4tsc.xai.ExplainerBase.explanation_domains`, and by
     :attr:`xai4tsc.data.DatasetBase.data_domain`.
+
+    A string enum, so ``Domain("time")`` and ``Domain.TIME`` name the same member
+    and a parameter typed ``Domain`` also takes the plain string.
     """
 
-    TIME = "Time"
+    TIME = "time"
     """Time domain (the raw series)."""
 
-    FREQUENCY = "Frequency"
+    FREQUENCY = "frequency"
     """Frequency domain (e.g. via a Fourier transform)."""
 
-    TIME_FREQUENCY = "Time-Frequency"
+    TIME_FREQUENCY = "time_frequency"
     """Time-frequency domain (e.g. via a short-time Fourier transform)."""
 
+    @classmethod
+    def _missing_(cls, value: object) -> None:
+        """
+        Reject an unknown domain, naming the allowed values.
 
-DATA_DOMAINS: dict[str, Domain] = {
-    "time": Domain.TIME,
-    "frequency": Domain.FREQUENCY,
-    "time_frequency": Domain.TIME_FREQUENCY,
-}
-"""String spellings of the signal domain a dataset's arrays are expressed in."""
+        Parameters
+        ----------
+        value : object
+            The value that matched no member.
 
-
-def resolve_data_domain(value: "str | Domain") -> Domain:
-    """
-    Resolve a configured data-domain name to its :class:`Domain`.
-
-    Parameters
-    ----------
-    value : str or Domain
-        A key of :data:`DATA_DOMAINS` (``"time"``, ``"frequency"``,
-        ``"time_frequency"``), or an already-resolved member.
-
-    Returns
-    -------
-    Domain
-        The signal domain the arrays are expressed in.
-
-    Raises
-    ------
-    ValueError
-        If *value* is not a known data-domain name.
-    """
-    if isinstance(value, Domain):
-        return value
-    try:
-        return DATA_DOMAINS[value]
-    except KeyError:
+        Raises
+        ------
+        ValueError
+            Always.
+        """
         raise ValueError(
-            f"Unknown data_domain '{value}'. "
-            f"Choose from: {', '.join(repr(k) for k in DATA_DOMAINS)}."
-        ) from None
+            f"Unknown domain {value!r}. Choose from: "
+            f"{', '.join(repr(m.value) for m in cls)}."
+        )

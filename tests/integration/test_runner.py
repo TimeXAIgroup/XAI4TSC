@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 import pytest
 import yaml
+from experiment_runner.lookups import METRICS
 from experiment_runner.main import main
 from sklearn.preprocessing import LabelEncoder
 
-from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
+from xai4tsc.evaluation import EvaluatorBase
 from xai4tsc.models.base import ModelBase
 from xai4tsc.models.models import load_model
 
@@ -36,8 +37,8 @@ class _RaisingEvaluator(EvaluatorBase):
 
 @pytest.fixture
 def raising_metric():
-    """Register ``Always-Raises`` for the duration of one test."""
-    register_metric("Always-Raises", _RaisingEvaluator)
+    """Add ``Always-Raises`` to the runner's metric table for one test."""
+    METRICS["Always-Raises"] = _RaisingEvaluator
     yield "Always-Raises"
     METRICS.pop("Always-Raises", None)
 
@@ -519,6 +520,29 @@ def test_status_error_row_records_the_exception(
 
 
 @pytest.mark.integration
+def test_a_metric_that_cannot_be_built_is_an_error_row(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A bad metric entry is recorded as an `error` row; the next metric still runs."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_status_build_error"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["evaluation_config"]["metrics"] = [
+        {"metric": "Pixel-Flipping", "metric_class_params": {"perturb_func": "nope"}},
+        {"metric": "Complexity"},
+    ]
+    assert main(str(_write_config(config, tmp_path))) == 1
+
+    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
+    by_metric = dict(zip(df["metric"], df["status"], strict=True))
+    assert by_metric == {"Pixel-Flipping": "error", "Complexity": "ok"}
+    failed = df.loc[df["status"] == "error"].iloc[0]
+    assert "Unknown perturb_func 'nope'" in failed["detail"]
+
+
+@pytest.mark.integration
 def test_status_skipped_domain_row_is_recorded(ucr_dataset_path, tmp_path, monkeypatch):
     """A domain-incompatible metric is recorded rather than silently dropped."""
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
@@ -545,7 +569,7 @@ def test_status_skipped_domain_row_is_recorded(ucr_dataset_path, tmp_path, monke
     assert statuses["FREQUENCY-Integrated_Gradients"] == "ok"
 
     skipped = df.loc[df["status"] == "skipped-domain"].iloc[0]
-    assert "Frequency" in skipped["detail"]
+    assert "frequency" in skipped["detail"]
 
 
 @pytest.mark.integration
@@ -592,58 +616,6 @@ def test_quantus_metrics_follow_their_group_across_domains(
 
 
 @pytest.mark.integration
-def test_frequency_native_dataset_scores_input_perturbing_metrics(
-    tmp_path, monkeypatch
-):
-    """
-    `data_domain: frequency` makes the model-native domain the frequency domain.
-
-    A model trained on spectra consumes coefficients, so a plain attributor's
-    relevance is a frequency explanation and `Pixel-Flipping` - which perturbs the
-    input and re-queries the model - applies there. It used to be refused as
-    "time-domain only", which was never about time but about the model.
-    """
-    monkeypatch.chdir(Path(__file__).parent.parent.parent)
-    results_rel = "tests/_runner_freq_native"
-
-    # Real-valued magnitude spectra: 33 rFFT bins of a 64-sample series.
-    data_dir = tmp_path / "spectra"
-    data_dir.mkdir()
-    rng = np.random.default_rng(0)
-    labels = rng.integers(0, 2, 40)
-    series = rng.normal(size=(40, 1, 64)) + labels[:, None, None]
-    spectra = np.abs(np.fft.rfft(series, axis=-1)).astype(np.float32)
-    np.save(data_dir / "data.npy", spectra)
-    (data_dir / "label.json").write_text(
-        json.dumps([{"label": str(int(y))} for y in labels])
-    )
-
-    config = _resolve_config(tmp_path / "cache", results_rel)
-    config["data_config"]["datasets"] = [
-        {
-            "dataset": "spectra",
-            "path": str(data_dir),
-            "layout": "bct",
-            "data_domain": "frequency",
-        }
-    ]
-    config["train_config"]["models"] = [
-        {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
-    ]
-    config["explanation_config"]["explainers"] = [{"method": "Integrated_Gradients"}]
-    config["evaluation_config"]["metrics"] = [
-        {"metric": "Pixel-Flipping"},
-        {"metric": "Complexity"},
-    ]
-    assert main(str(_write_config(config, tmp_path))) == 0
-
-    df = pd.read_csv(_experiment_dir(results_rel) / "metrics.csv")
-    assert set(df["metric"]) == {"Pixel-Flipping", "Complexity"}
-    assert (df["status"] == "ok").all(), df.loc[df["status"] != "ok"].to_dict("records")
-    assert df["score"].notna().all()
-
-
-@pytest.mark.integration
 def test_header_only_metrics_csv_when_nothing_succeeds(
     ucr_dataset_path, tmp_path, monkeypatch
 ):
@@ -685,8 +657,8 @@ def test_runner_drives_a_local_dataset(tmp_path, monkeypatch):
     A `path:` dataset runs end to end.
 
     The suite previously covered only UCR and synthetic datasets, which is how
-    `load_dataset` came to forward runner-only kwargs that `LocalDataset` cannot
-    accept, making `path:` unusable from any config.
+    runner-only kwargs came to reach `LocalDataset`, which cannot accept them,
+    making `path:` unusable from any config.
     """
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
     results_rel = "tests/_runner_local"
@@ -1413,9 +1385,12 @@ def test_a_logged_result_is_reproducible_through_the_package(
     seeding rather than at training determinism.
     """
     monkeypatch.chdir(Path(__file__).parent.parent.parent)
-    from xai4tsc import evaluate, generate_explanation, resolve_rng
-    from xai4tsc.data import load_dataset
+    import quantus as q
+
+    from xai4tsc import QuantusEvaluator, evaluate, generate_explanation, resolve_rng
+    from xai4tsc.data import UcrUeaDataset
     from xai4tsc.models import load_model
+    from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
 
     results_rel = "tests/_runner_seed_replay"
     cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
@@ -1434,7 +1409,7 @@ def test_a_logged_result_is_reproducible_through_the_package(
     expected_score = float(expected.loc[0, "score"])
 
     # Everything below uses only the package and the seeds read from the log.
-    ds = load_dataset("GunPoint", cache_dir=cache_root / "datasets")
+    ds = UcrUeaDataset("GunPoint", cache_dir=cache_root / "datasets")
     splits, encoder = ds.split(
         train_split=0.8,
         val_split=0.1,
@@ -1450,12 +1425,11 @@ def test_a_logged_result_is_reproducible_through_the_package(
     )
 
     explanation = generate_explanation(
-        method="Integrated_Gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
         targets="predicted",
-        params={"seed": seeds[("explainer", "Integrated_Gradients")]},
         encoder=encoder,
         indices=None,
         n_samples=3,
@@ -1466,21 +1440,21 @@ def test_a_logged_result_is_reproducible_through_the_package(
     # Metrics score only the explained samples, so the arrays are subset to
     # `explanation.indices` exactly as the runner does.
     score = evaluate(
+        QuantusEvaluator(
+            q.Complexity,
+            normalise=True,
+            abs=True,
+            disable_warnings=True,
+            display_progressbar=False,
+            return_aggregate=True,
+        ),
         model=model,
-        metric="Complexity",
         explanation=explanation,
         data=test_data[explanation.indices],
         labels=test_labels[explanation.indices],
-        metric_class_params={
-            "normalise": True,
-            "abs": True,
-            "disable_warnings": True,
-            "display_progressbar": False,
-            "return_aggregate": True,
-        },
-        metric_call_params={"softmax": False},
         device="cpu",
         seed=seeds[("metric", "Complexity")],
+        call_params={"softmax": False},
     )
     score = float(np.asarray(score).ravel()[0])
 
@@ -1491,12 +1465,11 @@ def test_a_logged_result_is_reproducible_through_the_package(
     # And the samples seed is load-bearing: a different one picks a different
     # subset, so the assertion above is not passing for free.
     other = generate_explanation(
-        method="Integrated_Gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
         targets="predicted",
-        params={"seed": seeds[("explainer", "Integrated_Gradients")]},
         encoder=encoder,
         indices=None,
         n_samples=3,

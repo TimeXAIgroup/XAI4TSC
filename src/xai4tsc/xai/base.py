@@ -22,8 +22,8 @@ class ExplainerBase(ABC):
 
     Subclass one of the mid-level classes (:class:`GradientExplainer`,
     :class:`PerturbationExplainer`, or :class:`SurrogateExplainer`) to add a
-    custom explainer.  Register the subclass with
-    :func:`xai4tsc.register_explainer` to make it available by name.
+    custom explainer, and pass an instance to
+    :func:`~xai4tsc.xai.generate_explanation`.
 
     Example::
 
@@ -33,8 +33,6 @@ class ExplainerBase(ABC):
             def _get_captum_attribution(self, model):
                 from captum.attr import IntegratedGradients
                 return IntegratedGradients(model)
-
-        xai4tsc.register_explainer("my_method", MyExplainer)
 
     Use specific classes for explanation types, e.g. ``"feature_attribution"``
     or ``"counterfactual"`` explanations.
@@ -194,8 +192,7 @@ class WrapperExplainer(ExplainerBase, ABC):
     """
     Base class for explainers that wrap and extend another explainer.
 
-    A wrapper takes a *base* explainer (any entry in
-    :data:`~xai4tsc.xai.explain.EXPLAINERS`) and modifies its computation:
+    A wrapper takes a *base* explainer instance and modifies its computation:
     either at the final input-multiplication step (e.g. SIGN for gradient-family
     bases) or by re-invoking it on transformed inputs (e.g. Temporal Saliency
     Rescaling, Time Forward Tunnel). Use :meth:`_run_base` to (re-)invoke the
@@ -203,26 +200,23 @@ class WrapperExplainer(ExplainerBase, ABC):
     input-layer rule) may override :meth:`explain` without using
     :meth:`_run_base` at all.
 
-    The base is instantiated via
-    :func:`~xai4tsc.xai.explain.build_explainer`, so it is configured exactly
-    as it would be when invoked directly by name.
-
     Parameters
     ----------
-    base : dict or str
-        The base explainer to wrap. Either a bare method name, or a config
-        dict with a ``"method"`` key plus that method's hyperparameters.
+    base : ExplainerBase
+        The base explainer to wrap.
+
+    Raises
+    ------
+    TypeError
+        If *base* is not an :class:`ExplainerBase` instance.
     """
 
-    def __init__(self, base: dict | str) -> None:
-        # Lazy import avoids a circular import: explain.py imports the wrappers
-        # module to populate EXPLAINERS, so wrappers/base cannot import
-        # explain.py at module load (same pattern config.py uses).
-        from .explain import build_explainer
-
-        base_cfg = {"method": base} if isinstance(base, str) else dict(base)
-        method = base_cfg.pop("method")
-        self._base = build_explainer(method, base_cfg)
+    def __init__(self, base: ExplainerBase) -> None:
+        if not isinstance(base, ExplainerBase):
+            raise TypeError(
+                f"base must be an ExplainerBase instance, got {type(base).__name__}."
+            )
+        self._base = base
         # A wrapper reports the same explanation type, data applicability, and
         # domain declarations as the method it extends. Domain-changing wrappers
         # (e.g. Frequency/TimeFrequency) override them *after* calling

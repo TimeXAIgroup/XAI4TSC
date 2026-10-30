@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import numpy as np
 import torch
@@ -23,9 +23,22 @@ from captum.attr import (
 
 from .._random import DEFAULT_SEED, resolve_rng
 from ..models.base import predict_probs
-from ..utils.perturbation import baseline_replacement, resolve_perturb_func
+from ..utils.perturbation import Baseline, baseline_replacement
+from ..utils.utils import _check_option
 from ._types import DataType
 from .base import GradientExplainer, PerturbationExplainer
+
+IntegrationMethod = Literal[
+    "gausslegendre",
+    "riemann_trapezoid",
+    "riemann_middle",
+    "riemann_right",
+    "riemann_left",
+]
+"""Captum's quadrature rules for Integrated Gradients."""
+
+ChannelMode = Literal["shared", "per_channel"]
+"""Whether TSHAP perturbs a window in all channels at once or per channel."""
 
 if TYPE_CHECKING:
     from ._types import Explanation
@@ -63,14 +76,16 @@ class IntegratedGradientsExplainer(GradientExplainer):
         self,
         multiply_by_inputs: bool = True,
         n_steps: int = 50,
-        integration_method: str = "gausslegendre",
+        integration_method: IntegrationMethod = "gausslegendre",
         baselines: int = 0,
         internal_batch_size: int | None = None,
     ) -> None:
         self._multiply_by_inputs = multiply_by_inputs
         self._attribute_kwargs = {
             "n_steps": n_steps,
-            "method": integration_method,
+            "method": _check_option(
+                "integration_method", integration_method, IntegrationMethod
+            ),
             "baselines": baselines,
         }
         if internal_batch_size is not None:
@@ -215,16 +230,16 @@ class TSHAPExplainer(PerturbationExplainer):
     stride : int
         Compute the Shapley value every ``stride`` window starts and interpolate
         the rest.  ``1`` evaluates every window.
-    perturb_baseline : str
+    perturb_baseline : Baseline
         Background strategy (see
         :func:`xai4tsc.utils.perturbation.baseline_replacement`): ``"centroid"``
         (default), ``"black"``, ``"white"``, ``"mean"`` or ``"random"``.
         ``"centroid"`` requires *background_data*; without it a warning is
         emitted and ``"mean"`` is used.
-    perturb_func : str or callable, optional
-        Override the perturbation function.  A callable, a baseline name, a
-        ``quantus`` attribute name, or a dotted import path.  ``None`` uses the
-        built-in :func:`baseline_replacement`.
+    perturb_func : callable, optional
+        Override the perturbation function, called as
+        ``perturb_func(x, indices)`` on one ``(C, T)`` series.  ``None`` uses the
+        built-in :func:`baseline_replacement` with *perturb_baseline*.
     n_perturb_samples : int
         Number of background draws to average over (Eq. 8).  Only meaningful for
         the stochastic ``"random"`` baseline.
@@ -262,17 +277,20 @@ class TSHAPExplainer(PerturbationExplainer):
         self,
         window_length: float | int = 0.1,
         stride: int = 5,
-        perturb_baseline: str = "centroid",
-        perturb_func: str | Callable | None = None,
+        perturb_baseline: Baseline = "centroid",
+        perturb_func: Callable | None = None,
         n_perturb_samples: int = 1,
-        channel_mode: str = "shared",
+        channel_mode: ChannelMode = "shared",
         roi: bool = False,
         background_data: np.ndarray | None = None,
         seed: int | None = DEFAULT_SEED,
     ) -> None:
-        if channel_mode not in ("shared", "per_channel"):
-            raise ValueError(
-                f"channel_mode must be 'shared' or 'per_channel', got '{channel_mode}'."
+        _check_option("channel_mode", channel_mode, ChannelMode)
+        _check_option("perturb_baseline", perturb_baseline, Baseline)
+        if perturb_func is not None and not callable(perturb_func):
+            raise TypeError(
+                f"perturb_func must be a callable, got {type(perturb_func).__name__} "
+                f"({perturb_func!r})."
             )
         if background_data is not None and not isinstance(background_data, np.ndarray):
             raise TypeError(
@@ -300,10 +318,7 @@ class TSHAPExplainer(PerturbationExplainer):
                 )
                 self.perturb_baseline = "mean"
 
-        if perturb_func is None:
-            self._perturb_func: Callable = baseline_replacement
-        else:
-            self._perturb_func = resolve_perturb_func(perturb_func)
+        self._perturb_func: Callable = perturb_func or baseline_replacement
         self._is_baseline_func = self._perturb_func is baseline_replacement
 
     # ── public API ───────────────────────────────────────────────────────────

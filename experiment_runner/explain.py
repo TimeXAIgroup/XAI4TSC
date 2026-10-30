@@ -16,15 +16,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from xai4tsc.data.base import decode_labels
+from xai4tsc.utils.utils import dict_to_args
 from xai4tsc.xai.explain import generate_explanation
 
 from .config import strip_runner_keys
+from .lookups import EXPLAINERS, build_transform
 
 if TYPE_CHECKING:
     from sklearn.preprocessing import LabelEncoder, OneHotEncoder, OrdinalEncoder
 
     from xai4tsc.models.base import ModelBase
     from xai4tsc.xai._types import Domain, Explanation
+    from xai4tsc.xai.base import ExplainerBase
 
 logger = logging.getLogger("xai4tsc.runner.explain")
 
@@ -97,9 +100,9 @@ def _inject_seed(params: dict, seed: int | None) -> dict:
     Fill in a derived seed wherever the config did not state one.
 
     Applied to the explainer entry and, recursively, to the ``base`` of a wrapper,
-    because :class:`~xai4tsc.xai.base.WrapperExplainer` builds its wrapped method
-    from that sub-dict alone - a seed left at the top level would never reach a
-    stochastic base. A bare string base is promoted to a dict so it can carry one.
+    because :func:`_build_base` builds the wrapped method from that sub-dict alone -
+    a seed left at the top level would never reach a stochastic base. A bare string
+    base is promoted to a dict so it can carry one.
 
     The test is key *presence*, not truthiness: ``seed: null`` is the documented way
     to opt a component out of seeding, so it has to survive. An explicitly
@@ -125,6 +128,66 @@ def _inject_seed(params: dict, seed: int | None) -> dict:
     if isinstance(base, dict):
         params["base"] = _inject_seed(dict(base), seed)
     return params
+
+
+def build_explainer(method: str, params: dict | None) -> ExplainerBase:
+    """
+    Instantiate a registered explainer, filtering *params* to its ``__init__``.
+
+    Parameters
+    ----------
+    method : str
+        Explainer name; looked up case-insensitively in
+        :data:`~experiment_runner.lookups.EXPLAINERS`.
+    params : dict or None
+        Parameters to pass to the explainer's ``__init__``. Keys not matching
+        the constructor signature are dropped via
+        :func:`~xai4tsc.utils.dict_to_args`. If the class defines no
+        ``__init__``, no parameters are passed.
+
+    Returns
+    -------
+    ExplainerBase
+        A ready-to-use explainer instance.
+
+    Raises
+    ------
+    NotImplementedError
+        If *method* is not in :data:`~experiment_runner.lookups.EXPLAINERS`.
+    """
+    explainer_key = method.lower()
+    if explainer_key not in EXPLAINERS:
+        raise NotImplementedError(f"Explainer '{explainer_key}' not supported.")
+    # Only pass config params if the class defines its own __init__ - otherwise
+    # object.__init__ is used, which would receive the full config dict and fail.
+    explainer_class = EXPLAINERS[explainer_key]
+    if "__init__" in explainer_class.__dict__:
+        init_params = dict_to_args(params, explainer_class.__init__)
+        return explainer_class(**(init_params or {}))
+    return explainer_class()
+
+
+def _build_base(entry: dict) -> ExplainerBase:
+    """
+    Build a wrapper's ``base`` explainer from its config sub-dict.
+
+    A base that is itself a wrapper has its own ``base`` built first.
+
+    Parameters
+    ----------
+    entry : dict
+        ``{"method": <name>, **params}`` for the wrapped explainer.
+
+    Returns
+    -------
+    ExplainerBase
+        The explainer instance to pass to the wrapper.
+    """
+    params = dict(entry)
+    method = params.pop("method")
+    if isinstance(params.get("base"), dict):
+        params["base"] = _build_base(params["base"])
+    return build_explainer(method, params)
 
 
 def _generate_explanation(
@@ -189,9 +252,9 @@ def _generate_explanation(
         keeps direct callers working but cannot disambiguate duplicates.
     seed : int or None
         Seed derived for this explainer, filled into the explainer's params (and
-        its wrapped base's) when the config did not state one. It is recorded on
-        the returned ``Explanation.explainer_params``, so the metrics that rebuild
-        the explainer to re-explain get the same draws.
+        its wrapped base's) when the config did not state one. The explainer
+        built with it is stored on ``Explanation.explainer``, which the
+        re-explaining metrics copy.
 
     Returns
     -------
@@ -209,10 +272,9 @@ def _generate_explanation(
     """
     # Resolve runtime-only params into a copy; never mutate explainer_config.
     params = _inject_seed(dict(explainer_config), seed)
-    # Popped, not read: `params` is recorded verbatim as `Explanation`
-    # `explainer_params` and filtered against the __init__ at rebuild time, and
-    # `dict_to_args` passes the whole dict to a constructor declaring **kwargs - so
-    # a `call_params` left in would arrive as a construction argument.
+    # Popped, not read: `dict_to_args` passes the whole dict to a constructor
+    # declaring **kwargs, so a `call_params` left in would arrive as a
+    # construction argument.
     call_params = params.pop("call_params", None)
     # A non-mapping is reported by the config check; coerce rather than hand it to
     # `dict()`, which would raise an error naming neither the key nor the entry.
@@ -221,10 +283,15 @@ def _generate_explanation(
     # itself have to come off before the explainer sees them: `dict_to_args` drops
     # them for a named signature but hands the lot to a `**kwargs` constructor.
     params = strip_runner_keys(params, explainer_config["method"], config)
+    if "transform" in params:
+        params["transform"] = build_transform(params["transform"])
+    if isinstance(params.get("base"), dict):
+        params["base"] = _build_base(params["base"])
     if "background_data" in explainer_config:
         params["background_data"] = _resolve_background_data(
             explainer_config["background_data"], splits
         )
+    explainer = build_explainer(explainer_config["method"], params)
 
     if explanation_dir is None:
         base = save_path if save_path is not None else Path(config["results_rel_path"])
@@ -238,12 +305,11 @@ def _generate_explanation(
     # Explain only certain samples addressed by index
     if explainer_config["samples"]["type"] == "index":
         explanation = generate_explanation(
-            method=explainer_config["method"],
+            explainer=explainer,
             model=model,
             data=data,
             labels=labels,
             targets=explainer_config["target"],
-            params=params,
             call_params=call_params,
             encoder=encoder,
             indices=explainer_config["samples"]["indices"],
@@ -257,12 +323,11 @@ def _generate_explanation(
     # Explain random samples
     elif explainer_config["samples"]["type"] == "random":
         explanation = generate_explanation(
-            method=explainer_config["method"],
+            explainer=explainer,
             model=model,
             data=data,
             labels=labels,
             targets=explainer_config["target"],
-            params=params,
             call_params=call_params,
             encoder=encoder,
             indices=None,
@@ -277,12 +342,11 @@ def _generate_explanation(
     else:
         # "all" case
         explanation = generate_explanation(
-            method=explainer_config["method"],
+            explainer=explainer,
             model=model,
             data=data,
             labels=labels,
             targets=explainer_config["target"],
-            params=params,
             call_params=call_params,
             encoder=encoder,
             indices=list(np.arange(len(data)).tolist()),

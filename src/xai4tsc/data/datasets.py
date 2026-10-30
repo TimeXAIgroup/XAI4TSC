@@ -11,10 +11,14 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sktime.datasets import load_UCR_UEA_dataset
 
-from .._domains import Domain, resolve_data_domain
+from .._domains import Domain
 from .._random import DEFAULT_SEED, resolve_rng
+from ..utils.utils import _check_option
 from .base import (
     DatasetBase,
+    Layout,
+    SampleStrategy,
+    SeriesPosition,
     _assemble_splits,
     _encoded_targets,
     _ensure_bct,
@@ -22,7 +26,7 @@ from .base import (
     _impute_data,
     _resolve_encoder,
 )
-from .data_loaders import FORMAT_LOADERS
+from .data_loaders import FORMAT_LOADERS, DataFormat
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +91,9 @@ class UcrUeaDataset(DatasetBase):
         download: bool = True,
         pad_series: bool = False,
         max_samples: int | None = None,
-        sample_strategy: str = "random",
+        sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
-        series_position: str = "first",
+        series_position: SeriesPosition = "first",
     ) -> None:
         """
         Instantiate a UCR/UEA dataset.
@@ -399,14 +403,14 @@ class LocalDataset(DatasetBase):
         self,
         path: str | Path,
         name: str,
-        data_format: str = "numpy",
-        layout: str = "auto",
+        data_format: DataFormat = "numpy",
+        layout: Layout = "auto",
         data_domain: str | Domain = "time",
         pad_series: bool = False,
         max_samples: int | None = None,
-        sample_strategy: str = "random",
+        sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
-        series_position: str = "first",
+        series_position: SeriesPosition = "first",
     ) -> None:
         """
         Instantiate a local dataset.
@@ -454,9 +458,9 @@ class LocalDataset(DatasetBase):
         )
         self.path = Path(path)
         self.name = name
-        self.data_format = data_format
-        self.layout = layout
-        self.data_domain = resolve_data_domain(data_domain)
+        self.data_format = _check_option("data_format", data_format, DataFormat)
+        self.layout = _check_option("layout", layout, Layout)
+        self.data_domain = Domain(data_domain)
         self.pad_series = pad_series
 
     def load(self) -> tuple:
@@ -468,13 +472,7 @@ class LocalDataset(DatasetBase):
         tuple
             ``(data, labels, metadata)`` with data in ``(B, C, T)`` layout.
         """
-        loader = FORMAT_LOADERS.get(self.data_format)
-        if loader is None:
-            raise ValueError(
-                f"Unknown data_format '{self.data_format}'. "
-                f"Choose from: {list(FORMAT_LOADERS)}"
-            )
-        data, labels, metadata = loader(self.path)
+        data, labels, metadata = FORMAT_LOADERS[self.data_format](self.path)
         # Apply (B, T, C) → (B, C, T) heuristic for local data only.
         data = _ensure_bct(data, self.layout)
         logger.info("Loaded local dataset '%s' — %d samples", self.name, len(data))
@@ -521,9 +519,9 @@ class SyntheticDataset(DatasetBase, ABC):
         cache_dir: str | Path | None = None,
         seed: int = DEFAULT_SEED,
         max_samples: int | None = None,
-        sample_strategy: str = "random",
+        sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
-        series_position: str = "first",
+        series_position: SeriesPosition = "first",
     ) -> None:
         """
         Store identity, cache location, and generation seed.
@@ -712,9 +710,9 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         train_ratio: float = 0.7,
         test_ratio: float = 0.15,
         max_samples: int | None = None,
-        sample_strategy: str = "random",
+        sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
-        series_position: str = "first",
+        series_position: SeriesPosition = "first",
     ) -> None:
         """
         Configure the generator and the partition.
@@ -1469,138 +1467,3 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
 SYNTHETIC_DATASETS: dict[str, type] = {
     "Synth_Multilabel_Freq": SynthMultilabelFreqDataset,
 }
-
-
-def register_synthetic_dataset(name: str, dataset_class: type) -> None:
-    """
-    Register a custom :class:`SyntheticDataset` subclass under *name*.
-
-    The factory :func:`xai4tsc.data.load_dataset` dispatches ``name=<name>`` to
-    the registered class (checked before the path/UCR branches), so registering
-    a name makes it loadable by name.
-
-    Parameters
-    ----------
-    name : str
-        Registry key (matched against ``load_dataset``'s *name*).
-    dataset_class : type
-        A :class:`SyntheticDataset` subclass.
-    """
-    SYNTHETIC_DATASETS[name] = dataset_class
-
-
-def load_dataset(
-    name: str,
-    path: str | None = None,
-    cache_dir: str | None = None,
-    pad_series: bool = False,
-    max_samples: int | None = None,
-    sample_strategy: str = "random",
-    max_series_length: int | None = None,
-    series_position: str = "first",
-    layout: str = "auto",
-    data_domain: str = "time",
-    **kwargs: object,
-) -> DatasetBase:
-    """
-    Resolve to the correct :class:`DatasetBase` subclass.
-
-    Parameters
-    ----------
-    name : str
-        Human-readable dataset name (always required). If *name* is in the
-        :data:`SYNTHETIC_DATASETS` registry, the matching
-        :class:`SyntheticDataset` is returned (checked first) and generation
-        params are forwarded as ``**kwargs``.
-    path : str | Path | None
-        If provided, a :class:`LocalDataset` is returned pointing at *path*.
-        If ``None`` (and *name* is not a synthetic dataset), a
-        :class:`UcrUeaDataset` is returned.
-    cache_dir : Path | None
-        Passed through to :class:`UcrUeaDataset` when *path* is ``None``, stores
-        UCR / UEA datasets to mitigate multiple downloads.
-    pad_series : bool
-        If ``True``, variable-length series are zero-padded to the maximum
-        series length before returning data.  Passed to the selected subclass.
-    max_samples : int | None
-        Subsample to at most this many samples before splitting.  Prevents OOM
-        on very large datasets (e.g. InsectWingbeat).
-    sample_strategy : str
-        How to select the subset when *max_samples* is active: ``"random"``
-        (default), ``"first"``, ``"last"``, or ``"stratified"``.
-    max_series_length : int | None
-        Truncate each series to at most this many timesteps.  Applied before
-        padding for variable-length datasets.
-    series_position : str
-        Which end of a long series to retain: ``"first"`` (default) or
-        ``"last"``.
-    layout : str
-        Axis order of a local array: ``"auto"`` (default), ``"bct"`` or ``"btc"``.
-        Only meaningful with *path*; UCR/UEA and synthetic data are already
-        ``(B, C, T)``, so it is not forwarded to them.
-    data_domain : str
-        Signal domain a local array is expressed in: ``"time"`` (default),
-        ``"frequency"`` or ``"time_frequency"``. Only meaningful with *path*:
-        UCR/UEA data is always raw series and a synthetic dataset declares its own
-        domain, so a non-default value is ignored with a warning for those.
-    **kwargs
-        Forwarded to the selected subclass constructor (e.g. ``download``,
-        ``data_format``).
-    """
-    restriction_kwargs = dict(
-        max_samples=max_samples,
-        sample_strategy=sample_strategy,
-        max_series_length=max_series_length,
-        series_position=series_position,
-    )
-    if "use_predefined_splits" in kwargs:
-        # It selects a partition, so dropping it here would hand back the pooled
-        # split to a caller who asked for the predefined one - a different
-        # partition, silently.
-        raise TypeError(
-            "'use_predefined_splits' is no longer a load_dataset() argument: it "
-            "is a parameter of split(). Build the dataset without it and pass it "
-            "to the split call instead, e.g. "
-            "load_dataset(name).split(..., use_predefined_splits=True)."
-        )
-    if data_domain != "time" and path is None:
-        logger.warning(
-            "'data_domain: %s' is ignored for '%s': UCR/UEA data is always raw "
-            "series and a synthetic dataset declares its own domain. Only a local "
-            "('path') dataset takes this setting.",
-            data_domain,
-            name,
-        )
-    if name in SYNTHETIC_DATASETS:
-        # Generation params arrive as kwargs, so drop the keys that only a
-        # file-backed dataset takes.
-        for k in ("data_format", "download"):
-            kwargs.pop(k, None)
-        return SYNTHETIC_DATASETS[name](
-            name=name,
-            cache_dir=cache_dir,
-            **restriction_kwargs,
-            **kwargs,
-        )
-    if path is not None:
-        if name is None:
-            raise ValueError("'name' is required when 'path' is provided.")
-        kwargs.pop("download", None)
-        return LocalDataset(
-            path,
-            name=name,
-            layout=layout,
-            data_domain=data_domain,
-            pad_series=pad_series,
-            **restriction_kwargs,
-            **kwargs,
-        )
-    # UcrUeaDataset does not use data_format — strip it before forwarding
-    kwargs.pop("data_format", None)
-    return UcrUeaDataset(
-        name,
-        cache_dir=cache_dir,
-        pad_series=pad_series,
-        **restriction_kwargs,
-        **kwargs,
-    )

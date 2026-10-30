@@ -1,10 +1,10 @@
 """
-TSC model base class, built-in models, and the ``MODELS`` registry.
+TSC model base class, built-in models, and the ``MODELS`` catalog.
 
 Submodules:
 
 - :mod:`~xai4tsc.models.models` — built-in architectures (FCN, LeNet,
-  ResNet, LSTM, XLSTM, PatchTST), the ``MODELS`` registry, and the
+  ResNet, LSTM, XLSTM, PatchTST), the ``MODELS`` catalog, and the
   :func:`load_model` factory.
 - :mod:`~xai4tsc.models.base` — the :class:`ModelBase` ABC (training,
   prediction, evaluation, checkpoint save/load) and
@@ -26,7 +26,6 @@ from .models import (
     PatchTST,
     ResNet,
     load_model,
-    register_model,
 )
 
 __all__ = [
@@ -40,5 +39,4 @@ __all__ = [
     "ResNet",
     "load_model",
     "predict_probs",
-    "register_model",
 ]

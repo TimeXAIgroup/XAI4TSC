@@ -100,16 +100,6 @@ data_config:
                             #   "bct":  trust as (B, C, T) -- use this when the data genuinely
                             #           has more channels than timesteps, which "auto" corrupts
                             #   "btc":  always transpose
-    data_domain: "time"     # signal domain a local array is expressed in, i.e. what the model
-                            # trained on it consumes: "time" (raw series, the default),
-                            # "frequency" or "time_frequency".
-                            # Non-time data must still be real float32 (e.g. magnitude
-                            # spectra), and the domain-lifting explainers (Frequency,
-                            # TimeFrequency, FreqRISE, Random_Frequency,
-                            # Random_TimeFrequency) consume time-domain data only, so pairing
-                            # one with a non-time dataset is a config error.
-                            # Ignored for UCR/UEA (always raw series) and for synthetic
-                            # datasets, which declare their own domain in code.
     download: true          # Download UCR dataset if not found locally
     path: null              # Local path; if set, LocalDataset is used instead of UcrUeaDataset
     is_presplit: false      # true = load directly via load_saved_splits(), bypass cache
@@ -268,8 +258,8 @@ train_config:
                             #   dropout: 0.1               dropout inside the encoder
 
     # EXAMPLE - an external (non-built-in) model. Give a unique 'model' name plus the
-    #   class and the source file it lives in; it is imported and registered
-    #   automatically. Requires general.allow_external_code: true. Explainer and metric
+    #   class and the source file it lives in; it is imported and added to the
+    #   runner's tables. Requires general.allow_external_code: true. Explainer and metric
     #   entries take the same two keys.
     # - model: MyModel
     #   class_name: MyModel           # class defined in the source file
@@ -365,8 +355,6 @@ explanation_config:
                             #     interpolated in between
                             #   perturb_baseline: "centroid"   background: centroid (needs
                             #     background_data) | black | white | mean | random
-                            #   perturb_func: null         name/dotted path to
-                            #     (arr, indices, **kwargs) -> arr
                             #   n_perturb_samples: 1       background draws to average (Eq. 8);
                             #     only meaningful for "random"
                             #   channel_mode: "shared"     one value per window, broadcast; or
@@ -470,7 +458,7 @@ evaluation_config:
   metrics:                  # REQUIRED. List of {metric: <name>, ...} entries.
                             # Metric names are case-sensitive display names (unlike model and
                             # explainer names, which are matched case-insensitively), and an
-                            # unregistered one is a config error.
+                            # unknown one is a config error.
                             # Each metric's parameters are listed below with the value the
                             # metric's own class defaults to. To SET one, nest it under
                             # 'metric_class_params' (constructor) or 'metric_call_params'

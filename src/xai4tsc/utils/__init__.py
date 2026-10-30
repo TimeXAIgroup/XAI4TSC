@@ -5,7 +5,7 @@ Submodules:
 
 - :mod:`~xai4tsc.utils.plot` — relevance and perturbation-curve plotting.
 - :mod:`~xai4tsc.utils.fourier_transforms` — the ``DomainTransform`` family
-  (Fourier / rFFT / STFT) and the :func:`get_transform` factory.
+  (Fourier / rFFT / STFT).
 - :mod:`~xai4tsc.utils.utils` — :func:`dict_to_args`, :func:`merge_dicts`,
   :func:`rescale_array`, :func:`load_class_from_path`.
 - :mod:`~xai4tsc.utils.animation` — GIF animation of perturbation sweeps.
@@ -23,7 +23,6 @@ from .fourier_transforms import (
     FourierTransform,
     RFFTransform,
     STFTransform,
-    get_transform,
 )
 from .plot import (
     plot_perturbation_curve,
@@ -41,7 +40,6 @@ __all__ = [
     "STFTransform",
     "derive_seed",
     "dict_to_args",
-    "get_transform",
     "load_class_from_path",
     "merge_dicts",
     "plot_perturbation_curve",

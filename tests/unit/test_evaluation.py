@@ -1,23 +1,22 @@
 """Unit tests for src/xai4tsc/evaluation/base.py helpers — pure, no Quantus runs."""
 
-import math
 from functools import partial
 
 import numpy as np
 import pytest
+import quantus as q
+from sklearn.preprocessing import LabelEncoder
 
-from xai4tsc.evaluation import METRICS, EvaluatorBase, register_metric
+from xai4tsc.evaluation import METRICS, EvaluatorBase
 from xai4tsc.evaluation.base import (
     QuantusEvaluator,
     _apply_fraction_params,
     _fraction_params_T,
-    _resolve_callable_perturb_func,
-    _resolve_string_callables,
 )
 
 # A real (class_name, param) pair from the live registry so these tests track
 # the actual fraction-param configuration rather than a hard-coded guess.
-_FRACTION_CLASS = "FaithfulnessCorrelation"
+_FRACTION_CLASS = q.FaithfulnessCorrelation
 _FRACTION_KEY = "subset_size"
 
 
@@ -50,7 +49,7 @@ def test_apply_fraction_params_small_fraction_floors_to_one():
 @pytest.mark.unit
 def test_apply_fraction_params_no_fraction_keys_returns_unchanged():
     params = {"nr_runs": 10}
-    out = _apply_fraction_params("ClassWithNoFractionParams", params, _data(100))
+    out = _apply_fraction_params(q.Complexity, params, _data(100))
     assert out == params
 
 
@@ -82,87 +81,37 @@ def test_apply_fraction_params_does_not_mutate_input():
     assert params == {_FRACTION_KEY: 0.05}  # original untouched
 
 
-# ── _resolve_callable_perturb_func ────────────────────────────────────────────
+# ── unified registry: QuantusEvaluator(class) + homogeneous METRICS ───────────
 
 
 @pytest.mark.unit
-def test_resolve_perturb_func_from_quantus_namespace():
-    quantus = pytest.importorskip("quantus")
-    # Pick any public callable exported by quantus to exercise the namespace path
-    # without coupling to a specific function name.
-    name = next(
-        n
-        for n in dir(quantus)
-        if not n.startswith("_") and callable(getattr(quantus, n))
-    )
-    assert callable(_resolve_callable_perturb_func(name))
-
-
-@pytest.mark.unit
-def test_resolve_perturb_func_from_dotted_path():
-    assert _resolve_callable_perturb_func("math.sqrt") is math.sqrt
-
-
-@pytest.mark.unit
-def test_resolve_perturb_func_unresolvable_raises():
-    for name in ("no_such_module.no_such_func", "definitely_not_a_function"):
-        with pytest.raises(ValueError, match="Could not resolve"):
-            _resolve_callable_perturb_func(name)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("name", ["black", "white", "mean", "centroid", "random"])
-def test_a_baseline_name_is_not_a_quantus_perturb_func(name):
-    # These resolve to TSHAP's (C, T) baseline_replacement, which Quantus would
-    # call with (B, C*T) rows; the message says what to write instead.
-    with pytest.raises(ValueError, match=f"perturb_baseline: {name}"):
-        _resolve_callable_perturb_func(name)
-
-
-# ── _resolve_string_callables ─────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_resolve_string_callables_replaces_resolvable_string():
-    out = _resolve_string_callables({"perturb_func": "math.sqrt"}, "AnyMetric")
-    assert out["perturb_func"] is math.sqrt
-
-
-@pytest.mark.unit
-def test_resolve_string_callables_raises_on_unresolvable():
-    with pytest.raises(
-        ValueError, match="AnyMetric: Could not resolve perturb_func 'garbage'"
-    ):
-        _resolve_string_callables({"perturb_func": "garbage"}, "AnyMetric")
-
-
-@pytest.mark.unit
-def test_resolve_string_callables_passes_through_non_callable_params():
-    out = _resolve_string_callables({"abs": True, "nr_runs": 5}, "AnyMetric")
-    assert out == {"abs": True, "nr_runs": 5}
-
-
-@pytest.mark.unit
-def test_resolve_string_callables_does_not_mutate_input():
-    params = {"perturb_func": "math.sqrt"}
-    _resolve_string_callables(params, "AnyMetric")
-    assert params == {"perturb_func": "math.sqrt"}  # original string preserved
-
-
-# ── unified registry: QuantusEvaluator(name) + homogeneous METRICS ────────────
-
-
-@pytest.mark.unit
-def test_quantus_evaluator_resolves_name():
-    ev = QuantusEvaluator("AUC")
+def test_quantus_evaluator_takes_the_class():
+    ev = QuantusEvaluator(q.AUC)
     assert ev.metric_name == "AUC"
-    assert ev._metric_class.__name__ == "AUC"
+    assert ev.quantus_class is q.AUC
 
 
 @pytest.mark.unit
-def test_quantus_evaluator_unknown_name_raises():
-    with pytest.raises(ValueError, match="Unknown Quantus metric"):
-        QuantusEvaluator("NotAMetric")
+@pytest.mark.parametrize("bad", ["AUC", LabelEncoder])
+def test_quantus_evaluator_rejects_anything_but_a_metric_class(bad):
+    with pytest.raises(TypeError, match=r"quantus\.Metric subclass"):
+        QuantusEvaluator(bad)
+
+
+@pytest.mark.unit
+def test_evaluate_rejects_a_metric_name():
+    from xai4tsc.evaluation import evaluate
+
+    with pytest.raises(TypeError, match="EvaluatorBase instance"):
+        evaluate("Complexity", None, None)
+
+
+@pytest.mark.unit
+def test_every_quantus_metric_name_maps_to_its_class():
+    from xai4tsc.evaluation import QUANTUS_METRICS
+
+    for name, cls in QUANTUS_METRICS.items():
+        assert METRICS[name]().quantus_class is cls
 
 
 @pytest.mark.unit
@@ -174,42 +123,3 @@ def test_metrics_entries_yield_evaluatorbase():
     assert isinstance(auc(disable_warnings=True), QuantusEvaluator)
     native = METRICS["Frequency Perturbation"]
     assert isinstance(native, type) and issubclass(native, EvaluatorBase)
-
-
-# ── register_metric contract ──────────────────────────────────────────────────
-
-
-@pytest.fixture
-def _clean_metrics():
-    """Snapshot METRICS so tests that register can't leak into the global registry."""
-    before = dict(METRICS)
-    yield
-    METRICS.clear()
-    METRICS.update(before)
-
-
-class _OkEvaluator(EvaluatorBase):
-    def evaluate(self, model, explanation, data, labels, device="cpu", **kwargs):
-        return 0.0
-
-
-class _NotAnEvaluator:
-    pass
-
-
-@pytest.mark.unit
-def test_register_metric_accepts_evaluatorbase_subclass(_clean_metrics):
-    register_metric("MyEvaluator", _OkEvaluator)
-    assert METRICS["MyEvaluator"] is _OkEvaluator
-
-
-@pytest.mark.unit
-def test_register_metric_rejects_non_evaluatorbase_class(_clean_metrics):
-    with pytest.raises(TypeError, match="EvaluatorBase subclass"):
-        register_metric("Bad", _NotAnEvaluator)
-
-
-@pytest.mark.unit
-def test_register_metric_rejects_non_class(_clean_metrics):
-    with pytest.raises(TypeError, match="EvaluatorBase subclass"):
-        register_metric("Bad", 123)

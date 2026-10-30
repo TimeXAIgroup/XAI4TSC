@@ -323,9 +323,7 @@ def ext_source(tmp_path):
 @pytest.fixture
 def clean_registries():
     """Snapshot and restore the runtime registries around a test."""
-    from xai4tsc.evaluation.evaluate import METRICS
-    from xai4tsc.models.models import MODELS
-    from xai4tsc.xai.explain import EXPLAINERS
+    from experiment_runner.lookups import EXPLAINERS, METRICS, MODELS
 
     snaps = [(reg, dict(reg)) for reg in (MODELS, EXPLAINERS, METRICS)]
     yield
@@ -336,7 +334,9 @@ def clean_registries():
 
 @pytest.mark.unit
 def test_sanity_check_loads_external_model(ext_source, clean_registries):
-    from xai4tsc.models.models import MODELS
+    from experiment_runner.lookups import MODELS
+
+    import xai4tsc.models as package
 
     cfg = _minimal_user_config()
     cfg["general"]["allow_external_code"] = True
@@ -349,14 +349,15 @@ def test_sanity_check_loads_external_model(ext_source, clean_registries):
     ]
     cfg = config_resolve(cfg, MASTER_CONFIG)
     assert config_sanity_check(cfg) is True
-    # Registered under the lower-cased name (models are looked up case-insensitively)
+    # Added under the lower-cased name (models are looked up case-insensitively)
     assert "extmodelname" in MODELS
+    # The runner's table, not the package catalog, holds it.
+    assert "extmodelname" not in package.MODELS
 
 
 @pytest.mark.unit
 def test_sanity_check_loads_external_explainer_and_metric(ext_source, clean_registries):
-    from xai4tsc.evaluation.evaluate import METRICS
-    from xai4tsc.xai.explain import EXPLAINERS
+    from experiment_runner.lookups import EXPLAINERS, METRICS
 
     cfg = _minimal_user_config()
     cfg["general"]["allow_external_code"] = True
@@ -372,13 +373,13 @@ def test_sanity_check_loads_external_explainer_and_metric(ext_source, clean_regi
     ]
     cfg = config_resolve(cfg, MASTER_CONFIG)
     assert config_sanity_check(cfg) is True
-    assert "extexpl" in EXPLAINERS  # explainers are registered lower-cased
+    assert "extexpl" in EXPLAINERS  # explainers are added lower-cased
     assert "ExtMet" in METRICS  # metric keys are exact display names
 
 
 @pytest.mark.unit
 def test_sanity_check_external_blocked_when_flag_false(ext_source, clean_registries):
-    from xai4tsc.models.models import MODELS
+    from experiment_runner.lookups import MODELS
 
     cfg = _minimal_user_config()  # allow_external_code defaults to False
     cfg["train_config"]["models"] = [
@@ -1213,6 +1214,36 @@ def test_unknown_sample_type_is_refused_naming_the_cost():
 
 
 @pytest.mark.unit
+def test_unknown_visualization_type_is_refused_before_training():
+    cfg = _entry_config(
+        explanation_config=[
+            {"method": "Integrated_Gradients", "visualization_type": ["pionts"]}
+        ]
+    )
+
+    with pytest.raises(ValueError, match=r"visualization_type.*'pionts'"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_a_single_visualization_type_string_is_checked_as_one_style():
+    ok = _entry_config(
+        explanation_config=[
+            {"method": "Integrated_Gradients", "visualization_type": "bar"}
+        ]
+    )
+    assert config_sanity_check(ok) is True
+
+    bad = _entry_config(
+        explanation_config=[
+            {"method": "Integrated_Gradients", "visualization_type": "pionts"}
+        ]
+    )
+    with pytest.raises(ValueError, match=r"got 'pionts'"):
+        config_sanity_check(bad)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("sample_type", ["index", "random", "all"])
 def test_documented_sample_types_are_accepted(sample_type):
     samples = {"type": sample_type, "indices": [0], "count": 3}
@@ -1506,8 +1537,9 @@ def test_strip_runner_keys_removes_the_structural_keys():
 @pytest.mark.unit
 def test_strip_runner_keys_keeps_a_key_the_class_declares():
     """An explainer may legitimately name a parameter the runner also uses."""
+    from experiment_runner.lookups import EXPLAINERS
+
     from xai4tsc.xai.base import ExplainerBase
-    from xai4tsc.xai.explain import EXPLAINERS
 
     class _TakesSamples(ExplainerBase):
         explanation_type = "feature_attribution"
@@ -1565,8 +1597,10 @@ def test_a_catch_all_constructor_receives_only_configured_parameters():
     Without the strip this explainer would be built with `method`, `target` and
     `samples` as if they had been configured for it.
     """
+    from experiment_runner.explain import build_explainer
+    from experiment_runner.lookups import EXPLAINERS
+
     from xai4tsc.xai.base import ExplainerBase
-    from xai4tsc.xai.explain import EXPLAINERS, build_explainer
 
     class _KwargsInit(ExplainerBase):
         explanation_type = "feature_attribution"

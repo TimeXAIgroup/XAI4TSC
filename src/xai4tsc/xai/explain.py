@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -10,8 +11,13 @@ import torch
 from .._random import DEFAULT_SEED, resolve_rng
 from ..data.base import class_names
 from ..models.base import ModelBase, predict_probs
-from ..utils.plot import plot_relevance, plot_relevance_f, plot_relevance_tf
-from ..utils.utils import _filename_slug, dict_to_args
+from ..utils.plot import (
+    RelType,
+    plot_relevance,
+    plot_relevance_f,
+    plot_relevance_tf,
+)
+from ..utils.utils import _check_option, _filename_slug
 from . import (
     explanation_domains,
     feature_attribution,
@@ -19,19 +25,21 @@ from . import (
     random_baseline,
     wrappers,
 )
-from ._types import Domain, Explanation, is_multi_target, resolve_data_domain
+from ._types import Domain, Explanation, is_multi_target
 from .base import ExplainerBase
+
+Targets = Literal["predicted", "label", "all"]
+"""Which class or classes of each sample an explanation explains."""
 
 logger = logging.getLogger(__name__)
 
 
 def generate_explanation(
-    method: str,
+    explainer: ExplainerBase,
     model: ModelBase,
     data: np.ndarray,
     labels: np.ndarray | None = None,
-    targets: str = "predicted",
-    params: dict | None = None,
+    targets: Targets = "predicted",
     call_params: dict | None = None,
     encoder: object | None = None,
     indices: list | None = None,
@@ -39,7 +47,7 @@ def generate_explanation(
     prng: np.random.Generator | None = None,
     device: str = "cpu",
     save_path: Path | str | None = None,
-    visualization_type: Sequence[str] = ("points",),
+    visualization_type: Sequence[str] | str = ("points",),
     data_domain: str | Domain = Domain.TIME,
     threshold: float = 0.5,
 ) -> Explanation | None:
@@ -50,9 +58,10 @@ def generate_explanation(
 
     Parameters
     ----------
-    method : str
-        Explanation method to use, as keyed in
-        :data:`~xai4tsc.xai.EXPLAINERS`.
+    explainer : ExplainerBase
+        The configured explainer to run, e.g.
+        ``IntegratedGradientsExplainer(n_steps=20)``. It is stored on the
+        returned :attr:`~xai4tsc.xai.Explanation.explainer`.
     model : ModelBase
         Model to explain.
     data : np.ndarray
@@ -72,13 +81,12 @@ def generate_explanation(
         read for a per-output (multi-label) encoding with
         ``targets="predicted"``, where it decides which outputs each sample is
         explained for.
-    params : dict, optional
-        Parameters for the explanation method, by default None
     call_params : dict, optional
         Per-call options given into the explainer's ``explain()`` as keyword
-        arguments, by default None. Construction options go in *params*; use this
-        for options an explainer takes per call. Recorded on the returned
-        explanation so the re-explaining metrics replay the same call.
+        arguments, by default None. Construction options go to the explainer's
+        constructor; use this for options an explainer takes per call. Recorded
+        on the returned explanation so the re-explaining metrics replay the same
+        call.
     encoder : object, optional
         Fitted label encoder, used to name the explained classes. ``None`` by
         default, in which case classes are named by index and the class count
@@ -96,8 +104,9 @@ def generate_explanation(
         Device to calculate on, by default ``"cpu"``.
     save_path : Path | str, optional
         Path to save the explanation visualisation to, by default None
-    visualization_type : Sequence[str], optional
-        Plot styles to render when saving, by default ``("points",)``.
+    visualization_type : Sequence[str] or str, optional
+        Plot styles to render when saving, by default ``("points",)``. A single
+        style may be given as a string.
     data_domain : str or Domain, optional
         Signal domain *data* is expressed in, i.e. the domain the model consumes
         (``"time"`` by default; see :attr:`xai4tsc.data.DatasetBase.data_domain`).
@@ -108,7 +117,22 @@ def generate_explanation(
     -------
     Explanation
         An object of the Explanation dataclass.
+
+    Raises
+    ------
+    TypeError
+        If *explainer* is not an :class:`~xai4tsc.xai.ExplainerBase` instance.
     """
+    if not isinstance(explainer, ExplainerBase):
+        raise TypeError(
+            "explainer must be an ExplainerBase instance, e.g. "
+            f"IntegratedGradientsExplainer(), got {explainer!r}."
+        )
+    _check_option("targets", targets, Targets)
+    if isinstance(visualization_type, str):
+        visualization_type = [visualization_type]
+    for vtype in visualization_type:
+        _check_option("visualization_type", vtype, RelType)
     prng = resolve_rng(DEFAULT_SEED, prng)
     if labels is None and targets == "label":
         raise ValueError(
@@ -145,12 +169,11 @@ def generate_explanation(
             )
 
     explanation = _get_explanation(
-        method=method,
+        explainer=explainer,
         model=model,
         data=data[indices],
         labels=None if labels is None else labels[indices],
         encoder=encoder,
-        params=params,
         call_params=call_params,
         targets=targets,
         device=device,
@@ -201,14 +224,13 @@ def _per_output_mask(
 
 
 def _get_explanation(
-    method: str,
+    explainer: ExplainerBase,
     model: ModelBase,
     data: np.ndarray,
     labels: np.ndarray,
     encoder: object,
-    params: dict,
     call_params: dict | None = None,
-    targets: str = "predicted",
+    targets: Targets = "predicted",
     device: str = "cpu",
     orig_indices: np.ndarray | None = None,
     save_path: Path | None = None,
@@ -221,8 +243,8 @@ def _get_explanation(
 
     Parameters
     ----------
-    method : str
-        Explanation method to use, must be contained in EXPLAINERS.
+    explainer : ExplainerBase
+        The explainer to run.
     model : ModelBase
         Model to use.
     data : np.ndarray
@@ -231,13 +253,10 @@ def _get_explanation(
         Target labels.
     encoder : object
         Fitted label encoder for the labels
-    params : dict
-        Parameters for the explanation method
     call_params : dict, optional
         Per-call options given into the explainer's ``explain()`` as keyword
-        arguments, by default None. Construction options go in *params*; use this
-        for options an explainer takes per call. Recorded on the returned
-        explanation so the re-explaining metrics replay the same call.
+        arguments, by default None. Recorded on the returned explanation so the
+        re-explaining metrics replay the same call.
     targets : str, optional
         Which class each attribution explains: ``"predicted"`` (default) the
         model's own top class, ``"label"`` the sample's true class, or ``"all"``
@@ -274,24 +293,18 @@ def _get_explanation(
 
     Raises
     ------
-    NotImplementedError
-        Thrown for not implemented explanation methods.
     ValueError
         If the explainer cannot consume data in *data_domain*.
     """
-    # Instantiate the explainer, filtering config params to its __init__.
-    explainer_key = method.lower()
-    explainer_instance = build_explainer(explainer_key, params)
-
-    data_domain = resolve_data_domain(data_domain)
+    data_domain = Domain(data_domain)
 
     # A domain-changing explainer transforms its input, so it can only start from a
     # domain it knows how to transform; anything else would transform data that is
     # already in the target domain. An empty set means "any domain".
-    accepted = explainer_instance.accepts_data_domains
+    accepted = explainer.accepts_data_domains
     if accepted and data_domain not in accepted:
         raise ValueError(
-            f"Explainer '{explainer_key}' consumes "
+            f"Explainer '{type(explainer).__name__}' consumes "
             f"{sorted(d.value for d in accepted)} data, but the data is "
             f"{data_domain.value}."
         )
@@ -301,18 +314,17 @@ def _get_explanation(
     # For a domain-changing explainer it is the sole declared member; multi-capability
     # ones (e.g. FreqRISE) must set exp.explanation_domain themselves inside
     # explain() and are validated below.
-    domains = explainer_instance.explanation_domains
-    if explainer_instance.explains_in_data_domain:
+    domains = explainer.explanation_domains
+    if explainer.explains_in_data_domain:
         realized_domain = data_domain
     else:
         realized_domain = next(iter(domains)) if len(domains) == 1 else Domain.TIME
 
     # Create explanation data structure
     exp = Explanation(
-        explainer=explainer_key,
-        explainer_params=dict(params or {}),
+        explainer=explainer,
         explainer_call_params=dict(call_params or {}),
-        explanation_type=explainer_instance.explanation_type,
+        explanation_type=explainer.explanation_type,
         exp_values=None,
         data=data,
         labels=labels,
@@ -321,7 +333,7 @@ def _get_explanation(
         meta=None,
         data_domain=data_domain,
         explanation_domain=realized_domain,
-        transform=getattr(explainer_instance, "transform", None),
+        transform=getattr(explainer, "transform", None),
     )
 
     # A 2-D target is one column per model output, per the contract the data
@@ -353,7 +365,7 @@ def _get_explanation(
         )
         exp_values = None
         for ind in range(n_classes):
-            relevance = explainer_instance.explain(
+            relevance = explainer.explain(
                 model, exp, device, [ind] * len(data), **exp.explainer_call_params
             )
             if exp_values is None:
@@ -372,14 +384,14 @@ def _get_explanation(
         # Captum targets must be per-sample integer class indices, which a 1-D
         # label column already is.
         method_targets = np.asarray(labels).astype(int).tolist()
-        exp.exp_values = explainer_instance.explain(
+        exp.exp_values = explainer.explain(
             model, exp, device, method_targets, **exp.explainer_call_params
         )
         exp.explained_targets = np.asarray(method_targets, dtype=int)
     else:
         # Explain the model's predicted class for each sample.
         method_targets = predict_probs(model, exp.data).argmax(axis=1).tolist()
-        exp.exp_values = explainer_instance.explain(
+        exp.exp_values = explainer.explain(
             model, exp, device, method_targets, **exp.explainer_call_params
         )
         exp.explained_targets = np.asarray(method_targets, dtype=int)
@@ -548,74 +560,3 @@ EXPLAINERS = {
     "random_frequency": random_baseline.RandomFrequencyExplainer,
     "random_timefrequency": random_baseline.RandomTimeFreqExplainer,
 }
-
-
-def build_explainer(method: str, params: dict | None) -> ExplainerBase:
-    """
-    Instantiate a registered explainer, filtering *params* to its ``__init__``.
-
-    Shared by :func:`_get_explanation` and by wrapper explainers
-    (:class:`~xai4tsc.xai.base.WrapperExplainer`), so a wrapped base method is
-    built exactly as a top-level one is.
-
-    Parameters
-    ----------
-    method : str
-        Explainer name; looked up case-insensitively in :data:`EXPLAINERS`.
-    params : dict or None
-        Parameters to pass to the explainer's ``__init__``. Keys not matching
-        the constructor signature are dropped via :func:`dict_to_args`. If the
-        class defines no ``__init__``, no parameters are passed.
-
-    Returns
-    -------
-    ExplainerBase
-        A ready-to-use explainer instance.
-
-    Raises
-    ------
-    NotImplementedError
-        If *method* is not registered in :data:`EXPLAINERS`.
-    """
-    explainer_key = method.lower()
-    if explainer_key not in EXPLAINERS:
-        raise NotImplementedError(f"Explainer '{explainer_key}' not supported.")
-    # Only pass config params if the class defines its own __init__ — otherwise
-    # object.__init__ is used, which would receive the full config dict and fail.
-    explainer_class = EXPLAINERS[explainer_key]
-    if "__init__" in explainer_class.__dict__:
-        init_params = dict_to_args(params, explainer_class.__init__)
-        return explainer_class(**(init_params or {}))
-    return explainer_class()
-
-
-def register_explainer(name: str, explainer_class: type) -> None:
-    """
-    Register a custom :class:`~xai4tsc.xai.ExplainerBase` subclass.
-
-    After registration the explainer is available by *name* to
-    :func:`_get_explanation` and to anything else resolving :data:`EXPLAINERS`.
-
-    Parameters
-    ----------
-    name:
-        Key used to look up the explainer (case-insensitive).
-    explainer_class:
-        A concrete subclass of :class:`~xai4tsc.xai.ExplainerBase` (or one of
-        its mid-level subclasses).
-
-    Raises
-    ------
-    TypeError
-        If *explainer_class* is not an
-        :class:`~xai4tsc.xai.ExplainerBase` subclass.
-    """
-    is_subclass = isinstance(explainer_class, type) and issubclass(
-        explainer_class, ExplainerBase
-    )
-    if not is_subclass:
-        raise TypeError(
-            f"Explainer '{name}' must be an ExplainerBase subclass, "
-            f"got {explainer_class!r}."
-        )
-    EXPLAINERS[name.lower()] = explainer_class

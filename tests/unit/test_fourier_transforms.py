@@ -6,10 +6,8 @@ import torch
 
 from xai4tsc import Domain, Explanation
 from xai4tsc.utils import (
-    DomainTransform,
     FourierTransform,
     STFTransform,
-    get_transform,
 )
 from xai4tsc.xai import ExplainerBase
 
@@ -93,33 +91,6 @@ def test_stft_rejects_2d():
         STFTransform(n_fft=16, win_length=16).inverse(torch.randn(4, 16))
 
 
-# ── get_transform factory ─────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_get_transform_none():
-    assert get_transform(None) is None
-
-
-@pytest.mark.unit
-def test_get_transform_fft():
-    t = get_transform({"name": "fft", "params": {}})
-    assert isinstance(t, FourierTransform)
-
-
-@pytest.mark.unit
-def test_get_transform_stft():
-    t = get_transform({"name": "stft", "params": {"n_fft": 16, "win_length": 16}})
-    assert isinstance(t, STFTransform)
-    assert isinstance(t, DomainTransform)
-
-
-@pytest.mark.unit
-def test_get_transform_unknown_raises():
-    with pytest.raises(ValueError, match="Unknown transform name"):
-        get_transform({"name": "wavelet"})
-
-
 # ── Domain schema (Explanation defaults + explainer capability) ───────────────
 
 
@@ -127,7 +98,6 @@ def test_get_transform_unknown_raises():
 def test_explanation_domain_defaults_are_time():
     exp = Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=np.zeros((2, 1, 8)),

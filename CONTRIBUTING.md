@@ -124,10 +124,13 @@ rule:
 
 ## Adding a model, explainer, or metric
 
-All three component types use the same idea: a plain-dict **registry** plus a
-`register_*` function so new components can be added without editing framework
-internals. Subclass the right base, register it, write a unit test, and (for
-documentation) add it to the fitting registry `MODELS`/`EXPLAINERS`/`METRICS`.
+All three component types use the same idea: subclass the right base and pass an
+instance to the package API. Nothing has to be registered. A built-in also gets an
+entry in the fitting catalog `MODELS`/`EXPLAINERS`/`METRICS`, a plain name-to-class
+dict for discovery and the docs, which the runner's lookup tables
+(`experiment_runner/lookups.py`) are built from. A runner config reaches a class
+outside the package through `class_name` + `class_path` on its entry, behind
+`general.allow_external_code: true`. Write a unit test either way.
 
 ### A new model
 
@@ -137,8 +140,8 @@ documentation) add it to the fitting registry `MODELS`/`EXPLAINERS`/`METRICS`.
   inherited.
 - Take `in_channels` and `num_classes` as constructor parameters (the runner
   auto-detects and injects them).
-- Register it: `register_model("my_model", MyModel)` — it lands in the `MODELS`
-  registry (`src/xai4tsc/models/models.py`).
+- A built-in goes into the `MODELS` catalog (`src/xai4tsc/models/models.py`),
+  keyed lowercase.
 
 ### A new explainer
 
@@ -149,29 +152,30 @@ documentation) add it to the fitting registry `MODELS`/`EXPLAINERS`/`METRICS`.
   (a `DataType` set), and `explanation_domains` (a `Domain` set).
 - Implement `explain(...)`, returning an array shaped `(n_samples, C, T)` — or
   `(n_classes, n_samples, C, T)` when explaining all classes.
-- Declare options that configure the method as `__init__` arguments; they are
-  recorded on `Explanation.explainer_params` and the explainer is rebuilt from
-  them when a metric re-explains. Options a method takes per call go in
+- Declare options that configure the method as `__init__` arguments; the
+  instance is kept on `Explanation.explainer`, and a metric that re-explains runs
+  a deep copy of it, so the explainer must survive `copy.deepcopy`. Options a method takes per call go in
   `explain`'s `**kwargs`, which callers supply via `generate_explanation`'s
   `call_params` (a `call_params` block on a runner entry) and which are recorded
   on `Explanation.explainer_call_params` and replayed on re-explanation. Prefer
   named parameters: the runner can verify those, while a key reaching a `**kwargs`
   catch-all cannot be checked and so requires `general.allow_kwargs: true`.
-- Register it: `register_explainer("my_method", MyExplainer)` — keyed lowercase
-  in the `EXPLAINERS` registry (`src/xai4tsc/xai/explain.py`).
+- A built-in goes into the `EXPLAINERS` catalog (`src/xai4tsc/xai/explain.py`),
+  keyed lowercase.
 
 ### A new metric
 
-- Either subclass a Quantus metric directly (the `QuantusEvaluator` wraps it
-  automatically) or subclass `EvaluatorBase` (`src/xai4tsc/evaluation/base.py`)
-  for a custom evaluator.
-- The registry key is the **human-readable capitalized display name**
+- Either subclass a Quantus metric directly (pass the class to
+  `QuantusEvaluator`, e.g. `QuantusEvaluator(MyQuantusMetric)`) or subclass
+  `EvaluatorBase` (`src/xai4tsc/evaluation/base.py`) for a custom evaluator.
+  `evaluate()` takes the evaluator instance.
+- The catalog key is the **human-readable capitalized display name**
 	(e.g. `"AUC"`,  `"Time-Frequency AUC"`).
 - Domain-aware metrics receive `explanation.transform` and/or
   `explanation.metadata` automatically **if** those names appear in the metric's
   `__init__` signature; a `**kwargs` catch-all is *not* enough.
-- Register it: `register_metric("My Metric", MyMetric)` — it lands in the
-  `METRICS` registry (`src/xai4tsc/evaluation/evaluate.py`).
+- A built-in goes into the `METRICS` catalog
+  (`src/xai4tsc/evaluation/evaluate.py`).
 
 > **Re-implementing a published method?** Implement it from source unless it is 
 > not license-compatible (the project is MIT). Cite the paper and repository

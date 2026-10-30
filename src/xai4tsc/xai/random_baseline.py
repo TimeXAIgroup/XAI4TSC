@@ -17,7 +17,7 @@ from .._random import DEFAULT_SEED, resolve_rng
 from ..utils.fourier_transforms import (
     DomainTransform,
     FourierTransform,
-    resolve_transform,
+    check_transform,
 )
 from ._types import DataType, Domain
 from .base import PerturbationExplainer
@@ -32,7 +32,7 @@ class RandomFrequencyExplainer(PerturbationExplainer):
 
     Parameters
     ----------
-    transform : DomainTransform or dict, optional
+    transform : DomainTransform, optional
         Transform from time to frequency domain. Defaults to a full
         :class:`~xai4tsc.utils.fourier_transforms.FourierTransform`.
     seed : int or None
@@ -49,10 +49,10 @@ class RandomFrequencyExplainer(PerturbationExplainer):
 
     def __init__(
         self,
-        transform: DomainTransform | dict | None = None,
+        transform: DomainTransform | None = None,
         seed: int | None = DEFAULT_SEED,
     ) -> None:
-        self.transform = resolve_transform(transform) or FourierTransform()
+        self.transform = check_transform(transform) or FourierTransform()
         self.seed = seed
 
     def explain(
@@ -77,7 +77,7 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
 
     Parameters
     ----------
-    transform : DomainTransform or dict
+    transform : DomainTransform
         Transform from time to time-frequency domain (e.g. an
         :class:`~xai4tsc.utils.fourier_transforms.STFTransform`). Required — there
         is no sensible default window configuration.
@@ -95,10 +95,10 @@ class RandomTimeFreqExplainer(PerturbationExplainer):
 
     def __init__(
         self,
-        transform: DomainTransform | dict | None = None,
+        transform: DomainTransform | None = None,
         seed: int | None = DEFAULT_SEED,
     ) -> None:
-        self.transform = resolve_transform(transform)
+        self.transform = check_transform(transform)
         if self.transform is None:
             raise ValueError(
                 "RandomTimeFreqExplainer requires a time-frequency transform "

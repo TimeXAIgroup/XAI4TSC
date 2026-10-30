@@ -19,6 +19,9 @@ from xai4tsc.data.base import MultiHotLabelEncoder, PowersetLabelEncoder
 from xai4tsc.utils import STFTransform
 from xai4tsc.xai import Domain, Explanation, is_multi_target
 from xai4tsc.xai.explain import _get_explanation, plot_exp
+from xai4tsc.xai.explanation_domains import FrequencyExplainer
+from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
+from xai4tsc.xai.freqrise import FreqRISEExplainer
 
 
 class _TinyNet(nn.Module):
@@ -42,7 +45,6 @@ def _exp(exp_values: np.ndarray, domain: Domain) -> Explanation:
     """Build a minimal Explanation carrying only what the detectors read."""
     return Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=np.zeros(1),
@@ -89,12 +91,13 @@ def test_all_path_freqrise_fft_shape():
     data = np.random.default_rng(0).standard_normal((3, 1, 32)).astype(np.float32)
     encoder = LabelEncoder().fit(np.array([0, 1]))
     exp = _get_explanation(
-        method="freqrise",
+        explainer=FreqRISEExplainer(
+            domain="fft", num_cells=16, num_batches=2, batch_size=2
+        ),
         model=_TinyNet(1, 32, 2).eval(),
         data=data,
         labels=np.array([0, 1, 0], dtype=np.int64),
         encoder=encoder,
-        params={"domain": "fft", "num_cells": 16, "num_batches": 2, "batch_size": 2},
         targets="all",
         device="cpu",
         orig_indices=np.arange(3),
@@ -110,23 +113,19 @@ def test_all_path_freqrise_fft_shape():
 def test_all_path_freqrise_stft_is_5d():
     data = np.random.default_rng(1).standard_normal((2, 1, 64)).astype(np.float32)
     encoder = LabelEncoder().fit(np.array([0, 1]))
-    transform = {
-        "name": "stft",
-        "params": {"n_fft": 16, "win_length": 16, "hop_length": 4},
-    }
+    transform = STFTransform(n_fft=16, win_length=16, hop_length=4)
     exp = _get_explanation(
-        method="freqrise",
+        explainer=FreqRISEExplainer(
+            domain="stft",
+            transform=transform,
+            num_cells=16,
+            num_batches=2,
+            batch_size=2,
+        ),
         model=_TinyNet(1, 64, 2).eval(),
         data=data,
         labels=np.array([0, 1], dtype=np.int64),
         encoder=encoder,
-        params={
-            "domain": "stft",
-            "transform": transform,
-            "num_cells": 16,
-            "num_batches": 2,
-            "batch_size": 2,
-        },
         targets="all",
         device="cpu",
         orig_indices=np.arange(2),
@@ -145,14 +144,13 @@ def test_all_path_frequency_wrapper_preserves_complex():
     data = np.random.default_rng(2).standard_normal((2, 1, 32)).astype(np.float32)
     encoder = LabelEncoder().fit(np.array([0, 1]))
     exp = _get_explanation(
-        method="frequency",
+        explainer=FrequencyExplainer(
+            IntegratedGradientsExplainer(multiply_by_inputs=False)
+        ),
         model=_TinyNet(1, 32, 2).eval(),
         data=data,
         labels=np.array([0, 1], dtype=np.int64),
         encoder=encoder,
-        params={
-            "base": {"method": "integrated_gradients", "multiply_by_inputs": False}
-        },
         targets="all",
         device="cpu",
         orig_indices=np.arange(2),
@@ -176,7 +174,6 @@ def test_plot_exp_time_writes_flat_files(tmp_path, multi):
         exp_values = np.zeros((2, 1, 8), dtype=np.float32)  # (n, C, T)
     exp = Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=data,
@@ -209,7 +206,6 @@ def test_plot_exp_timefrequency_writes_flat_files(tmp_path, multi):
     exp_values = np.abs(np.stack([coeffs, coeffs], axis=0)) if multi else np.abs(coeffs)
     exp = Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=data,
@@ -243,7 +239,6 @@ def _time_exp(labels, encoder, explained=None, multi=False):
     )
     return Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=np.zeros((2, 1, 8), dtype=np.float32),

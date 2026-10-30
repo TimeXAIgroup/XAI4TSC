@@ -1,10 +1,10 @@
 """
 Top-level namespace for the xai4tsc package.
 
-Exports the public API: registries (``MODELS``, ``EXPLAINERS``, ``METRICS``),
-registration functions, and the main entry points
-:func:`load_dataset`, :func:`load_model`, :func:`generate_explanation`,
-:func:`evaluate`, and :func:`plot_relevance`, plus the seeding helpers
+Exports the public API: the catalogs (``MODELS``, ``EXPLAINERS``, ``METRICS``,
+``QUANTUS_METRICS``, ``SYNTHETIC_DATASETS``), the dataset classes, and the main
+entry points :func:`load_model`, :func:`generate_explanation`, :func:`evaluate`, and
+:func:`plot_relevance`, plus the seeding helpers
 (:data:`DEFAULT_SEED`, :func:`derive_seed`, :func:`resolve_rng`) that make a
 result reproducible on its own.
 """
@@ -28,8 +28,6 @@ from .data import (
     SyntheticDataset,
     SynthMultilabelFreqDataset,
     UcrUeaDataset,
-    load_dataset,
-    register_synthetic_dataset,
 )
 from .evaluation import (
     METRICS,
@@ -37,7 +35,6 @@ from .evaluation import (
     EvaluatorBase,
     QuantusEvaluator,
     evaluate,
-    register_metric,
 )
 from .logging_config import disable_logging, enable_logging
 from .models import (
@@ -50,7 +47,6 @@ from .models import (
     PatchTST,
     ResNet,
     load_model,
-    register_model,
 )
 from .utils import (
     DEFAULT_SEED,
@@ -71,7 +67,6 @@ from .xai import (
     PerturbationExplainer,
     SurrogateExplainer,
     generate_explanation,
-    register_explainer,
 )
 
 # Library convention: add NullHandler so xai4tsc is silent by default.
@@ -97,8 +92,6 @@ __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
     "SyntheticDataset",
     "SynthMultilabelFreqDataset",
     "SYNTHETIC_DATASETS",
-    "register_synthetic_dataset",
-    "load_dataset",
     "ExplainerBase",
     "GradientExplainer",
     "PerturbationExplainer",
@@ -120,15 +113,11 @@ __all__ = [  # noqa: RUF022 — grouped by role, not alphabetical
     # Logging
     "enable_logging",
     "disable_logging",
-    # Registries
+    # Catalogs
     "MODELS",
     "EXPLAINERS",
     "METRICS",
     "QUANTUS_METRICS",
-    # Registration hooks
-    "register_model",
-    "register_explainer",
-    "register_metric",
     # Visualization
     "plot_relevance",
     "plot_relevance_f",

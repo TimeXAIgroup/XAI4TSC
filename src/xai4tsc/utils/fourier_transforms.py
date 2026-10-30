@@ -329,72 +329,32 @@ class STFTransform(DomainTransform):
         return signals.reshape(batch_size, -1, signals.shape[-1])
 
 
-def get_transform(transform_config: dict | None) -> DomainTransform | None:
+def check_transform(transform: DomainTransform | None) -> DomainTransform | None:
     """
-    Build a :class:`DomainTransform` from a config dict.
+    Validate a transform argument, returning it unchanged.
+
+    Called from explainer constructors, so a wrong type fails when the explainer
+    is built rather than at the first explanation.
 
     Parameters
     ----------
-    transform_config : dict or None
-        Mapping with a ``"name"`` key (``"fft"`` or ``"stft"``) and a
-        ``"params"`` mapping forwarded to the transform constructor. ``None``
-        yields ``None`` (time-domain, no transform).
+    transform : DomainTransform or None
+        The transform, or ``None`` for the explainer's default.
 
     Returns
     -------
     DomainTransform or None
-        The constructed transform, or ``None`` when *transform_config* is
-        ``None``.
-
-    Raises
-    ------
-    ValueError
-        If ``transform_config["name"]`` is not a supported transform name.
-    """
-    if transform_config is None:
-        return None
-
-    name = transform_config["name"]
-    params = transform_config.get("params", {})
-    if name == "fft":
-        return FourierTransform(**params)
-    if name == "rfft":
-        return RFFTransform(**params)
-    if name == "stft":
-        return STFTransform(**params)
-    raise ValueError(f"Unknown transform name: {name!r}.")
-
-
-def resolve_transform(
-    transform: DomainTransform | dict | None,
-) -> DomainTransform | None:
-    """
-    Normalise a transform argument to a :class:`DomainTransform` or ``None``.
-
-    Accepts an already-built transform (returned as-is), a config dict (built via
-    :func:`get_transform`), or ``None``. Lets explainer constructors take either
-    the object itself or the plain mapping that describes one.
-
-    Parameters
-    ----------
-    transform : DomainTransform or dict or None
-        The transform, a ``get_transform`` config dict, or ``None``.
-
-    Returns
-    -------
-    DomainTransform or None
-        The resolved transform.
+        *transform*.
 
     Raises
     ------
     TypeError
-        If *transform* is not a ``DomainTransform``, dict, or ``None``.
+        If *transform* is neither a ``DomainTransform`` nor ``None``, for
+        example a ``{"name", "params"}`` mapping.
     """
     if transform is None or isinstance(transform, DomainTransform):
         return transform
-    if isinstance(transform, dict):
-        return get_transform(transform)
     raise TypeError(
-        f"transform must be a DomainTransform, config dict, or None, got "
-        f"{type(transform).__name__}."
+        f"transform must be a DomainTransform or None, got "
+        f"{type(transform).__name__}; build it directly, e.g. STFTransform(n_fft=64)."
     )

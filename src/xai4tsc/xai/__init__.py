@@ -1,10 +1,10 @@
 """
-Explainer base classes, built-in Captum methods, and the ``EXPLAINERS`` registry.
+Explainer base classes, built-in Captum methods, and the ``EXPLAINERS`` catalog.
 
 Submodules:
 
 - :mod:`~xai4tsc.xai.explain` — the :func:`generate_explanation` entry point and
-  the ``EXPLAINERS`` registry.
+  the ``EXPLAINERS`` catalog.
 - :mod:`~xai4tsc.xai.feature_attribution` — Captum gradient / perturbation
   methods and TSHAP.
 - :mod:`~xai4tsc.xai.freqrise`, :mod:`~xai4tsc.xai.explanation_domains`,
@@ -27,12 +27,7 @@ from .base import (
     SurrogateExplainer,
     WrapperExplainer,
 )
-from .explain import (
-    EXPLAINERS,
-    build_explainer,
-    generate_explanation,
-    register_explainer,
-)
+from .explain import EXPLAINERS, generate_explanation
 from .wrappers import SignExplainer
 
 __all__ = [
@@ -46,8 +41,6 @@ __all__ = [
     "SignExplainer",
     "SurrogateExplainer",
     "WrapperExplainer",
-    "build_explainer",
     "generate_explanation",
     "is_multi_target",
-    "register_explainer",
 ]

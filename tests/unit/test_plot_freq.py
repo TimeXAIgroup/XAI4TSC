@@ -36,7 +36,6 @@ def _exp(domain, exp_values, data, transform):
     labels = np.zeros(data.shape[0], dtype=np.int64)
     return Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=exp_values,
         data=data,

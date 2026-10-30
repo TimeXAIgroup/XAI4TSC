@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812 — PyTorch ecosystem convention
 from torch import nn
 
-from ..models.base import ModelBase, check_output_activation
+from ..models.base import ModelBase, OutputActivation, check_output_activation
 from ..utils.utils import dict_to_args, load_class_from_path, merge_dicts
 
 logger = logging.getLogger(__name__)
@@ -437,9 +437,9 @@ def load_model(
         raise ValueError(
             f"Cannot build a model from {model_config.get('model')!r}: it is not "
             "a registered model name, and no 'model_ckpt_path' was supplied. "
-            f"Registered models: {sorted(MODELS)}. To build an unregistered "
-            "class, register it with register_model() first, or supply "
-            "'class_name'/'class_path' together with a checkpoint."
+            f"Registered models: {sorted(MODELS)}. To build another class, "
+            "construct it directly, or supply 'class_name'/'class_path' together "
+            "with a checkpoint."
         )
 
     return model
@@ -484,7 +484,7 @@ class FCN(ModelBase):
         num_classes: int,
         filters: tuple[int, int, int] = (128, 256, 128),
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -563,7 +563,7 @@ class LeNet(ModelBase):
         in_channels: int,
         num_classes: int = 2,
         head_hidden: int = 128,
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -691,7 +691,7 @@ class ResNet(ModelBase):
         num_classes: int,
         n_feature_maps: int = 64,
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -782,7 +782,7 @@ class LSTM(ModelBase):
         num_layers: int = 2,
         bidirectional: bool = True,
         dropout: float = 0.0,
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -880,7 +880,7 @@ class PatchTST(ModelBase):
         nhead: int = 8,
         dim_feedforward: int = 256,
         dropout: float = 0.1,
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -1098,7 +1098,7 @@ class XLSTM(ModelBase):
         num_blocks: int = 2,
         num_heads: int = 4,
         dropout: float = 0.0,
-        output_activation: str = "softmax",
+        output_activation: OutputActivation = "softmax",
     ) -> None:
         super().__init__()
         self._record_init_params(locals())
@@ -1132,32 +1132,3 @@ MODELS = {
     "patchtst": PatchTST,
     "xlstm": XLSTM,
 }
-
-
-def register_model(name: str, model_class: type) -> None:
-    """
-    Register a custom model class.
-
-    The class must be a :class:`~xai4tsc.models.base.ModelBase` subclass: the
-    pipeline calls the training, prediction, and evaluation methods provided
-    there, so a plain :class:`torch.nn.Module` is not sufficient. After
-    registration it is available by *name* in :data:`MODELS`.
-
-    Parameters
-    ----------
-    name:
-        Key used to look up the model (matched case-insensitively).
-    model_class:
-        A :class:`~xai4tsc.models.base.ModelBase` subclass.
-
-    Raises
-    ------
-    TypeError
-        If *model_class* is not a :class:`~xai4tsc.models.base.ModelBase`
-        subclass.
-    """
-    if not (isinstance(model_class, type) and issubclass(model_class, ModelBase)):
-        raise TypeError(
-            f"Model '{name}' must be a ModelBase subclass, got {model_class!r}."
-        )
-    MODELS[name] = model_class

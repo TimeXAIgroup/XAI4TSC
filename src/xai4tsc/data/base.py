@@ -5,6 +5,7 @@ import logging
 import math
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -14,15 +15,25 @@ from sklearn.preprocessing import LabelEncoder
 
 from .._domains import Domain
 from .._random import DEFAULT_SEED, resolve_rng
+from ..utils.utils import _check_option
 from .data_loaders import load_json, load_metadata
 
 logger = logging.getLogger(__name__)
+
+SampleStrategy = Literal["random", "first", "last", "stratified"]
+"""How :class:`DatasetBase` selects the samples it keeps under ``max_samples``."""
+
+SeriesPosition = Literal["first", "last"]
+"""Which end of a long series :class:`DatasetBase` keeps under ``max_series_length``."""
+
+Layout = Literal["auto", "bct", "btc"]
+"""Axis order of a stored array, read by :func:`_ensure_bct`."""
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
 
 
-def _ensure_bct(data: np.ndarray, layout: str = "auto") -> np.ndarray:
+def _ensure_bct(data: np.ndarray, layout: Layout = "auto") -> np.ndarray:
     """
     Return *data* in the framework's canonical ``(B, C, T)`` order.
 
@@ -52,9 +63,7 @@ def _ensure_bct(data: np.ndarray, layout: str = "auto") -> np.ndarray:
     ValueError
         If *layout* is not one of ``"auto"``, ``"bct"`` or ``"btc"``.
     """
-    if layout not in ("auto", "bct", "btc"):
-        msg = f"Unknown layout '{layout}'. Choose from: 'auto', 'bct', 'btc'."
-        raise ValueError(msg)
+    _check_option("layout", layout, Layout)
     if data.ndim != 3 or layout == "bct":
         return data
     if layout == "btc":
@@ -613,9 +622,9 @@ class DatasetBase(ABC):
     def __init__(
         self,
         max_samples: int | None = None,
-        sample_strategy: str = "random",
+        sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
-        series_position: str = "first",
+        series_position: SeriesPosition = "first",
     ) -> None:
         """
         Store dataset restriction parameters.
@@ -635,11 +644,20 @@ class DatasetBase(ABC):
         series_position : str
             Which part of a long series to retain: ``"first"`` (default,
             keep the beginning) or ``"last"`` (keep the end).
+
+        Raises
+        ------
+        ValueError
+            If *sample_strategy* or *series_position* is not an allowed value.
         """
         self._max_samples = max_samples
-        self._sample_strategy = sample_strategy
+        self._sample_strategy = _check_option(
+            "sample_strategy", sample_strategy, SampleStrategy
+        )
         self._max_series_length = max_series_length
-        self._series_position = series_position
+        self._series_position = _check_option(
+            "series_position", series_position, SeriesPosition
+        )
         self._split_rng: np.random.Generator | None = None
 
     # ── Abstract ──────────────────────────────────────────────────────────────

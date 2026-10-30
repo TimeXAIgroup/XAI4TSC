@@ -3,9 +3,9 @@ Dataset loading and splitting for time series classification.
 
 Submodules:
 
-- :mod:`~xai4tsc.data.datasets` — the :func:`load_dataset` factory, the
-  :class:`UcrUeaDataset` / :class:`LocalDataset` / :class:`SyntheticDataset`
-  classes, and the ``SYNTHETIC_DATASETS`` registry.
+- :mod:`~xai4tsc.data.datasets` — the :class:`UcrUeaDataset` /
+  :class:`LocalDataset` / :class:`SyntheticDataset` classes and the
+  ``SYNTHETIC_DATASETS`` catalog.
 - :mod:`~xai4tsc.data.data_loaders` — file-format loaders (``FORMAT_LOADERS``)
   and JSON / metadata I/O helpers.
 - :mod:`~xai4tsc.data.base` — the :class:`DatasetBase` ABC (splitting, label
@@ -13,9 +13,9 @@ Submodules:
   labels: :class:`MultiHotLabelEncoder`, which keeps one column per output, and
   :class:`PowersetLabelEncoder`, which collapses each combination to one index.
 
-The factory function :func:`load_dataset` dispatches to
-:class:`UcrUeaDataset`, :class:`LocalDataset`, or :class:`SyntheticDataset`
-based on the arguments supplied.
+Construct the class for the data at hand: :class:`UcrUeaDataset` for an archive
+dataset, :class:`LocalDataset` for files on disk, or a :class:`SyntheticDataset`
+subclass such as :class:`SynthMultilabelFreqDataset`.
 """
 
 from .base import (
@@ -32,8 +32,6 @@ from .datasets import (
     SyntheticDataset,
     SynthMultilabelFreqDataset,
     UcrUeaDataset,
-    load_dataset,
-    register_synthetic_dataset,
 )
 
 __all__ = [
@@ -48,8 +46,6 @@ __all__ = [
     "UcrUeaDataset",
     "class_names",
     "decode_labels",
-    "load_dataset",
     "load_json",
     "load_metadata",
-    "register_synthetic_dataset",
 ]

@@ -2,24 +2,34 @@
 Config loading and validation for the experiment runner.
 
 Resolves user YAML against ``master.yaml``, applies per-method defaults,
-and validates model and explainer names against the live runtime registries.
+and validates model and explainer names against the runner's lookup tables.
 """
 
 import difflib
 import inspect
 import logging
 from pathlib import Path
+from typing import get_args
 
 import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from xai4tsc.utils.plot import RelType
 from xai4tsc.utils.utils import merge_dicts
 
 from .defaults import _RUNNER_OWNED, apply_package_defaults, hyperparam_names
-from .encoders import build_encoder
-from .losses import build_loss
-from .optimizers import build_optimizer
+from .lookups import (
+    EXPLAINERS,
+    METRICS,
+    MODELS,
+    QUANTUS_METRICS,
+    SYNTHETIC_DATASETS,
+    build_encoder,
+    build_loss,
+    build_optimizer,
+    load_external_components,
+)
 
 logger = logging.getLogger("xai4tsc.runner.config")
 
@@ -91,76 +101,6 @@ def result_identities(names: list[str]) -> tuple[list[str], list[int]]:
             ", ".join(sorted(duplicates)),
         )
     return identities, occurrences
-
-
-def register_external_components(config: dict) -> None:
-    """
-    Load and register external model/explainer/metric classes from the config.
-
-    Silent extension fallback used by :func:`config_sanity_check`: when a
-    configured component name is absent from its runtime registry but the item
-    supplies ``class_name`` and ``class_path``, the class is imported from that
-    source file and registered, so the rest of the pipeline treats it like any
-    built-in. This lets users add components without editing package source.
-
-    Gated by ``general.allow_external_code`` (default ``False``). If a path is
-    supplied while the flag is off, a warning is logged and the component is
-    left unregistered, so the subsequent validation in
-    :func:`config_sanity_check` raises a clear error.
-
-    Parameters
-    ----------
-    config : dict
-        Resolved configuration dict.
-    """
-    # Lazy imports to avoid circular dependencies at module level
-    from xai4tsc.evaluation.evaluate import METRICS, register_metric
-    from xai4tsc.models.models import MODELS, register_model
-    from xai4tsc.utils.utils import load_class_from_path
-    from xai4tsc.xai.explain import EXPLAINERS, register_explainer
-
-    allow = config.get("general", {}).get("allow_external_code", False)
-
-    def _load(kind: str, name: str, item: dict) -> type | None:
-        path, class_name = item.get("class_path"), item.get("class_name")
-        if not (path and class_name):
-            return None
-        if not allow:
-            logger.warning(
-                "External source '%s' specified for %s '%s' but "
-                "general.allow_external_code is false; not loading.",
-                path,
-                kind,
-                name,
-            )
-            return None
-        cls = load_class_from_path(path, class_name)
-        logger.info("Registered external %s '%s' from %s", kind, name, path)
-        return cls
-
-    for model_conf in config.get("train_config", {}).get("models", []):
-        name = model_conf["model"]
-        if name.lower() in MODELS:
-            continue
-        # Models are looked up case-insensitively, so register under lower case.
-        if (cls := _load("model", name, model_conf)) is not None:
-            register_model(name.lower(), cls)
-
-    for exp_conf in config.get("explanation_config", {}).get("explainers", []):
-        name = exp_conf["method"]
-        if name.lower() in EXPLAINERS:
-            continue
-        # register_explainer lower-cases the key internally.
-        if (cls := _load("explainer", name, exp_conf)) is not None:
-            register_explainer(name, cls)
-
-    for metric_conf in config.get("evaluation_config", {}).get("metrics", []):
-        name = metric_conf["metric"]
-        if name in METRICS:
-            continue
-        # METRICS keys are exact display names, not lower-cased.
-        if (cls := _load("metric", name, metric_conf)) is not None:
-            register_metric(name, cls)
 
 
 def _free_form_mapping(context: str, key: str) -> bool:
@@ -630,9 +570,9 @@ def _check_component_name(
         )
     else:
         hint = (
-            f"{_suggest(name, set(registry))} Register it at runtime with "
-            f"register_{'explainer' if kind == 'method' else kind}(), or check the "
-            "available names."
+            f"{_suggest(name, set(registry))} Load an external one with "
+            "class_name and class_path (behind general.allow_external_code), or "
+            "check the available names."
         )
     issues.error(where, f"{kind} '{name}' is not registered.{hint}")
     return None
@@ -650,7 +590,7 @@ def strip_runner_keys(
     Drop the runner's own entry keys from an explainer's construction parameters.
 
     An explainer takes its parameters at the entry's top level, so the dict handed
-    to :func:`~xai4tsc.xai.explain.build_explainer` is the whole resolved entry:
+    to :func:`~experiment_runner.explain.build_explainer` is the whole resolved entry:
     the identity key, the ``default_settings`` the runner reads itself, and the
     structural extras. :func:`~xai4tsc.utils.utils.dict_to_args` filters those out
     against a named signature, but it returns the dict **unchanged** for a
@@ -664,10 +604,8 @@ def strip_runner_keys(
     The owned names are derived, never listed: the identity key, the resolved
     ``explanation_config.default_settings`` (which master's key whitelist produced)
     and :data:`_ENTRY_EXTRAS`. A wrapper's nested ``base`` is stripped the same way
-    with one exception: ``method`` stays, because there it is not an identity key
-    the runner reads but an input
-    :class:`~xai4tsc.xai.base.WrapperExplainer` itself consumes - it pops that key
-    to build the method it wraps, and raises ``KeyError`` without it.
+    with one exception: ``method`` stays, because there it names the method the
+    runner builds and passes to the wrapper as its ``base``.
 
     Parameters
     ----------
@@ -686,8 +624,6 @@ def strip_runner_keys(
     dict
         A copy of *params* without the keys the runner owns.
     """
-    from xai4tsc.xai.explain import EXPLAINERS
-
     owned = set(_ENTRY_EXTRAS["method"])
     if not nested:
         owned.add("method")
@@ -918,8 +854,6 @@ def _param_blocks(
             ("init_params", cls.__init__, "this model's constructor", frozenset(), True)
         )
     elif kind == "dataset":
-        from xai4tsc.data.datasets import SYNTHETIC_DATASETS
-
         synthetic = SYNTHETIC_DATASETS.get(name)
         if synthetic is not None and "init_params" in entry:
             blocks.append(
@@ -932,8 +866,6 @@ def _param_blocks(
                 )
             )
     elif kind == "metric":
-        from xai4tsc.evaluation.evaluate import METRICS, QUANTUS_METRICS
-
         quantus = QUANTUS_METRICS.get(name)
         target = quantus if quantus is not None else METRICS.get(name)
         if isinstance(target, type):
@@ -1054,10 +986,6 @@ def _validate_entry(
 
 def _validate_entries(config: dict, issues: ConfigIssues) -> None:
     """Validate every component list entry's name and keys."""
-    from xai4tsc.evaluation.evaluate import METRICS
-    from xai4tsc.models.models import MODELS
-    from xai4tsc.xai.explain import EXPLAINERS
-
     registries = {"model": MODELS, "method": EXPLAINERS, "metric": METRICS}
     allow_kwargs = bool((config.get("general") or {}).get("allow_kwargs", False))
     for kind, (section, list_key) in _ENTRY_SECTIONS.items():
@@ -1088,9 +1016,8 @@ def _configured_data_domains(config: dict) -> set:
     """
     Return the signal domains the configured datasets' arrays are expressed in.
 
-    A dataset entry's ``data_domain`` is only honoured for a local (``path``)
-    dataset; UCR/UEA data is always raw series and a synthetic dataset declares its
-    own domain on the class, so those contribute whatever they declare.
+    UCR/UEA and local data are always raw series; a synthetic dataset declares its
+    own domain on the class.
 
     Parameters
     ----------
@@ -1102,19 +1029,13 @@ def _configured_data_domains(config: dict) -> set:
     set of Domain
         One entry per distinct domain, defaulting to the time domain.
     """
-    from xai4tsc.data.datasets import SYNTHETIC_DATASETS
-    from xai4tsc.xai._types import Domain, resolve_data_domain
+    from xai4tsc.xai._types import Domain
 
     domains = set()
     for entry in config.get("data_config", {}).get("datasets") or []:
         name = entry.get("dataset")
         synthetic = SYNTHETIC_DATASETS.get(name)
-        if synthetic is not None:
-            domains.add(synthetic.data_domain)
-        elif entry.get("path"):
-            domains.add(resolve_data_domain(entry.get("data_domain", "time")))
-        else:
-            domains.add(Domain.TIME)
+        domains.add(synthetic.data_domain if synthetic is not None else Domain.TIME)
     return domains or {Domain.TIME}
 
 
@@ -1377,6 +1298,35 @@ def _validate_training_lookups(config: dict, issues: ConfigIssues) -> None:
                 issues.error(where, str(exc))
 
 
+def _validate_visualization_types(config: dict, issues: ConfigIssues) -> None:
+    """
+    Check each explainer's ``visualization_type`` against the plot styles.
+
+    The package raises on an unknown style too, but only when it plots, which is
+    after the model has trained.
+
+    Parameters
+    ----------
+    config : dict
+        The resolved config.
+    issues : ConfigIssues
+        Collector to append to.
+    """
+    styles = get_args(RelType)
+    section = config.get("explanation_config") or {}
+    for index, entry in enumerate(section.get("explainers") or []):
+        if not isinstance(entry, dict):
+            continue
+        vtypes = entry.get("visualization_type") or []
+        for vtype in [vtypes] if isinstance(vtypes, str) else vtypes:
+            if vtype not in styles:
+                issues.error(
+                    f"explanation_config.explainers[{index}] "
+                    f"('{entry.get('method', '?')}').visualization_type",
+                    f"must list values from {list(styles)}, got {vtype!r}.",
+                )
+
+
 def _validate_explanation_samples(config: dict, issues: ConfigIssues) -> None:
     """
     Check each explainer's ``samples`` block as far as the data allows.
@@ -1491,11 +1441,11 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     """
     Check whether the supplied config contains errors.
 
-    First registers any external components declared via ``class_name`` /
-    ``class_path`` (see :func:`register_external_components`), then validates every
-    component list entry against the live runtime registries, so that both custom
-    entries added via ``register_model()`` / ``register_explainer()`` /
-    ``register_metric()`` and external classes loaded from source are accepted.
+    First adds any external components declared via ``class_name`` /
+    ``class_path`` to the runner's tables (see
+    :func:`~experiment_runner.lookups.load_external_components`), then validates
+    every component list entry against those tables, so external classes loaded
+    from source are accepted.
 
     Problems are **split by consequence** and collected into one report:
 
@@ -1529,9 +1479,9 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
         If any entry names an unregistered component, or a domain-restricted
         metric has no explainer that can satisfy it.
     """
-    # Last-resort silent extension: load external classes into the registries
-    # before validating, so configured-but-unregistered names can still resolve.
-    register_external_components(config)
+    # Load external classes into the runner's tables before validating, so a
+    # configured `class_path` component resolves like a built-in.
+    load_external_components(config)
 
     own_report = issues is None
     issues = ConfigIssues() if issues is None else issues
@@ -1543,11 +1493,9 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
     _validate_encoders(config, issues)
     _validate_perturbation_softmax(config, issues)
     _validate_explanation_samples(config, issues)
+    _validate_visualization_types(config, issues)
     _validate_hyperparams(config, issues)
     _validate_training_lookups(config, issues)
-
-    # Lazy imports to avoid circular dependencies at module level
-    from xai4tsc.xai.explain import EXPLAINERS
 
     # Component names and entry keys, collected so one run reports all of them.
     _validate_entries(config, issues)
@@ -1594,7 +1542,9 @@ def config_sanity_check(config: dict, issues: "ConfigIssues | None" = None) -> b
         # data domain; the per-pair runtime check uses the explanation's own.
         required: set = set()
         for data_domain in data_domains:
-            required |= required_domains_for(metric_conf["metric"], data_domain)
+            required |= required_domains_for(
+                METRICS.get(metric_conf["metric"]), data_domain
+            )
         if required and not (required & explainer_domains):
             err_msg = (
                 f"Metric '{metric_conf['metric']}' requires an explanation in "

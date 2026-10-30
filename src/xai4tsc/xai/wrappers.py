@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     import torch
 
     from ._types import Explanation
+    from .base import ExplainerBase
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ class SignExplainer(WrapperExplainer):
     **Correctness condition.** The base must emit a *raw gradient-space* map,
     i.e. it must not already multiply by the input. SIGN therefore *enforces*
     ``multiply_by_inputs=False`` on the base (Integrated Gradients, DeepLIFT),
-    overriding a user-supplied ``True`` with a warning; gradient-only methods
+    overriding ``True`` on a copy of the base with a warning; gradient-only methods
     (Guided Backpropagation, Deconvolution) already satisfy this. A non-gradient
     base cannot produce the SIGN variant and is flagged with a warning.
 
@@ -46,28 +48,26 @@ class SignExplainer(WrapperExplainer):
 
     Parameters
     ----------
-    base : dict or str
-        The gradient base explainer to extend. Either a bare method name or a
-        config dict with a ``"method"`` key plus that method's hyperparameters
-        (e.g. ``{"method": "integrated_gradients", "multiply_by_inputs": False}``).
+    base : ExplainerBase
+        The gradient base explainer to extend, e.g.
+        ``IntegratedGradientsExplainer(multiply_by_inputs=False)``.
     mu : float
         Sign threshold. Inputs ``< mu`` map to ``-1``, the rest to ``+1``.
     """
 
-    def __init__(self, base: dict | str, mu: float = 0.0) -> None:
+    def __init__(self, base: ExplainerBase, mu: float = 0.0) -> None:
         # SIGN replaces the "x input" weighting with "x sign(input)", so the base
-        # must emit the raw gradient. Enforce multiply_by_inputs=False on the base
-        # config; build_explainer drops the key for methods that do not accept it
-        # (Guided Backpropagation, Deconvolution, Occlusion).
-        base_cfg = {"method": base} if isinstance(base, str) else dict(base)
-        if base_cfg.get("multiply_by_inputs"):
+        # must emit the raw gradient. The override goes on a copy so the caller's
+        # explainer keeps its setting.
+        if getattr(base, "_multiply_by_inputs", False):
             logger.warning(
                 "SIGN: overriding multiply_by_inputs=True to False on base '%s' "
                 "so sign(input) replaces the input weighting.",
-                base_cfg["method"],
+                type(base).__name__,
             )
-        base_cfg["multiply_by_inputs"] = False
-        super().__init__(base_cfg)
+            base = copy.copy(base)
+            base._multiply_by_inputs = False
+        super().__init__(base)
         self.mu = mu
         # SIGN's identity only holds for gradient-space bases. Warn (rather than
         # silently produce a non-SIGN map) for an incompatible base.

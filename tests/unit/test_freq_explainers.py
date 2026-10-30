@@ -15,10 +15,14 @@ from torch import nn
 from xai4tsc.utils import FourierTransform, STFTransform
 from xai4tsc.xai import Domain
 from xai4tsc.xai._types import Explanation
-from xai4tsc.xai.explain import EXPLAINERS, _get_explanation, build_explainer
+from xai4tsc.xai.explain import EXPLAINERS, _get_explanation
 from xai4tsc.xai.explanation_domains import (
     FrequencyExplainer,
     TimeFrequencyExplainer,
+)
+from xai4tsc.xai.feature_attribution import (
+    GuidedBackpropagationExplainer,
+    IntegratedGradientsExplainer,
 )
 from xai4tsc.xai.freqrise import FreqRISEExplainer
 from xai4tsc.xai.random_baseline import (
@@ -48,7 +52,6 @@ def _make_exp(data: np.ndarray) -> Explanation:
     n = data.shape[0]
     return Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=data,
@@ -60,7 +63,7 @@ def _make_exp(data: np.ndarray) -> Explanation:
 
 
 def _stft_cfg():
-    return {"name": "stft", "params": {"n_fft": 16, "win_length": 16, "hop_length": 4}}
+    return STFTransform(n_fft=16, win_length=16, hop_length=4)
 
 
 # ── registration ──────────────────────────────────────────────────────────────
@@ -134,8 +137,7 @@ def test_frequency_wrapper_overrides_domain_and_applicability():
     # Wrapper must NOT inherit the base's {TIME}/{AGNOSTIC}; it changes the domain.
     from xai4tsc.xai._types import DataType
 
-    w = build_explainer("frequency", {"base": "integrated_gradients"})
-    assert isinstance(w, FrequencyExplainer)
+    w = FrequencyExplainer()
     assert w.explanation_domains == {Domain.FREQUENCY}
     assert w.data_applicability == {DataType.TIME_SERIES}
 
@@ -145,14 +147,13 @@ def test_frequency_wrapper_shape_is_fft_of_relevance():
     data = np.random.default_rng(2).standard_normal((4, 1, 32)).astype(np.float32)
     model = _TinyNet(1, 32, 3).eval()
     exp = _get_explanation(
-        method="frequency",
+        explainer=FrequencyExplainer(
+            IntegratedGradientsExplainer(multiply_by_inputs=False)
+        ),
         model=model,
         data=data,
         labels=np.array([0, 1, 2, 0], dtype=np.int64),
         encoder=None,
-        params={
-            "base": {"method": "integrated_gradients", "multiply_by_inputs": False}
-        },
         targets="label",
         device="cpu",
         orig_indices=np.arange(4),
@@ -165,7 +166,14 @@ def test_frequency_wrapper_shape_is_fft_of_relevance():
 @pytest.mark.unit
 def test_timefrequency_wrapper_requires_transform():
     with pytest.raises(ValueError, match="requires a time-frequency transform"):
-        TimeFrequencyExplainer(base="guided_backpropagation")
+        TimeFrequencyExplainer()
+
+
+@pytest.mark.unit
+def test_domain_wrappers_default_their_base():
+    assert isinstance(FrequencyExplainer()._base, IntegratedGradientsExplainer)
+    tf = TimeFrequencyExplainer(transform=_stft_cfg())
+    assert isinstance(tf._base, GuidedBackpropagationExplainer)
 
 
 @pytest.mark.unit
@@ -173,12 +181,11 @@ def test_timefrequency_wrapper_domain_and_shape():
     data = np.random.default_rng(3).standard_normal((2, 1, 64)).astype(np.float32)
     model = _TinyNet(1, 64, 2).eval()
     exp = _get_explanation(
-        method="timefrequency",
+        explainer=TimeFrequencyExplainer(transform=_stft_cfg()),
         model=model,
         data=data,
         labels=np.array([0, 1], dtype=np.int64),
         encoder=None,
-        params={"base": "guided_backpropagation", "transform": _stft_cfg()},
         targets="label",
         device="cpu",
         orig_indices=np.arange(2),
@@ -224,18 +231,13 @@ def test_freqrise_fft_shape_and_domain():
     data = np.random.default_rng(4).standard_normal((3, 1, 32)).astype(np.float32)
     model = _TinyNet(1, 32, 3).eval()
     exp = _get_explanation(
-        method="freqrise",
+        explainer=FreqRISEExplainer(
+            domain="fft", num_batches=3, batch_size=4, num_cells=8, seed=0
+        ),
         model=model,
         data=data,
         labels=np.array([0, 1, 2], dtype=np.int64),
         encoder=None,
-        params={
-            "domain": "fft",
-            "num_batches": 3,
-            "batch_size": 4,
-            "num_cells": 8,
-            "seed": 0,
-        },
         targets="label",
         device="cpu",
         orig_indices=np.arange(3),
@@ -259,7 +261,6 @@ def test_freqrise_stft_shape_domain_and_seed():
         "transform": _stft_cfg(),
     }
     common = dict(
-        method="freqrise",
         model=model,
         data=data,
         labels=np.array([0, 1], dtype=np.int64),
@@ -268,8 +269,8 @@ def test_freqrise_stft_shape_domain_and_seed():
         device="cpu",
         orig_indices=np.arange(2),
     )
-    exp_a = _get_explanation(params=dict(params), **common)
-    exp_b = _get_explanation(params=dict(params), **common)
+    exp_a = _get_explanation(explainer=FreqRISEExplainer(**params), **common)
+    exp_b = _get_explanation(explainer=FreqRISEExplainer(**params), **common)
     assert exp_a.explanation_domain is Domain.TIME_FREQUENCY
     assert exp_a.exp_values.ndim == 4
     assert np.isfinite(exp_a.exp_values).all()
@@ -505,3 +506,20 @@ def test_keep_probability_is_the_mask_keep_rate():
     )
 
     assert masks.mean().item() == pytest.approx(0.9, abs=0.02)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "cls",
+    [
+        FreqRISEExplainer,
+        FrequencyExplainer,
+        TimeFrequencyExplainer,
+        RandomFrequencyExplainer,
+        RandomTimeFreqExplainer,
+    ],
+)
+def test_transform_given_as_a_config_dict_raises(cls):
+    """The package takes the transform object; the runner builds it from a name."""
+    with pytest.raises(TypeError, match="DomainTransform"):
+        cls(transform={"name": "stft", "params": {"n_fft": 16, "win_length": 16}})

@@ -6,6 +6,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal, get_args
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -107,7 +108,10 @@ def _json_safe(value: object) -> bool:
     return True
 
 
-OUTPUT_ACTIVATIONS = ("softmax", "sigmoid")
+OutputActivation = Literal["softmax", "sigmoid"]
+"""The ``output_activation`` values a model accepts."""
+
+OUTPUT_ACTIVATIONS = get_args(OutputActivation)
 """
 The output activations :func:`predict_probs` knows how to apply.
 
@@ -117,7 +121,7 @@ probability and a row does not sum to anything in particular.
 """
 
 
-def check_output_activation(name: str) -> str:
+def check_output_activation(name: OutputActivation) -> OutputActivation:
     """
     Validate an output-activation name, returning it unchanged.
 
@@ -370,8 +374,8 @@ class ModelBase(nn.Module, ABC):
     """
     Base class for all time series classification models.
 
-    Subclass this to add a custom model to xai4tsc.  Register the subclass
-    with :func:`xai4tsc.register_model` to make it available by name.
+    Subclass this to add a custom model to xai4tsc, and pass an instance
+    wherever a model is taken.
 
     Subclasses must implement :meth:`forward`.  All training, prediction,
     evaluation, and persistence logic is provided here and inherited.
@@ -399,8 +403,6 @@ class ModelBase(nn.Module, ABC):
 
             def forward(self, x):
                 return self.fc(self.conv(x).mean(-1))
-
-        xai4tsc.register_model("my_cnn", MyCNN)
     """
 
     name: str

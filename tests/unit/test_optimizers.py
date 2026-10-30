@@ -1,10 +1,10 @@
-"""Unit tests for experiment_runner/optimizers.py — the string to a torch factory."""
+"""Unit tests for experiment_runner/lookups.py - the string to a torch factory."""
 
 from functools import partial
 
 import pytest
 import torch
-from experiment_runner.optimizers import OPTIMIZERS, build_optimizer
+from experiment_runner.lookups import OPTIMIZERS, build_optimizer
 from torch import optim
 
 
@@ -73,3 +73,10 @@ def test_a_non_string_name_is_a_config_error(bad):
 def test_params_without_a_name_raise():
     with pytest.raises(ValueError, match="without an optimizer"):
         build_optimizer(None, {"momentum": 0.9})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["os.system", "torch.nn.MSELoss"])
+def test_a_dotted_path_that_is_not_an_optimizer_class_is_rejected(path):
+    with pytest.raises(ValueError, match="not a subclass of Optimizer"):
+        build_optimizer(path)

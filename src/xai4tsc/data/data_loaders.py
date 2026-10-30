@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -60,6 +61,9 @@ def _load_csv(directory: Path) -> tuple:
 def _load_wfdb(directory: Path) -> tuple:
     raise NotImplementedError("WFDB format loader is not yet implemented.")
 
+
+DataFormat = Literal["numpy", "arff", "csv", "wfdb"]
+"""File formats :data:`FORMAT_LOADERS` has a loader for."""
 
 FORMAT_LOADERS = {
     "numpy": _load_numpy,

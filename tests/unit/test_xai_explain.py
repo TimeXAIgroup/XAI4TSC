@@ -10,14 +10,17 @@ import numpy as np
 import pytest
 import torch
 
-from xai4tsc.xai import DataType, Explanation
+from xai4tsc.xai import DataType, Explanation, SignExplainer
 from xai4tsc.xai import explain as xai_explain
+from xai4tsc.xai.base import ExplainerBase
 from xai4tsc.xai.explain import (
     EXPLAINERS,
     _get_explanation,
-    build_explainer,
     generate_explanation,
-    register_explainer,
+)
+from xai4tsc.xai.feature_attribution import (
+    DeconvolutionExplainer,
+    IntegratedGradientsExplainer,
 )
 
 
@@ -50,7 +53,7 @@ def test_indices_none_samples_positive_shuffles_and_truncates(monkeypatch):
     labels = np.arange(10)
 
     result = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=_DummyModel(),
         data=data,
         labels=labels,
@@ -72,7 +75,7 @@ def test_empty_indices_samples_positive_selects_random(monkeypatch):
     labels = np.arange(8)
 
     generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=_DummyModel(),
         data=data,
         labels=labels,
@@ -96,7 +99,7 @@ def test_empty_indices_nonpositive_samples_returns_none(monkeypatch, caplog):
 
     with caplog.at_level("WARNING", logger="xai4tsc.xai.explain"):
         result = generate_explanation(
-            method="integrated_gradients",
+            explainer=IntegratedGradientsExplainer(),
             model=_DummyModel(),
             data=np.zeros((5, 1, 4), dtype=np.float32),
             labels=np.arange(5),
@@ -115,7 +118,7 @@ def test_no_indices_and_no_sample_count_returns_none(monkeypatch, caplog):
     _patch_get_explanation(monkeypatch)
     with caplog.at_level("WARNING", logger="xai4tsc.xai.explain"):
         result = generate_explanation(
-            method="integrated_gradients",
+            explainer=IntegratedGradientsExplainer(),
             model=_DummyModel(),
             data=np.zeros((5, 1, 4), dtype=np.float32),
             indices=None,
@@ -135,7 +138,7 @@ def test_labels_are_optional_for_predicted_targets(monkeypatch):
 
     monkeypatch.setattr(xai_explain, "_get_explanation", _recorder)
     result = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=_DummyModel(),
         data=np.zeros((5, 1, 4), dtype=np.float32),
         n_samples=2,
@@ -148,10 +151,32 @@ def test_labels_are_optional_for_predicted_targets(monkeypatch):
 def test_label_targets_without_labels_raise():
     with pytest.raises(ValueError, match=r"targets='label'.*needs 'labels'"):
         generate_explanation(
-            method="integrated_gradients",
+            explainer=IntegratedGradientsExplainer(),
             model=_DummyModel(),
             data=np.zeros((5, 1, 4), dtype=np.float32),
             targets="label",
+        )
+
+
+@pytest.mark.unit
+def test_an_unknown_visualization_type_raises_before_explaining():
+    with pytest.raises(ValueError, match=r"visualization_type must be one of"):
+        generate_explanation(
+            explainer=IntegratedGradientsExplainer(),
+            model=_DummyModel(),
+            data=np.zeros((5, 1, 4), dtype=np.float32),
+            visualization_type=["pionts"],
+        )
+
+
+@pytest.mark.unit
+def test_a_single_visualization_type_string_is_one_style():
+    with pytest.raises(ValueError, match=r"got 'pionts'"):
+        generate_explanation(
+            explainer=IntegratedGradientsExplainer(),
+            model=_DummyModel(),
+            data=np.zeros((5, 1, 4), dtype=np.float32),
+            visualization_type="pionts",
         )
 
 
@@ -174,7 +199,7 @@ def test_out_of_range_indices_raise_naming_the_range(monkeypatch, bad):
 
     with pytest.raises(ValueError, match=r"out of range for 10 samples"):
         generate_explanation(
-            method="integrated_gradients",
+            explainer=IntegratedGradientsExplainer(),
             model=_DummyModel(),
             data=data,
             labels=labels,
@@ -190,7 +215,7 @@ def test_in_range_indices_are_passed_through(monkeypatch):
     data = np.zeros((10, 1, 4), dtype=np.float32)
 
     generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=_DummyModel(),
         data=data,
         labels=np.arange(10),
@@ -202,44 +227,14 @@ def test_in_range_indices_are_passed_through(monkeypatch):
 
 
 @pytest.mark.unit
-def test_get_explanation_unknown_method_raises_notimplemented():
-    with pytest.raises(NotImplementedError, match="not supported"):
-        _get_explanation(
-            method="definitely_not_a_method",
+@pytest.mark.parametrize("bad", ["integrated_gradients", IntegratedGradientsExplainer])
+def test_generate_explanation_rejects_anything_but_an_explainer_instance(bad):
+    with pytest.raises(TypeError, match="ExplainerBase instance"):
+        generate_explanation(
+            explainer=bad,
             model=_DummyModel(),
             data=np.zeros((1, 1, 4), dtype=np.float32),
-            labels=np.array([0]),
-            encoder=None,
-            params={},
         )
-
-
-@pytest.mark.unit
-def test_register_explainer_adds_to_registry():
-    from xai4tsc.xai.base import ExplainerBase
-
-    class _Custom(ExplainerBase):
-        explanation_type = "feature_attribution"
-
-        def explain(self, model, exp, device, targets, **kwargs):
-            return None
-
-    register_explainer("DummyXAI", _Custom)
-    try:
-        # Stored case-insensitively (lowercased key).
-        assert EXPLAINERS["dummyxai"] is _Custom
-    finally:
-        EXPLAINERS.pop("dummyxai", None)
-
-
-@pytest.mark.unit
-def test_register_explainer_rejects_non_subclass():
-    class _NotAnExplainer:
-        pass
-
-    with pytest.raises(TypeError, match="ExplainerBase subclass"):
-        register_explainer("BadXAI", _NotAnExplainer)
-    assert "badxai" not in EXPLAINERS
 
 
 # ── data_applicability attribute ──────────────────────────────────────────────────
@@ -255,7 +250,7 @@ _DIRECT_EXPLAINERS = [k for k in EXPLAINERS if k not in _CONFIG_REQUIRING]
 @pytest.mark.unit
 @pytest.mark.parametrize("method", _DIRECT_EXPLAINERS)
 def test_data_applicability_is_nonempty_set_of_datatype(method):
-    inst = build_explainer(method, None)
+    inst = EXPLAINERS[method]()
     assert isinstance(inst.data_applicability, set)
     assert inst.data_applicability
     assert all(isinstance(d, DataType) for d in inst.data_applicability)
@@ -285,12 +280,12 @@ def test_data_applicability_class_level(method):
     ],
 )
 def test_data_applicability_values(method, expected):
-    assert build_explainer(method, None).data_applicability == expected
+    assert EXPLAINERS[method]().data_applicability == expected
 
 
 @pytest.mark.unit
 def test_sign_wrapper_inherits_base_data_applicability():
-    sign = build_explainer("sign", {"base": {"method": "deconvolution"}})
+    sign = SignExplainer(DeconvolutionExplainer())
     assert (
         sign.data_applicability == sign._base.data_applicability == {DataType.AGNOSTIC}
     )
@@ -325,10 +320,8 @@ class _FixedProbs(torch.nn.Module):
         return self._logits[: x.shape[0]]
 
 
-def _register_recording_explainer(monkeypatch):
-    """Register a stub explainer that records the targets it is handed."""
-    from xai4tsc.xai.base import ExplainerBase
-
+def _recording_explainer(monkeypatch):
+    """Build a stub explainer that records the targets it is handed."""
     recorded = {"targets": []}
 
     class _Recorder(ExplainerBase):
@@ -338,28 +331,23 @@ def _register_recording_explainer(monkeypatch):
             recorded["targets"].append(list(targets))
             return np.zeros((len(exp.data), 1, 4), dtype=np.float32)
 
-    register_explainer("_RecorderXAI", _Recorder)
     monkeypatch.setattr(
         xai_explain, "plot_exp", lambda *args, **kwargs: None, raising=False
     )
-    return recorded
+    return _Recorder(), recorded
 
 
 def _explain(monkeypatch, labels, targets, model=None, **kwargs):
-    recorded = _register_recording_explainer(monkeypatch)
-    try:
-        exp = _get_explanation(
-            method="_RecorderXAI",
-            model=model if model is not None else _DummyModel(),
-            data=np.zeros((len(labels), 1, 4), dtype=np.float32),
-            labels=np.asarray(labels),
-            encoder=_StubEncoder(np.shape(labels)[1] if np.ndim(labels) > 1 else 3),
-            params={},
-            targets=targets,
-            **kwargs,
-        )
-    finally:
-        EXPLAINERS.pop("_recorderxai", None)
+    explainer, recorded = _recording_explainer(monkeypatch)
+    exp = _get_explanation(
+        explainer=explainer,
+        model=model if model is not None else _DummyModel(),
+        data=np.zeros((len(labels), 1, 4), dtype=np.float32),
+        labels=np.asarray(labels),
+        encoder=_StubEncoder(np.shape(labels)[1] if np.ndim(labels) > 1 else 3),
+        targets=targets,
+        **kwargs,
+    )
     return exp, recorded
 
 
@@ -440,7 +428,6 @@ def test_a_mask_that_does_not_match_the_stack_raises():
     # would score one output's attributions against another's samples.
     exp = Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=np.zeros((3, 4, 1, 8), dtype=np.float32),
         data=np.zeros((4, 1, 8), dtype=np.float32),
@@ -469,21 +456,17 @@ def test_label_targets_pass_1d_class_indices_through_unchanged():
 
 @pytest.mark.unit
 def test_without_an_encoder_the_model_output_width_is_the_class_count(monkeypatch):
-    recorded = _register_recording_explainer(monkeypatch)
+    explainer, recorded = _recording_explainer(monkeypatch)
     model = _FixedProbs([[1.0, 2.0, 3.0, 4.0]] * 2)
     model.output_activation = "softmax"
-    try:
-        exp = _get_explanation(
-            method="_RecorderXAI",
-            model=model,
-            data=np.zeros((2, 1, 4), dtype=np.float32),
-            labels=None,
-            encoder=None,
-            params={},
-            targets="all",
-        )
-    finally:
-        EXPLAINERS.pop("_recorderxai", None)
+    exp = _get_explanation(
+        explainer=explainer,
+        model=model,
+        data=np.zeros((2, 1, 4), dtype=np.float32),
+        labels=None,
+        encoder=None,
+        targets="all",
+    )
     assert exp.exp_values.shape[0] == 4
     assert len(recorded["targets"]) == 4
 
@@ -491,18 +474,14 @@ def test_without_an_encoder_the_model_output_width_is_the_class_count(monkeypatc
 @pytest.mark.unit
 def test_without_labels_a_sigmoid_head_is_explained_per_output(monkeypatch):
     # Argmaxing independent sigmoids would explain one label per sample.
-    _register_recording_explainer(monkeypatch)
+    explainer, _ = _recording_explainer(monkeypatch)
     model = _FixedProbs([[5.0, -5.0, 5.0]])
-    try:
-        exp = _get_explanation(
-            method="_RecorderXAI",
-            model=model,
-            data=np.zeros((1, 1, 4), dtype=np.float32),
-            labels=None,
-            encoder=None,
-            params={},
-            targets="predicted",
-        )
-    finally:
-        EXPLAINERS.pop("_recorderxai", None)
+    exp = _get_explanation(
+        explainer=explainer,
+        model=model,
+        data=np.zeros((1, 1, 4), dtype=np.float32),
+        labels=None,
+        encoder=None,
+        targets="predicted",
+    )
     np.testing.assert_array_equal(exp.target_mask, np.array([[True], [False], [True]]))

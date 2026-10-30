@@ -56,7 +56,7 @@ from ..models.base import predict_probs
 from ..utils.fourier_transforms import (
     DomainTransform,
     RFFTransform,
-    resolve_transform,
+    check_transform,
 )
 from ._types import DataType, Domain
 from .base import PerturbationExplainer
@@ -80,7 +80,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         ``num_batches * batch_size``.
     domain : str
         ``"fft"`` (frequency, via real FFT) or ``"stft"`` (time-frequency).
-    transform : DomainTransform or dict, optional
+    transform : DomainTransform, optional
         Transform used for ``domain="stft"`` (an
         :class:`~xai4tsc.utils.fourier_transforms.STFTransform`). Required for
         ``"stft"``; ignored for ``"fft"`` (which uses ``torch.fft.rfft``).
@@ -118,7 +118,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         batch_size: int = 10,
         num_batches: int = 300,
         domain: str = "stft",
-        transform: DomainTransform | dict | None = None,
+        transform: DomainTransform | None = None,
         num_cells: int = 8,
         probability_of_keep: float = 0.5,
         seed: int | None = DEFAULT_SEED,
@@ -128,7 +128,7 @@ class FreqRISEExplainer(PerturbationExplainer):
         self.batch_size = batch_size
         self.num_batches = num_batches
         self.domain = domain
-        self.transform = resolve_transform(transform)
+        self.transform = check_transform(transform)
         if domain == "stft" and self.transform is None:
             raise ValueError(
                 "FreqRISE with domain='stft' requires a time-frequency transform "

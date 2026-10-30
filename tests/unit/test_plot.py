@@ -46,23 +46,12 @@ def test_plot_relevance_rel_types(tmp_path, rel_type):
 
 
 @pytest.mark.unit
-def test_unknown_rel_type_renders_the_points_default(tmp_path):
-    """
-    An unrecognised style renders points rather than raising.
-
-    This is a deliberate choice, not an oversight: a style name only selects an
-    overlay, so a wrong one costs a re-render and touches no attribution, metric
-    or saved array. Pinning it here stops it turning into a raise by accident.
-    """
+def test_unknown_rel_type_raises_listing_the_allowed_ones(tmp_path):
     signal, relevance = _signal_relevance()
-    known = plot_relevance(
-        signal, relevance, rel_type="points", save_path=tmp_path / "known.png"
-    )
-    unknown = plot_relevance(
-        signal, relevance, rel_type="pionts", save_path=tmp_path / "unknown.png"
-    )
-
-    assert known.read_bytes() == unknown.read_bytes()
+    with pytest.raises(ValueError, match=r"rel_type must be one of .*'bar'"):
+        plot_relevance(
+            signal, relevance, rel_type="pionts", save_path=tmp_path / "r.png"
+        )
 
 
 @pytest.mark.unit

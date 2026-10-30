@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+import quantus as q
 import torch
 
 from xai4tsc.data import PowersetLabelEncoder
@@ -370,6 +371,7 @@ def localisation_setup():
     from torch import nn
 
     from xai4tsc.xai.explain import _get_explanation
+    from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
 
     class _Tiny(nn.Module):
         def __init__(self):
@@ -385,12 +387,11 @@ def localisation_setup():
     labels = np.array([0, 1, 0, 1])
     model = _Tiny().eval()
     exp = _get_explanation(
-        method="Integrated_Gradients",
+        explainer=IntegratedGradientsExplainer(n_steps=8),
         model=model,
         data=data,
         labels=labels,
         encoder=LabelEncoder().fit(labels),
-        params={"n_steps": 8},
         targets="label",
         orig_indices=np.arange(4),
         device="cpu",
@@ -413,7 +414,7 @@ def test_s_batch_is_single_channel_and_matches_the_input(localisation_setup):
     _, exp = localisation_setup
     exp.metadata = [{"ground_truth": [{"pos": 2, "len": 4, "channels": [0]}]}] * 4
 
-    s_batch, keep = QuantusEvaluator("Pointing Game")._ground_truth_batch(exp, exp.data)
+    s_batch, keep = QuantusEvaluator(q.PointingGame)._ground_truth_batch(exp, exp.data)
 
     assert s_batch.shape == (4, 1, 24)
     assert s_batch.dtype == bool
@@ -440,7 +441,7 @@ def test_samples_without_a_region_are_dropped_not_scored(localisation_setup):
         {"ground_truth": []},
     ]
 
-    s_batch, keep = QuantusEvaluator("Pointing Game")._ground_truth_batch(exp, exp.data)
+    s_batch, keep = QuantusEvaluator(q.PointingGame)._ground_truth_batch(exp, exp.data)
 
     assert keep.tolist() == [True, False, True, False]
     assert s_batch.shape[0] == 2, "only the samples with a region are handed over"
@@ -472,36 +473,37 @@ def test_nothing_to_localise_against_raises(localisation_setup, label, metadata)
     exp.metadata = metadata
 
     with pytest.raises(ValueError, match=r"ground-truth|no metadata"):
-        QuantusEvaluator("Pointing Game")._ground_truth_batch(exp, exp.data)
+        QuantusEvaluator(q.PointingGame)._ground_truth_batch(exp, exp.data)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "metric",
     [
-        "AUC",
-        "Attribution Localisation",
-        "Pointing Game",
-        "Relevance Mass Accuracy",
-        "Relevance Rank Accuracy",
-        "Top-K Intersection",
+        q.AUC,
+        q.AttributionLocalisation,
+        q.PointingGame,
+        q.RelevanceMassAccuracy,
+        q.RelevanceRankAccuracy,
+        q.TopKIntersection,
     ],
+    ids=lambda c: c.__name__,
 )
 def test_every_localisation_metric_scores_with_ground_truth(localisation_setup, metric):
     """All six were raising `s_batch should be of type np.ndarray` before this."""
+    from xai4tsc.evaluation.base import QuantusEvaluator
     from xai4tsc.evaluation.evaluate import evaluate
 
     model, exp = localisation_setup
     exp.metadata = [{"ground_truth": [{"pos": 4, "len": 8}]}] * 4
 
     score = evaluate(
-        model,
-        metric,
+        QuantusEvaluator(metric, **_CHEAP),
+        model=model,
         explanation=exp,
         data=exp.data,
         labels=exp.labels,
-        metric_class_params=_CHEAP,
-        metric_call_params={"softmax": True},
+        call_params={"softmax": True},
     )
 
     assert score is not None
@@ -511,18 +513,18 @@ def test_every_localisation_metric_scores_with_ground_truth(localisation_setup, 
 @pytest.mark.unit
 def test_a_non_localisation_metric_gets_no_s_batch(localisation_setup):
     """Only the localisation group needs masks; nothing else should see them."""
+    from xai4tsc.evaluation.base import QuantusEvaluator
     from xai4tsc.evaluation.evaluate import evaluate
 
     model, exp = localisation_setup
     exp.metadata = None  # would raise if s_batch were built
 
     score = evaluate(
-        model,
-        "Complexity",
+        QuantusEvaluator(q.Complexity, **_CHEAP),
+        model=model,
         explanation=exp,
         data=exp.data,
         labels=exp.labels,
-        metric_class_params=_CHEAP,
     )
 
     assert score is not None
@@ -533,29 +535,33 @@ def test_a_non_localisation_metric_gets_no_s_batch(localisation_setup):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "metric", ["Complexity", "Pixel-Flipping", "Max-Sensitivity", "Time-Frequency AUC"]
+    "metric", [q.Complexity, q.PixelFlipping, q.MaxSensitivity, None]
 )
 def test_metrics_that_need_no_ground_truth_are_never_blocked(
     localisation_setup, metric
 ):
     """Only the localisation group has this requirement."""
-    from xai4tsc.evaluation import ground_truth_missing
+    from xai4tsc.evaluation import QuantusEvaluator, ground_truth_missing
+    from xai4tsc.evaluation.timefrequency_auc import TimeFrequencyAUCEvaluator
 
     _, exp = localisation_setup
     exp.metadata = None
+    evaluator = (
+        TimeFrequencyAUCEvaluator() if metric is None else QuantusEvaluator(metric)
+    )
 
-    assert ground_truth_missing(metric, exp) is None
+    assert ground_truth_missing(evaluator, exp) is None
 
 
 @pytest.mark.unit
 def test_a_dataset_without_ground_truth_is_an_unmet_requirement(localisation_setup):
     """Most datasets declare none; that is a skip, not a failure."""
-    from xai4tsc.evaluation import ground_truth_missing
+    from xai4tsc.evaluation import QuantusEvaluator, ground_truth_missing
 
     _, exp = localisation_setup
     exp.metadata = None
 
-    reason = ground_truth_missing("Pointing Game", exp)
+    reason = ground_truth_missing(QuantusEvaluator(q.PointingGame), exp)
 
     assert reason is not None
     assert "declares none" in reason
@@ -563,12 +569,12 @@ def test_a_dataset_without_ground_truth_is_an_unmet_requirement(localisation_set
 
 @pytest.mark.unit
 def test_regions_present_means_nothing_is_missing(localisation_setup):
-    from xai4tsc.evaluation import ground_truth_missing
+    from xai4tsc.evaluation import QuantusEvaluator, ground_truth_missing
 
     _, exp = localisation_setup
     exp.metadata = [{"ground_truth": [{"pos": 0, "len": 4}]}] * 4
 
-    assert ground_truth_missing("Pointing Game", exp) is None
+    assert ground_truth_missing(QuantusEvaluator(q.PointingGame), exp) is None
 
 
 @pytest.mark.unit
@@ -580,18 +586,19 @@ def test_malformed_metadata_is_not_reported_as_a_skip(localisation_setup):
     expected row in the results, the other needs fixing — so the predicate lets
     the error through rather than swallowing it.
     """
-    from xai4tsc.evaluation import ground_truth_missing
+    from xai4tsc.evaluation import QuantusEvaluator, ground_truth_missing
 
     _, exp = localisation_setup
     exp.metadata = [{"ground_truth": [{"pos": 0, "lenght": 4}]}]
 
     with pytest.raises(ValueError, match="unrecognised field"):
-        ground_truth_missing("Pointing Game", exp)
+        ground_truth_missing(QuantusEvaluator(q.PointingGame), exp)
 
 
 @pytest.mark.unit
 def test_evaluate_skips_rather_than_raising(localisation_setup, caplog):
     """End to end: no ground truth yields None and a logged reason, not an error."""
+    from xai4tsc.evaluation.base import QuantusEvaluator
     from xai4tsc.evaluation.evaluate import evaluate
 
     model, exp = localisation_setup
@@ -599,16 +606,15 @@ def test_evaluate_skips_rather_than_raising(localisation_setup, caplog):
 
     with caplog.at_level("WARNING"):
         score = evaluate(
-            model,
-            "Pointing Game",
+            QuantusEvaluator(q.PointingGame, **_CHEAP),
+            model=model,
             explanation=exp,
             data=exp.data,
             labels=exp.labels,
-            metric_class_params=_CHEAP,
         )
 
     assert score is None
-    assert "Pointing Game" in caplog.text
+    assert "PointingGame" in caplog.text
     assert "ground-truth" in caplog.text
 
 
@@ -719,6 +725,7 @@ def multichannel_setup():
     from torch import nn
 
     from xai4tsc.xai.explain import _get_explanation
+    from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
 
     class _Wide(nn.Module):
         def __init__(self):
@@ -733,12 +740,11 @@ def multichannel_setup():
     labels = np.array([0, 1])
     model = _Wide().eval()
     exp = _get_explanation(
-        method="Integrated_Gradients",
+        explainer=IntegratedGradientsExplainer(n_steps=4),
         model=model,
         data=data,
         labels=labels,
         encoder=LabelEncoder().fit(labels),
-        params={"n_steps": 4},
         targets="label",
         orig_indices=np.arange(2),
         device="cpu",
@@ -750,7 +756,7 @@ def _batch(exp):
     """Run the ground-truth batch builder for a localisation metric."""
     from xai4tsc.evaluation.base import QuantusEvaluator
 
-    return QuantusEvaluator("Pointing Game")._ground_truth_batch(exp, exp.data)
+    return QuantusEvaluator(q.PointingGame)._ground_truth_batch(exp, exp.data)
 
 
 @pytest.mark.unit
@@ -781,7 +787,7 @@ def test_collapsing_a_channel_scoped_region_warns(multichannel_setup, caplog):
         _batch(exp)
 
     assert "unioned across the 3 channels" in caplog.text
-    assert "Pointing Game" in caplog.text
+    assert "PointingGame" in caplog.text
 
 
 @pytest.mark.unit

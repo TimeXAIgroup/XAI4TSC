@@ -1,8 +1,8 @@
-"""Unit tests for experiment_runner/encoders.py — the config string to an encoder."""
+"""Unit tests for experiment_runner/lookups.py - the config string to an encoder."""
 
 import numpy as np
 import pytest
-from experiment_runner.encoders import ENCODERS, build_encoder
+from experiment_runner.lookups import ENCODERS, build_encoder
 from sklearn.preprocessing import LabelBinarizer, LabelEncoder
 
 from xai4tsc.data import MultiHotLabelEncoder, PowersetLabelEncoder
@@ -91,6 +91,25 @@ def test_an_unresolvable_dotted_path_raises(name):
 @pytest.mark.unit
 def test_a_dotted_path_needing_constructor_arguments_raises():
     with pytest.raises(ValueError, match="without arguments"):
+        build_encoder("sklearn.compose.ColumnTransformer")
+
+
+@pytest.mark.unit
+def test_a_dotted_path_to_a_function_is_rejected_without_running_it(monkeypatch):
+    # `encode: os.system` with `encode_params: {command: ...}` used to run the
+    # command during the config check. A dotted path must name an encoder class.
+    import os
+
+    calls = []
+    monkeypatch.setattr(os, "system", lambda *a, **k: calls.append((a, k)))
+    with pytest.raises(ValueError, match="not a class with fit and transform"):
+        build_encoder("os.system", {"command": "echo pwned"})
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_a_dotted_path_to_a_class_without_fit_and_transform_is_rejected():
+    with pytest.raises(ValueError, match="not a class with fit and transform"):
         build_encoder("numpy.dtype")
 
 

@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 from sklearn.preprocessing import LabelBinarizer, LabelEncoder, OrdinalEncoder
 
-from xai4tsc.data import load_dataset
 from xai4tsc.data.base import (
     DatasetBase,
     MultiHotLabelEncoder,
@@ -22,14 +21,12 @@ from xai4tsc.data.base import (
 )
 from xai4tsc.data.data_loaders import load_json, load_metadata
 from xai4tsc.data.datasets import (
-    SYNTHETIC_DATASETS,
     LocalDataset,
     SyntheticDataset,
     SynthMultilabelFreqDataset,
     UcrUeaDataset,
     _pad_variable_length,
     _powerset,
-    register_synthetic_dataset,
 )
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -362,50 +359,6 @@ def test_local_dataset_max_samples_restricts_in_split(tmp_path):
     assert sum(len(s[0]) for s in splits) == 10
 
 
-# ── load_dataset factory ──────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_load_dataset_with_path_returns_local(tmp_path):
-    _write_numpy_dataset(tmp_path)
-    ds = load_dataset(name="my_ecg", path=str(tmp_path))
-    assert isinstance(ds, LocalDataset)
-    assert ds.name == "my_ecg"
-
-
-@pytest.mark.unit
-def test_load_dataset_without_path_returns_ucr():
-    ds = load_dataset(name="GunPoint", download=False)
-    assert isinstance(ds, UcrUeaDataset)
-    assert ds.name == "GunPoint"
-
-
-@pytest.mark.unit
-def test_load_dataset_with_path_tolerates_runner_only_kwargs(tmp_path):
-    # The runner passes `download` on every non-synthetic dataset, but
-    # LocalDataset does not accept it. It must be stripped here, as the synthetic
-    # and UCR branches already do for their own inapplicable keys, or `path:` is
-    # unusable from a config.
-    _write_numpy_dataset(tmp_path)
-    ds = load_dataset(
-        name="my_ecg",
-        path=str(tmp_path),
-        download=True,
-        data_format="numpy",
-    )
-    assert isinstance(ds, LocalDataset)
-
-
-@pytest.mark.unit
-def test_load_dataset_rejects_the_retired_use_predefined_splits_kwarg(tmp_path):
-    # It selects a partition, so dropping it would hand back the pooled split to
-    # a caller who asked for the predefined one. The message has to name where it
-    # went.
-    _write_numpy_dataset(tmp_path)
-    with pytest.raises(TypeError, match="parameter of split"):
-        load_dataset(name="my_ecg", path=str(tmp_path), use_predefined_splits=True)
-
-
 @pytest.mark.unit
 def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, caplog):
     # `use_predefined_splits` is meaningful only for a dataset that owns a
@@ -413,7 +366,7 @@ def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, 
     # and still return a usable split, since there is no other partition that
     # could have been served.
     _write_numpy_dataset(tmp_path)
-    ds = load_dataset(name="my_ecg", path=str(tmp_path))
+    ds = LocalDataset(tmp_path, name="my_ecg")
     with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
         splits, _ = ds.split(train_split=0.8, val_split=0.1, use_predefined_splits=True)
     assert "defines no partition of its own" in caplog.text
@@ -421,13 +374,6 @@ def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, 
     # at the config key a runner spells that with.
     assert "load_saved_splits" in caplog.text
     assert len(splits) == 3
-
-
-@pytest.mark.unit
-def test_load_dataset_forwards_restriction_kwargs(tmp_path):
-    _write_numpy_dataset(tmp_path)
-    ds = load_dataset(name="my_ecg", path=str(tmp_path), max_samples=5)
-    assert ds._max_samples == 5
 
 
 # ── _pad_variable_length ────────────────────────────────────────────────────────
@@ -642,19 +588,6 @@ def test_load_numpy_prefers_separate_metadata_file(tmp_path):
 
 
 # ── SyntheticDataset / SynthMultilabelFreqDataset ───────────────────────────────
-
-
-@pytest.mark.unit
-def test_load_dataset_dispatches_to_synthetic_not_ucr():
-    ds = load_dataset(
-        "Synth_Multilabel_Freq",
-        num_samples_per_pattern=2,
-        sample_length=64,
-        frequency_window_length=16,
-        seed=1,
-    )
-    assert isinstance(ds, SynthMultilabelFreqDataset)
-    assert not isinstance(ds, UcrUeaDataset)
 
 
 class _SynthStub(SyntheticDataset):
@@ -950,7 +883,7 @@ def test_local_metadata_survives_sample_restriction(tmp_path):
     (tmp_path / "metadata.json").write_text(
         json.dumps([{"ground_truth": [{"pos": i, "len": 2}]} for i in range(40)])
     )
-    ds = load_dataset(name="probe", path=str(tmp_path), max_samples=10)
+    ds = LocalDataset(tmp_path, name="probe", max_samples=10)
     splits, _encoder = ds.split(train_split=0.8, val_split=0.1, random_state=42)
 
     assert sum(len(y) for _x, y, _m in splits) == 10
@@ -971,12 +904,11 @@ def test_package_api_generates_and_splits(tmp_path):
     """
     The documented package call must work, which it could not before.
 
-    `load_dataset(name, cache_dir=...).split(...)` used to raise
+    Building the dataset and calling `.split(...)` used to raise
     NotImplementedError and tell a package user to set a runner config key, so the
     only shipped synthetic dataset was reachable from the runner alone.
     """
-    ds = load_dataset(
-        "Synth_Multilabel_Freq",
+    ds = SynthMultilabelFreqDataset(
         cache_dir=tmp_path,
         num_samples_per_pattern=8,
         sample_length=64,
@@ -1280,20 +1212,6 @@ def test_synthetic_layout_predicates(tmp_path):
     assert not SyntheticDataset.is_raw_layout(tmp_path / "missing")
 
 
-@pytest.mark.unit
-def test_register_synthetic_dataset_roundtrip():
-    class _Tiny(SyntheticDataset):
-        def generate_dataset(self):
-            return np.zeros((4, 1, 8), dtype=np.float32), np.zeros(4, dtype=int), None
-
-    try:
-        register_synthetic_dataset("_tiny_test", _Tiny)
-        assert SYNTHETIC_DATASETS["_tiny_test"] is _Tiny
-        assert isinstance(load_dataset("_tiny_test"), _Tiny)
-    finally:
-        SYNTHETIC_DATASETS.pop("_tiny_test", None)
-
-
 # ── _ensure_bct layout ────────────────────────────────────────────────────────
 
 
@@ -1328,8 +1246,24 @@ def test_ensure_bct_layout_auto_is_the_default_and_unchanged():
 
 @pytest.mark.unit
 def test_ensure_bct_rejects_unknown_layout():
-    with pytest.raises(ValueError, match="Unknown layout"):
+    with pytest.raises(ValueError, match="layout must be one of"):
         _ensure_bct(np.zeros((4, 2, 8)), "bogus")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("option", "allowed"),
+    [
+        ("sample_strategy", "'stratified'"),
+        ("series_position", "'last'"),
+        ("data_format", "'arff'"),
+        ("layout", "'btc'"),
+    ],
+)
+def test_local_dataset_rejects_an_unknown_option_at_construction(option, allowed):
+    # Raised when the dataset is built, naming the allowed values, not at load().
+    with pytest.raises(ValueError, match=rf"{option} must be one of \[.*{allowed}"):
+        LocalDataset("/tmp/x", name="x", **{option: "bogus"})
 
 
 @pytest.mark.unit

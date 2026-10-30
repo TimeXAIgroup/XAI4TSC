@@ -21,13 +21,18 @@ import torch
 from ..utils.fourier_transforms import (
     DomainTransform,
     FourierTransform,
-    resolve_transform,
+    check_transform,
 )
 from ._types import DataType, Domain
 from .base import WrapperExplainer
+from .feature_attribution import (
+    GuidedBackpropagationExplainer,
+    IntegratedGradientsExplainer,
+)
 
 if TYPE_CHECKING:
     from ._types import Explanation
+    from .base import ExplainerBase
 
 
 class FrequencyExplainer(WrapperExplainer):
@@ -35,14 +40,14 @@ class FrequencyExplainer(WrapperExplainer):
     Map a base method's relevance into the frequency domain.
 
     Runs the wrapped time-domain attributor, then transforms its relevance with
-    a Fourier transform. The base is configured exactly as if invoked by name.
+    a Fourier transform.
 
     Parameters
     ----------
-    base : dict or str
-        The base explainer to wrap (method name or config dict). Defaults to
-        ``"integrated_gradients"``.
-    transform : DomainTransform or dict, optional
+    base : ExplainerBase, optional
+        The time-domain explainer to wrap. Defaults to
+        :class:`~xai4tsc.xai.feature_attribution.IntegratedGradientsExplainer`.
+    transform : DomainTransform, optional
         Transform to the frequency domain. Defaults to a full
         :class:`~xai4tsc.utils.fourier_transforms.FourierTransform`.
     """
@@ -54,17 +59,17 @@ class FrequencyExplainer(WrapperExplainer):
 
     def __init__(
         self,
-        base: dict | str = "integrated_gradients",
-        transform: DomainTransform | dict | None = None,
+        base: ExplainerBase | None = None,
+        transform: DomainTransform | None = None,
     ) -> None:
-        super().__init__(base)
+        super().__init__(IntegratedGradientsExplainer() if base is None else base)
         # WrapperExplainer.__init__ copies the base's {TIME} onto the instance;
         # this wrapper *changes* the domain, so override after super().__init__().
         self.data_applicability = {DataType.TIME_SERIES}
         self.explanation_domains = {Domain.FREQUENCY}
         self.explains_in_data_domain = False
         self.accepts_data_domains = {Domain.TIME}
-        self.transform = resolve_transform(transform) or FourierTransform()
+        self.transform = check_transform(transform) or FourierTransform()
 
     def explain(
         self,
@@ -91,10 +96,10 @@ class TimeFrequencyExplainer(WrapperExplainer):
 
     Parameters
     ----------
-    base : dict or str
-        The base explainer to wrap (method name or config dict). Defaults to
-        ``"guided_backpropagation"``.
-    transform : DomainTransform or dict
+    base : ExplainerBase, optional
+        The time-domain explainer to wrap. Defaults to
+        :class:`~xai4tsc.xai.feature_attribution.GuidedBackpropagationExplainer`.
+    transform : DomainTransform
         Transform to the time-frequency domain (e.g. an
         :class:`~xai4tsc.utils.fourier_transforms.STFTransform`). Required — there
         is no sensible default window configuration.
@@ -107,15 +112,15 @@ class TimeFrequencyExplainer(WrapperExplainer):
 
     def __init__(
         self,
-        base: dict | str = "guided_backpropagation",
-        transform: DomainTransform | dict | None = None,
+        base: ExplainerBase | None = None,
+        transform: DomainTransform | None = None,
     ) -> None:
-        super().__init__(base)
+        super().__init__(GuidedBackpropagationExplainer() if base is None else base)
         self.data_applicability = {DataType.TIME_SERIES}
         self.explanation_domains = {Domain.TIME_FREQUENCY}
         self.explains_in_data_domain = False
         self.accepts_data_domains = {Domain.TIME}
-        self.transform = resolve_transform(transform)
+        self.transform = check_transform(transform)
         if self.transform is None:
             raise ValueError(
                 "TimeFrequencyExplainer requires a time-frequency transform "

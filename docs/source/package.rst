@@ -3,9 +3,10 @@ Package
 
 The xai4tsc package is the importable use case. Install it with pip and use
 the public API in your own code, notebooks, or scripts to load datasets, train
-classifiers, generate explanations, and evaluate them quantitatively. All
-three registries (``MODELS``, ``EXPLAINERS``, ``METRICS``) support runtime
-extension via the ``register_*`` functions.
+classifiers, generate explanations, and evaluate them quantitatively. The
+catalogs (``MODELS``, ``EXPLAINERS``, ``METRICS``, ``SYNTHETIC_DATASETS``) list
+the built-in components by name for discovery; the API itself takes the
+objects.
 
 Installation
 ------------
@@ -40,18 +41,27 @@ The package is organised into the following submodules:
 Key functions
 ~~~~~~~~~~~~~
 
-The four functions a package user reaches for, in pipeline order. Each is also
+The three functions a package user reaches for, in pipeline order. Each is also
 re-exported at the top level (e.g. ``from xai4tsc import generate_explanation``)
 and from its submodule (e.g. ``from xai4tsc.models import load_model``).
 
 ==========================================================  ===============================================================
 Function                                                     Purpose
 ==========================================================  ===============================================================
-:func:`~xai4tsc.data.datasets.load_dataset`                 Load a UCR/UEA, local, or synthetic dataset.
 :func:`~xai4tsc.models.models.load_model`                   Reload a model from a checkpoint (or build one by registry name).
 :func:`~xai4tsc.xai.explain.generate_explanation`           Produce an :class:`~xai4tsc.xai.Explanation` for chosen samples.
-:func:`~xai4tsc.evaluation.evaluate.evaluate`               Score an explanation with a metric from the registry.
+:func:`~xai4tsc.evaluation.evaluate.evaluate`               Score an explanation with an evaluator.
 ==========================================================  ===============================================================
+
+Data comes first and has no loader function: construct the dataset class for
+the data at hand and call its ``split`` method.
+
+.. code-block:: python
+
+   ds = xai4tsc.UcrUeaDataset("GunPoint", cache_dir="cache/datasets")
+   # ds = xai4tsc.LocalDataset("data/my_dataset", name="my_dataset", layout="bct")
+   # ds = xai4tsc.SynthMultilabelFreqDataset(cache_dir="cache/datasets")
+   splits, encoder = ds.split(train_split=0.8, val_split=0.1)
 
 Building and reloading models
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -102,10 +112,12 @@ Built-in components
 ~~~~~~~~~~~~~~~~~~~~~
 
 These are the concrete classes you select at runtime — by **registry key** in a
-YAML config or in the package API (``load_model``,
-``generate_explanation(method=...)``, ``evaluate(metric=...)``). The key is what
-you pass; the class is where its parameters and behaviour are documented. Extend
-any registry at runtime with the matching ``register_*`` function.
+YAML config or in the package API (``load_model``), or, for explainers and metrics,
+by constructing the class and passing the instance to ``generate_explanation`` or
+``evaluate``. The class is where its parameters and behaviour are
+documented. A custom component is a subclass of the matching base class,
+passed as an instance; the experiment runner loads one from a source file
+named by an entry's ``class_name`` and ``class_path``.
 
 **Models** (``xai4tsc.MODELS``)
 
@@ -146,8 +158,9 @@ Every ``METRICS`` value is a callable that produces an
 `Quantus <https://github.com/understandable-machine-intelligence-lab/Quantus>`_ metric
 classes (listed in ``xai4tsc.QUANTUS_METRICS``, e.g. ``"Complexity"``,
 ``"Faithfulness Correlation"``, ``"ROAD"``), adapted by the single
-:class:`~xai4tsc.evaluation.base.QuantusEvaluator` (bound to the metric name); see the
-Quantus documentation for those. The xai4tsc-native metrics are:
+:class:`~xai4tsc.evaluation.base.QuantusEvaluator`, which takes the Quantus class
+(``QuantusEvaluator(quantus.Complexity, disable_warnings=True)``); see the Quantus
+documentation for those. The xai4tsc-native metrics are:
 
 =========================================  =======================================================================================  ============
 Registry key                               Class                                                                                    Data
@@ -194,7 +207,7 @@ transforming it a second time.
 Metric domains
 ~~~~~~~~~~~~~~
 
-Which explanation domains a metric can score is declared on the registry value, and
+Which explanation domains a metric can score is declared on the evaluator, and
 :func:`~xai4tsc.evaluation.required_domains_for` is the reader. A metric defined
 *for* a domain names it in ``required_domains`` (an empty set means any domain); one
 that perturbs the input and re-queries the model instead sets
@@ -203,7 +216,7 @@ the model's inputs live in, :attr:`xai4tsc.Explanation.data_domain`. That is the
 domain for a model trained on raw series and the frequency domain for one trained on
 spectra, so these metrics follow the model rather than being fixed to time.
 
-For the Quantus metrics the choice follows from what each one consumes, recorded in
+For the Quantus metrics the choice follows from what each one consumes, recorded per Quantus class in
 :data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`:
 
 =======================  ===========================  ===  ===========================
@@ -222,11 +235,11 @@ needs the explanation in the domain the model predicts in.
 
 The ``RE_EXPLAIN`` metrics re-run the explainer on perturbed or randomised inputs,
 so they need a callable rather than just the stored attribution. The adapter builds
-one from :attr:`xai4tsc.Explanation.explainer` and
-:attr:`xai4tsc.Explanation.explainer_params`, which is why the explanation records
-how it was produced: a re-explanation has to use the *same* method with the *same*
-settings, or the metric measures a configuration difference instead of the property
-it claims to. :attr:`xai4tsc.Explanation.explainer_call_params` closes the same gap
+one from a deep copy of :attr:`xai4tsc.Explanation.explainer`, the instance that
+produced the explanation, which is why the explanation keeps it: a re-explanation
+has to use the *same* method with the *same* settings, or the metric measures a
+configuration difference instead of the property it claims to. The copy leaves the
+stored explainer untouched. :attr:`xai4tsc.Explanation.explainer_call_params` closes the same gap
 for options a method takes per call rather than at construction: the adapter
 replays them, and the ``explain_func_kwargs`` Quantus itself injects cannot
 override them.
@@ -301,7 +314,7 @@ models.
 ``channel_first``, the axis order of the inputs, which defaults to ``True`` for the
 framework's canonical ``(B, C, T)``. It is passed on to the Quantus metric; left
 unset there it is inferred from the shape, and the guess is wrong for an input with
-more channels than timesteps. Pass it through ``metric_call_params`` when calling
+more channels than timesteps. Pass it through ``call_params`` when calling
 :func:`~xai4tsc.evaluation.evaluate`, or set it under
 ``evaluation_config.default_settings.metric_call_params`` in a runner config.
 

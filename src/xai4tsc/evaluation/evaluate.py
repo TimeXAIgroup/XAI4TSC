@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import quantus as q
 
-from ..utils.utils import dict_to_args
 from ..xai._types import Domain
 from .base import EvaluatorBase, QuantusEvaluator
 from .frequency_evaluate import FrequencyEvaluator
@@ -31,56 +30,66 @@ logger = logging.getLogger(__name__)
 
 
 def evaluate(
+    evaluator: EvaluatorBase,
     model: nn.Module,
-    metric: str,
     explanation: Explanation,
     data: np.ndarray | None = None,
     labels: np.ndarray | None = None,
-    metric_class_params: dict | None = None,
-    metric_call_params: dict | None = None,
+    call_params: dict | None = None,
     device: str = "cpu",
     seed: int | None = None,
 ) -> float | np.ndarray | None:
     """
-    Evaluate an explanation using the named metric from the METRICS registry.
+    Score an explanation with an evaluator.
 
     Parameters
     ----------
+    evaluator : EvaluatorBase
+        The configured metric to run, e.g. ``FrequencyEvaluator()`` or
+        ``QuantusEvaluator(quantus.Complexity, disable_warnings=True)``.
     model :
         A :class:`~torch.nn.Module` (typically a :class:`~xai4tsc.ModelBase`
         instance).
-    metric : str
-        Registry key for the metric to run.
     explanation : Explanation
         Explanation dataclass containing ``exp_values``.
     data : np.ndarray, optional
         Input samples.
     labels : np.ndarray, optional
         Ground-truth labels.
-    metric_class_params : dict, optional
-        Keyword arguments for the metric constructor.
-    metric_call_params : dict, optional
-        Keyword arguments for the metric ``__call__``.
+    call_params : dict, optional
+        Keyword arguments for the evaluator's ``evaluate()``; for a
+        :class:`~xai4tsc.evaluation.base.QuantusEvaluator` they reach the Quantus
+        metric's ``__call__``.
     device : str
         Compute device.
     seed : int or None
         Seed for a metric that randomises something of its own, such as the MPRT
         family's weight randomisation. Forwarded to the evaluator, which offers it
         only to a backend that declares a ``seed``; the rest ignore it. A seed in
-        *metric_class_params* takes precedence.
+        the evaluator's constructor params or in *call_params* takes precedence.
 
     Returns
     -------
     float or np.ndarray or None
-        Metric score, or ``None`` if the metric is not registered.
+        Metric score, or ``None`` if the evaluator cannot score this explanation
+        (wrong domain, no ground truth, or a backend that cannot handle a series).
+
+    Raises
+    ------
+    TypeError
+        If *evaluator* is not an :class:`~xai4tsc.evaluation.base.EvaluatorBase`
+        instance, e.g. a metric's display name.
     """
-    if metric not in METRICS:
-        logger.warning("Metric %s is not registered, it will be skipped!", metric)
-        return None
+    if not isinstance(evaluator, EvaluatorBase):
+        raise TypeError(
+            "evaluate() takes an EvaluatorBase instance, e.g. FrequencyEvaluator() "
+            f"or QuantusEvaluator(quantus.Complexity), got {evaluator!r}."
+        )
+    metric = evaluator.metric_name or type(evaluator).__name__
 
     # A metric that declares required_domains cannot score an explanation from
     # another domain; refuse here rather than letting the backend raise.
-    required = required_domains_for(metric, explanation.data_domain)
+    required = required_domains_for(evaluator, explanation.data_domain)
     if required and explanation.explanation_domain not in required:
         logger.warning(
             "Metric %s requires an explanation in domain(s) %s but the explanation "
@@ -92,7 +101,7 @@ def evaluate(
         return None
 
     # Localisation metrics require datasets with ground truth.
-    missing = ground_truth_missing(metric, explanation)
+    missing = ground_truth_missing(evaluator, explanation)
     if missing:
         logger.warning(
             "Metric %s cannot score this explanation: %s. It will be skipped!",
@@ -103,41 +112,57 @@ def evaluate(
 
     # A handful of Quantus metrics assume 2-D image input deep in their own code,
     # so no setting on this side makes them work on a time series.
-    if metric in BLOCKED_BY_BACKEND:
+    blocked = blocked_by_backend(evaluator)
+    if blocked:
         logger.warning(
             "Metric %s cannot score a time series: %s. It will be skipped!",
             metric,
-            BLOCKED_BY_BACKEND[metric],
+            blocked,
         )
         return None
 
     model.eval()
-    # Every METRICS value is a callable -> EvaluatorBase (a native subclass, or
-    # partial(QuantusEvaluator, name) for Quantus metrics), so dispatch is uniform.
-    # Filter construction params to the factory's signature so shared Quantus-only
-    # params (e.g. `normalise`) don't break native evaluators; QuantusEvaluator
-    # exposes **kwargs, so its params pass through and are filtered per-metric later.
-    factory = METRICS[metric]
-    init_params = dict_to_args(metric_class_params or {}, factory)
-    evaluator = factory(**(init_params or {}))
     # The seed goes in below the user's call params, so a configured one wins and
     # no duplicate keyword can be raised. Evaluators that cannot use it ignore it.
-    call_params = {"seed": seed, **(metric_call_params or {})}
     result = evaluator.evaluate(
         model=model,
         explanation=explanation,
         data=data,
         labels=labels,
         device=device,
-        **call_params,
+        **{"seed": seed, **(call_params or {})},
     )
     logger.info("%s: %s", metric, result)
     return result
 
 
-def ground_truth_missing(metric: str, explanation: Explanation) -> str | None:
+def blocked_by_backend(evaluator: EvaluatorBase) -> str | None:
     """
-    Return why *metric* cannot score *explanation*, or ``None`` if it can.
+    Return why *evaluator*'s backend cannot score a time series, or ``None``.
+
+    Parameters
+    ----------
+    evaluator : EvaluatorBase
+        The evaluator to check. Only a
+        :class:`~xai4tsc.evaluation.base.QuantusEvaluator` can be blocked, by an
+        entry for its Quantus class in
+        :data:`~xai4tsc.evaluation.quantus_groups.BLOCKED_BY_BACKEND`.
+
+    Returns
+    -------
+    str or None
+        The reason, or ``None`` when the evaluator can run.
+    """
+    if not isinstance(evaluator, QuantusEvaluator):
+        return None
+    return BLOCKED_BY_BACKEND.get(evaluator.quantus_class)
+
+
+def ground_truth_missing(
+    evaluator: EvaluatorBase, explanation: Explanation
+) -> str | None:
+    """
+    Return why *evaluator* cannot score *explanation*, or ``None`` if it can.
 
     The localisation metrics compare an attribution against the regions a dataset
     declares as discriminative. Most datasets declare none — the discriminative
@@ -147,8 +172,10 @@ def ground_truth_missing(metric: str, explanation: Explanation) -> str | None:
 
     Parameters
     ----------
-    metric : str
-        A key of the ``METRICS`` registry.
+    evaluator : EvaluatorBase
+        The evaluator to check; only a
+        :class:`~xai4tsc.evaluation.base.QuantusEvaluator` for a localisation
+        metric needs ground truth here.
     explanation : Explanation
         The explanation to score; its ``metadata`` carries the regions.
 
@@ -161,7 +188,10 @@ def ground_truth_missing(metric: str, explanation: Explanation) -> str | None:
     from ._ground_truth import regions_for_sample
     from .quantus_groups import quantus_requires_s_batch
 
-    if not quantus_requires_s_batch(metric):
+    if not (
+        isinstance(evaluator, QuantusEvaluator)
+        and quantus_requires_s_batch(evaluator.quantus_class)
+    ):
         return None
     if not explanation.metadata:
         return (
@@ -178,19 +208,24 @@ def ground_truth_missing(metric: str, explanation: Explanation) -> str | None:
     )
 
 
-def required_domains_for(metric: str, data_domain: Domain = Domain.TIME) -> set[Domain]:
+def required_domains_for(
+    evaluator: EvaluatorBase | Callable[..., EvaluatorBase] | None,
+    data_domain: Domain = Domain.TIME,
+) -> set[Domain]:
     """
-    Return the explanation domains a registered metric can score.
+    Return the explanation domains an evaluator can score.
 
-    Reads the declaration off the registry *value*, so it covers native evaluator
-    classes, user-registered subclasses, and the Quantus entries alike (those carry
-    their per-name declaration on the factory; see :func:`_quantus_entry`). A metric
-    that requires the model-native domain resolves to ``{data_domain}``.
+    Reads the declarations off *evaluator*, so it covers native evaluators,
+    user subclasses and :class:`~xai4tsc.evaluation.base.QuantusEvaluator`
+    alike. It also accepts a ``METRICS`` value, which carries the same
+    declarations (the Quantus entries on the factory, see :func:`_quantus_entry`),
+    so a caller can check a metric before building it. A metric that requires the
+    model-native domain resolves to ``{data_domain}``.
 
     Parameters
     ----------
-    metric : str
-        Registry key for the metric.
+    evaluator : EvaluatorBase, METRICS value or None
+        The evaluator, or the class or factory that builds it.
     data_domain : Domain
         The domain the model's inputs live in, i.e.
         :attr:`xai4tsc.Explanation.data_domain`. The default reflects that every
@@ -201,48 +236,16 @@ def required_domains_for(metric: str, data_domain: Domain = Domain.TIME) -> set[
     -------
     set of Domain
         The domains the metric applies to; an empty set means any domain, which is
-        also what an unregistered name returns.
+        also what ``None`` returns.
     """
-    entry = METRICS.get(metric)
-    if getattr(entry, "requires_native_domain", False):
+    if getattr(evaluator, "requires_native_domain", False):
         return {data_domain}
-    return getattr(entry, "required_domains", None) or set()
-
-
-def register_metric(name: str, metric_class: type) -> None:
-    """
-    Register a custom metric class.
-
-    Mirrors :func:`~xai4tsc.register_model` / :func:`~xai4tsc.register_explainer`:
-    *metric_class* must be an :class:`~xai4tsc.evaluation.base.EvaluatorBase` subclass
-    (instantiated with its constructor params at evaluation time). The fixed set of
-    Quantus-library metrics is wired in package-side (via ``QUANTUS_METRICS`` and the
-    single :class:`~xai4tsc.evaluation.base.QuantusEvaluator`), so users only ever
-    register their own ``EvaluatorBase`` subclasses.
-
-    Parameters
-    ----------
-    name:
-        Key used to reference the metric in :data:`METRICS`.
-    metric_class:
-        The metric class to register.
-
-    Raises
-    ------
-    TypeError
-        If *metric_class* is not an :class:`~xai4tsc.evaluation.base.EvaluatorBase`
-        subclass.
-    """
-    if not (isinstance(metric_class, type) and issubclass(metric_class, EvaluatorBase)):
-        raise TypeError(
-            f"Metric '{name}' must be an EvaluatorBase subclass, got {metric_class!r}."
-        )
-    METRICS[name] = metric_class
+    return getattr(evaluator, "required_domains", None) or set()
 
 
 # Lookup table of external Quantus metric classes, keyed by display name. Mapped into
 # the unified METRICS registry below via the single QuantusEvaluator adapter.
-QUANTUS_METRICS = {
+QUANTUS_METRICS: dict[str, type[q.Metric]] = {
     "AUC": q.AUC,
     "Attribution Localisation": q.AttributionLocalisation,
     "Avg-Sensitivity": q.AvgSensitivity,
@@ -283,34 +286,34 @@ QUANTUS_METRICS = {
 }
 
 
-def _quantus_entry(name: str) -> partial:
+def _quantus_entry(quantus_class: type[q.Metric]) -> partial:
     """
     Build the ``METRICS`` entry for one Quantus metric.
 
     A bare ``functools.partial`` hides the wrapped class's declarations, and
     :func:`required_domains_for` reads them off the registry value to decide whether a
     metric can score an explanation. They are therefore attached to the factory, per
-    metric name (see :mod:`~xai4tsc.evaluation.quantus_groups`).
+    metric class (see :mod:`~xai4tsc.evaluation.quantus_groups`).
 
     Parameters
     ----------
-    name : str
-        A key of ``QUANTUS_METRICS``.
+    quantus_class : type[quantus.Metric]
+        A value of ``QUANTUS_METRICS``.
 
     Returns
     -------
     functools.partial
         A callable producing a :class:`~xai4tsc.evaluation.base.QuantusEvaluator`.
     """
-    entry = partial(QuantusEvaluator, name)
-    entry.requires_native_domain = quantus_requires_native_domain(name)
+    entry = partial(QuantusEvaluator, quantus_class)
+    entry.requires_native_domain = quantus_requires_native_domain(quantus_class)
     entry.data_applicability = QuantusEvaluator.data_applicability
     return entry
 
 
 # Unified metric registry. Every value is a callable -> EvaluatorBase: native metrics
 # are EvaluatorBase subclasses; each Quantus metric is mapped in via the single
-# QuantusEvaluator, bound to its name with functools.partial.
+# QuantusEvaluator, bound to its class with functools.partial.
 METRICS: dict[str, type | Callable] = {
     # Frequency / time-frequency perturbation metrics (xai4tsc).
     "Frequency Perturbation": FrequencyEvaluator,
@@ -319,5 +322,5 @@ METRICS: dict[str, type | Callable] = {
     # Ground-truth localization metric (needs per-sample GT metadata).
     "Time-Frequency AUC": TimeFrequencyAUCEvaluator,
     # Quantus-library metrics, adapted by the single QuantusEvaluator.
-    **{name: _quantus_entry(name) for name in QUANTUS_METRICS},
+    **{name: _quantus_entry(cls) for name, cls in QUANTUS_METRICS.items()},
 }

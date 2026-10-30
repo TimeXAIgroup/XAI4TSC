@@ -15,7 +15,7 @@ from experiment_runner import explain as runner_explain
 from sklearn.preprocessing import LabelEncoder
 from torch import nn
 
-from xai4tsc.utils.perturbation import baseline_replacement, resolve_perturb_func
+from xai4tsc.utils.perturbation import baseline_replacement
 from xai4tsc.xai import DataType, is_multi_target
 from xai4tsc.xai._types import Explanation
 from xai4tsc.xai.explain import generate_explanation
@@ -51,7 +51,6 @@ class _ConstModel(nn.Module):
 def _make_exp(data, encoder=None):
     return Explanation(
         explainer="tshap",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=data.astype(np.float32),
@@ -62,7 +61,7 @@ def _make_exp(data, encoder=None):
     )
 
 
-# ── baseline_replacement / resolve_perturb_func ───────────────────────────────
+# ── baseline_replacement / perturb_func ───────────────────────────────────────
 
 
 @pytest.mark.unit
@@ -112,14 +111,20 @@ def test_tshap_is_time_series_specific():
 
 
 @pytest.mark.unit
-def test_resolve_perturb_func():
+def test_tshap_perturb_func_takes_a_callable():
     def custom(arr, indices, **kwargs):
         return arr
 
-    assert resolve_perturb_func(custom) is custom
-    assert resolve_perturb_func("mean") is baseline_replacement
-    with pytest.raises(ValueError, match="definitely_not_resolvable"):
-        resolve_perturb_func("definitely_not_resolvable")
+    assert TSHAPExplainer(perturb_func=custom)._perturb_func is custom
+    assert TSHAPExplainer()._perturb_func is baseline_replacement
+    with pytest.raises(TypeError, match="perturb_func must be a callable"):
+        TSHAPExplainer(perturb_func="mean")
+
+
+@pytest.mark.unit
+def test_tshap_rejects_unknown_baseline():
+    with pytest.raises(ValueError, match="perturb_baseline must be one of"):
+        TSHAPExplainer(perturb_baseline="nope")
 
 
 # ── Shapley correctness ───────────────────────────────────────────────────────
@@ -169,7 +174,7 @@ def test_targets_all_path_shape():
     data = np.random.default_rng(3).standard_normal((2, 1, 12)).astype(np.float32)
     encoder = LabelEncoder().fit(np.array([0, 1]))
     exp = generate_explanation(
-        method="tshap",
+        explainer=TSHAPExplainer(window_length=3, stride=1, perturb_baseline="black"),
         model=_SumModel(),
         data=data,
         labels=np.array([0, 1]),
@@ -177,11 +182,19 @@ def test_targets_all_path_shape():
         indices=[0, 1],
         encoder=encoder,
         device="cpu",
-        params={"window_length": 3, "stride": 1, "perturb_baseline": "black"},
     )
     # (n_classes, n_samples, C, T)
     assert exp.exp_values.shape == (2, 2, 1, 12)
     assert is_multi_target(exp) is True
+
+
+@pytest.mark.unit
+def test_an_unknown_targets_option_is_rejected():
+    data = np.zeros((2, 1, 12), dtype=np.float32)
+    with pytest.raises(ValueError, match=r"targets must be one of \[.*'all'"):
+        generate_explanation(
+            TSHAPExplainer(), model=_SumModel(), data=data, targets="labels"
+        )
 
 
 # ── channel modes ─────────────────────────────────────────────────────────────

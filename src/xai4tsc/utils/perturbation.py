@@ -1,5 +1,5 @@
 """
-Perturbation helpers: ``baseline_replacement`` and ``resolve_perturb_func``.
+Perturbation helper: ``baseline_replacement``.
 
 A perturbation function follows the canonical signature
 ``(arr, indices, **kwargs) -> arr``: it returns a copy of *arr* with the
@@ -11,9 +11,8 @@ strategy.
 
 from __future__ import annotations
 
-import importlib
 import logging
-from collections.abc import Callable
+from typing import Literal, get_args
 
 import numpy as np
 
@@ -21,14 +20,17 @@ from .._random import DEFAULT_SEED, resolve_rng
 
 logger = logging.getLogger(__name__)
 
-#: Baseline strategies understood by :func:`baseline_replacement`.
-BASELINES: frozenset[str] = frozenset({"centroid", "black", "white", "mean", "random"})
+Baseline = Literal["centroid", "black", "white", "mean", "random"]
+"""Baseline strategies understood by :func:`baseline_replacement`."""
+
+#: The values of :data:`Baseline`.
+BASELINES: frozenset[str] = frozenset(get_args(Baseline))
 
 
 def baseline_replacement(
     arr: np.ndarray,
     indices: np.ndarray,
-    baseline: str = "centroid",
+    baseline: Baseline = "centroid",
     reference: np.ndarray | None = None,
     prng: np.random.Generator | None = None,
     **kwargs: object,
@@ -43,7 +45,7 @@ def baseline_replacement(
     indices : np.ndarray
         Time indices (along the last axis) to replace.  An empty array returns
         an unmodified copy.
-    baseline : str
+    baseline : Baseline
         One of :data:`BASELINES`:
 
         - ``"centroid"`` — replace with the matching columns of *reference*
@@ -104,56 +106,3 @@ def baseline_replacement(
         noise = rng.standard_normal(size=(arr.shape[0], idx.size))
         out[:, idx] = mean + std * noise
     return out
-
-
-def resolve_perturb_func(value: str | Callable) -> Callable:
-    """
-    Resolve *value* to a perturbation callable.
-
-    A callable is returned unchanged.  A string is resolved by trying, in order:
-    the names in :data:`BASELINES` (bound to :func:`baseline_replacement`), the
-    top-level ``quantus`` namespace, then a dotted import path
-    (e.g. ``"my_module.my_perturb"``).
-
-    Parameters
-    ----------
-    value : str or callable
-        A callable, a baseline name, a ``quantus`` attribute name, or a dotted
-        import path.
-
-    Returns
-    -------
-    callable
-        The resolved callable.
-
-    Raises
-    ------
-    ValueError
-        If a string resolves to nothing. Falling back to a default would run a
-        different perturbation than the one configured.
-    """
-    if callable(value):
-        return value
-    if value in BASELINES:
-        return baseline_replacement
-    try:
-        import quantus as _q
-
-        candidate = getattr(_q, value, None)
-        if candidate and callable(candidate):
-            return candidate
-    except ImportError:
-        pass
-    if "." in value:
-        module_path, _, attr = value.rpartition(".")
-        try:
-            mod = importlib.import_module(module_path)
-            candidate = getattr(mod, attr, None)
-            if candidate and callable(candidate):
-                return candidate
-        except (ImportError, AttributeError):
-            pass
-    raise ValueError(
-        f"Could not resolve perturb_func {value!r}: it is not a baseline name "
-        f"({sorted(BASELINES)}), a quantus function, or a dotted path to a callable."
-    )

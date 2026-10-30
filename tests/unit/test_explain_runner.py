@@ -12,8 +12,13 @@ import json
 import numpy as np
 import pytest
 from experiment_runner import explain as runner_explain
+from experiment_runner.lookups import build_transform
 
+from xai4tsc.utils import FourierTransform, RFFTransform, STFTransform
+from xai4tsc.xai import SignExplainer
 from xai4tsc.xai._types import Explanation
+from xai4tsc.xai.explanation_domains import FrequencyExplainer
+from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
 
 # ── wrapper display name ──────────────────────────────────────────────────────
 
@@ -49,7 +54,6 @@ class _BadEncoder:
 def _make_explanation(encoder):
     return Explanation(
         explainer="integrated_gradients",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=np.zeros((2, 1, 4), dtype=np.float32),
         data=np.zeros((2, 1, 4), dtype=np.float32),
@@ -137,6 +141,36 @@ def test_wrapper_save_folder_uses_qualified_name(tmp_path, monkeypatch):
         calls["save_path"]
         == tmp_path / "explanations" / "explanations_SIGN-Integrated_Gradients"
     )
+
+
+@pytest.mark.unit
+def test_wrapper_base_is_built_before_the_wrapper(tmp_path, monkeypatch):
+    calls = _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
+    cfg = _explainer_config(
+        "index",
+        method="Frequency",
+        base={
+            "method": "SIGN",
+            "base": {"method": "Integrated_Gradients", "n_steps": 7},
+        },
+    )
+    cfg["samples"]["indices"] = [0]
+
+    runner_explain._generate_explanation(
+        model=object(),
+        data=np.zeros((4, 1, 4), dtype=np.float32),
+        labels=np.array([0, 1, 0, 1]),
+        encoder=_OkEncoder(),
+        config={"results_rel_path": tmp_path},
+        explainer_config=cfg,
+    )
+
+    assert isinstance(calls["explainer"], FrequencyExplainer)
+    sign = calls["explainer"]._base
+    assert isinstance(sign, SignExplainer)
+    assert isinstance(sign._base, IntegratedGradientsExplainer)
+    assert sign._base._attribute_kwargs["n_steps"] == 7
+    assert cfg["base"]["method"] == "SIGN"  # the config is not consumed
 
 
 @pytest.mark.unit
@@ -239,7 +273,14 @@ def test_adapter_strips_its_own_keys_before_building_the_explainer(
     `dict_to_args` drops them for a named signature but hands the whole dict to a
     constructor declaring `**kwargs`.
     """
-    calls = _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
+    _patch_recorder(monkeypatch, _make_explanation(_OkEncoder()))
+    built = {}
+
+    def _build(method, params):
+        built["params"] = params
+        return IntegratedGradientsExplainer()
+
+    monkeypatch.setattr(runner_explain, "build_explainer", _build)
     cfg = _explainer_config("index")
     cfg["samples"]["indices"] = [0]
 
@@ -264,6 +305,60 @@ def test_adapter_strips_its_own_keys_before_building_the_explainer(
         seed=11,
     )
 
-    assert calls["params"] == {"seed": 11}, (
+    assert built["params"] == {"seed": 11}, (
         "only real constructor parameters may reach the explainer"
     )
+
+
+# ── build_explainer ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_explainer_returns_instance_for_known_method():
+    inst = runner_explain.build_explainer("integrated_gradients", {"n_steps": 7})
+    assert isinstance(inst, IntegratedGradientsExplainer)
+    assert inst._attribute_kwargs["n_steps"] == 7
+
+
+@pytest.mark.unit
+def test_build_explainer_unknown_method_raises():
+    with pytest.raises(NotImplementedError, match="not supported"):
+        runner_explain.build_explainer("definitely_not_a_method", None)
+
+
+# ── transform table ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_build_transform_none_keeps_the_explainer_default():
+    assert build_transform(None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("entry", "cls"),
+    [
+        ({"name": "fft", "params": {}}, FourierTransform),
+        ({"name": "rfft"}, RFFTransform),
+        ({"name": "stft", "params": {"n_fft": 16, "win_length": 16}}, STFTransform),
+    ],
+)
+def test_build_transform_from_the_table(entry, cls):
+    assert isinstance(build_transform(entry), cls)
+
+
+@pytest.mark.unit
+def test_build_transform_unknown_name_raises():
+    with pytest.raises(ValueError, match="Unknown transform"):
+        build_transform({"name": "wavelet"})
+
+
+@pytest.mark.unit
+def test_build_transform_dotted_path_to_a_non_transform_is_never_called(monkeypatch):
+    import os
+
+    calls = []
+    monkeypatch.setattr(os, "getcwd", lambda *a, **k: calls.append(a))
+    with pytest.raises(ValueError, match="DomainTransform"):
+        build_transform({"name": "os.getcwd", "params": {}})
+    assert calls == []

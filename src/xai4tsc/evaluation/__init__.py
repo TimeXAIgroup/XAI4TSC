@@ -4,7 +4,7 @@ XAI evaluation metrics wrapping the Quantus library.
 Submodules:
 
 - :mod:`~xai4tsc.evaluation.evaluate` — the :func:`evaluate` entry point and the
-  ``METRICS`` registry.
+  ``METRICS`` catalog.
 - :mod:`~xai4tsc.evaluation.base` — the :class:`EvaluatorBase` /
   :class:`QuantusEvaluator` wrappers.
 - :mod:`~xai4tsc.evaluation.quantus_groups` — what each Quantus metric consumes
@@ -17,19 +17,20 @@ Submodules:
   :mod:`~xai4tsc.evaluation.timefrequency_auc` — native frequency and
   time-frequency metrics.
 
-Use :func:`evaluate` as the main entry point. The ``METRICS`` registry maps metric names
-to callables that produce an :class:`EvaluatorBase` (native subclasses, or the single
-:class:`QuantusEvaluator` bound to a name from ``QUANTUS_METRICS``); use
-:func:`register_metric` to add custom ones.
+Use :func:`evaluate` as the main entry point; it takes an :class:`EvaluatorBase`
+instance, such as a native evaluator or ``QuantusEvaluator(quantus.Complexity)``. The
+``METRICS`` catalog maps metric names to callables that produce one (native
+subclasses, or the single :class:`QuantusEvaluator` bound to a class from
+``QUANTUS_METRICS``); it is for discovery, no package function reads it.
 """
 
 from .base import EvaluatorBase, QuantusEvaluator
 from .evaluate import (
     METRICS,
     QUANTUS_METRICS,
+    blocked_by_backend,
     evaluate,
     ground_truth_missing,
-    register_metric,
     required_domains_for,
 )
 from .quantus_groups import QUANTUS_GROUPS, QuantusGroup
@@ -41,8 +42,8 @@ __all__ = [
     "EvaluatorBase",
     "QuantusEvaluator",
     "QuantusGroup",
+    "blocked_by_backend",
     "evaluate",
     "ground_truth_missing",
-    "register_metric",
     "required_domains_for",
 ]

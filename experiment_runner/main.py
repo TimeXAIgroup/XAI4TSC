@@ -26,16 +26,22 @@ import torch
 import yaml
 
 from xai4tsc.data import (
-    SYNTHETIC_DATASETS,
+    DatasetBase,
     LocalDataset,
     SyntheticDataset,
+    UcrUeaDataset,
     class_names,
-    load_dataset,
 )
-from xai4tsc.evaluation.evaluate import ground_truth_missing, required_domains_for
-from xai4tsc.evaluation.quantus_groups import BLOCKED_BY_BACKEND
+from xai4tsc.evaluation.evaluate import (
+    blocked_by_backend,
+    evaluate,
+    ground_truth_missing,
+    required_domains_for,
+)
+from xai4tsc.models.base import ModelBase
 from xai4tsc.models.models import load_model
 from xai4tsc.utils import resolve_rng
+from xai4tsc.utils.utils import dict_to_args
 from xai4tsc.xai import is_multi_target
 
 from .cache import get_dataset_cache_dir, get_split_cache_path
@@ -47,12 +53,16 @@ from .config import (
     validate_user_config,
 )
 from .download_datasets import ensure_datasets_cached
-from .encoders import build_encoder
-from .evaluate import _animate, _evaluate
+from .evaluate import _animate, build_evaluator
 from .explain import _explainer_display_name, _generate_explanation
 from .log_setup import _setup_console_logging, add_file_log, remove_file_log
-from .losses import build_loss
-from .optimizers import build_optimizer
+from .lookups import (
+    MODELS,
+    SYNTHETIC_DATASETS,
+    build_encoder,
+    build_loss,
+    build_optimizer,
+)
 from .seeding import boundary_seed, seed_globals
 from .utils import (
     _METRICS_COLUMNS,
@@ -268,32 +278,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
             else:
                 use_predefined_splits = dataset["use_predefined_splits"]
                 is_synthetic = dataset["dataset"] in SYNTHETIC_DATASETS
-                if is_synthetic:
-                    # Synthetic datasets are generated from params (forwarded via
-                    # `init_params`); they take no path/download/format.
-                    ds = load_dataset(
-                        name=dataset["dataset"],
-                        cache_dir=cache_dir,
-                        max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset["sample_strategy"],
-                        max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset["series_position"],
-                        **dataset.get("init_params", {}),
-                    )
-                else:
-                    ds = load_dataset(
-                        name=dataset["dataset"],
-                        path=dataset.get("path") or None,
-                        cache_dir=cache_dir,
-                        download=dataset["download"],
-                        data_format=dataset["format"],
-                        pad_series=dataset["allow_padding"],
-                        max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset["sample_strategy"],
-                        max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset["series_position"],
-                        layout=dataset["layout"],
-                    )
+                ds = _build_dataset(dataset, cache_dir)
 
                 # Synthetic auto-detect: a pre-split layout already in the
                 # synthetic cache dir is loaded directly (skip generation + split).
@@ -443,9 +428,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                     seed_globals(model_seed)
 
                     # Load the model
-                    model_wrapper = load_model(
-                        model_config, device, save_path=model_path
-                    )
+                    model_wrapper = _build_model(model_config, device, model_path)
 
                     # Should the model be trained
                     if not model_config.get("train"):
@@ -603,12 +586,32 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                     f"{dataset_id}/{model_id}/{explainer}/{metric_id}"
                                 )
 
+                                try:
+                                    evaluator = build_evaluator(metric_config)
+                                except Exception as exc:
+                                    failed_metrics.append(metric_label)
+                                    metric_rows.append(
+                                        _metric_error_row(
+                                            exc,
+                                            "could not be built",
+                                            (
+                                                dataset_id,
+                                                model_id,
+                                                explainer,
+                                                metric_id,
+                                            ),
+                                            metric_seed,
+                                            metric_name,
+                                            metric_label,
+                                        )
+                                    )
+                                    continue
+
                                 # Skip domain-restricted metrics on incompatible
                                 # explanations (e.g. a frequency metric on a
                                 # time-domain attribution)
                                 required_domains = required_domains_for(
-                                    metric_config["metric"],
-                                    explanation.data_domain,
+                                    evaluator, explanation.data_domain
                                 )
                                 if (
                                     required_domains
@@ -642,9 +645,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
 
                                 # A few Quantus metrics assume 2-D image input in
                                 # their own code; no setting here makes them work.
-                                blocked = BLOCKED_BY_BACKEND.get(
-                                    metric_config["metric"]
-                                )
+                                blocked = blocked_by_backend(evaluator)
                                 if blocked:
                                     logger.info(
                                         "Skipping %s: %s.",
@@ -666,9 +667,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
 
                                 # Localisation metrics need require ground truth,
                                 # which most datasets do not supply.
-                                no_gt = ground_truth_missing(
-                                    metric_config["metric"], explanation
-                                )
+                                no_gt = ground_truth_missing(evaluator, explanation)
                                 if no_gt:
                                     logger.info(
                                         "Skipping %s: %s.",
@@ -779,12 +778,15 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                                 log=False,
                                             )
                                             seed_globals(class_seed)
-                                            result = _evaluate(
+                                            result = evaluate(
+                                                evaluator,
                                                 model=model_wrapper,
-                                                metric_conf=metric_config,
                                                 explanation=class_exp,
                                                 data=test_data[class_indices],
                                                 labels=class_labels,
+                                                call_params=metric_config[
+                                                    "metric_call_params"
+                                                ],
                                                 device=device,
                                                 seed=class_seed,
                                             )
@@ -810,12 +812,15 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                             )
                                     else:
                                         seed_globals(metric_seed)
-                                        evaluation = _evaluate(
+                                        evaluation = evaluate(
+                                            evaluator,
                                             model=model_wrapper,
-                                            metric_conf=metric_config,
                                             explanation=explanation,
                                             data=exp_data,
                                             labels=test_labels[explanation.indices],
+                                            call_params=metric_config[
+                                                "metric_call_params"
+                                            ],
                                             device=device,
                                             seed=metric_seed,
                                         )
@@ -856,21 +861,19 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                                 except Exception as exc:
                                     failed_metrics.append(metric_label)
                                     metric_rows.append(
-                                        _result_row(
-                                            dataset_id,
-                                            model_id,
-                                            explainer,
-                                            metric_id,
-                                            "error",
-                                            seed=metric_seed,
-                                            detail=f"{type(exc).__name__}: {exc}",
+                                        _metric_error_row(
+                                            exc,
+                                            "failed",
+                                            (
+                                                dataset_id,
+                                                model_id,
+                                                explainer,
+                                                metric_id,
+                                            ),
+                                            metric_seed,
+                                            metric_name,
+                                            metric_label,
                                         )
-                                    )
-                                    logger.exception(
-                                        "Metric '%s' failed for %s, skipping to "
-                                        "the next metric.",
-                                        metric_name,
-                                        metric_label,
                                     )
 
                         except Exception:
@@ -1029,6 +1032,129 @@ def _run(config: dict, issues: ConfigIssues) -> int:
         + len(failed_explainers)
         + len(failed_metrics)
     )
+
+
+def _build_model(entry: dict, device: str, save_path: Path) -> ModelBase:
+    """
+    Construct or reload the model a resolved ``models`` entry names.
+
+    Without ``model_ckpt_path`` the class comes from
+    :data:`~experiment_runner.lookups.MODELS`, so a ``class_path`` model loaded
+    by the config check is built like a built-in.
+
+    Parameters
+    ----------
+    entry : dict
+        A resolved ``train_config.models`` entry.
+    device : str
+        Compute device.
+    save_path : Path
+        The model's results directory.
+
+    Returns
+    -------
+    ModelBase
+        The configured model.
+    """
+    if "model_ckpt_path" in entry:
+        # shortcut: load_model still resolves a checkpoint's class from the package
+        # MODELS catalog or class_path itself; pass the runner's class once it
+        # takes one.
+        return load_model(entry, device, save_path=save_path)
+    model_class = MODELS[entry["model"].lower()]
+    params = entry.get("init_params")
+    params = dict_to_args(params, model_class) if params else {}
+    model = model_class(**params)
+    model.configure(device=device, save_path=save_path, name=entry["model"])
+    logger.info("Built %s from the MODELS table (no checkpoint supplied).", model.name)
+    return model
+
+
+def _build_dataset(dataset: dict, cache_dir: Path | None) -> DatasetBase:
+    """
+    Construct the dataset a resolved ``datasets`` entry names.
+
+    A name in ``SYNTHETIC_DATASETS`` builds that class from its ``init_params``, an
+    entry with a ``path`` builds a ``LocalDataset``, anything else a
+    ``UcrUeaDataset``. Only the dataset is constructed; nothing is loaded yet.
+
+    Parameters
+    ----------
+    dataset : dict
+        A resolved ``data_config.datasets`` entry.
+    cache_dir : Path | None
+        Cache root for downloads and generated data.
+
+    Returns
+    -------
+    DatasetBase
+        The unloaded dataset.
+    """
+    name = dataset["dataset"]
+    path = dataset.get("path") or None
+    restriction = dict(
+        max_samples=dataset.get("max_samples"),
+        sample_strategy=dataset["sample_strategy"],
+        max_series_length=dataset.get("max_series_length"),
+        series_position=dataset["series_position"],
+    )
+    if name in SYNTHETIC_DATASETS:
+        return SYNTHETIC_DATASETS[name](
+            name=name,
+            cache_dir=cache_dir,
+            **restriction,
+            **dataset.get("init_params", {}),
+        )
+    if path is not None:
+        return LocalDataset(
+            path,
+            name=name,
+            data_format=dataset["format"],
+            layout=dataset["layout"],
+            pad_series=dataset["allow_padding"],
+            **restriction,
+        )
+    return UcrUeaDataset(
+        name,
+        cache_dir=cache_dir,
+        download=dataset["download"],
+        pad_series=dataset["allow_padding"],
+        **restriction,
+    )
+
+
+def _metric_error_row(
+    exc: Exception, what: str, ids: tuple, seed: int, name: str, label: str
+) -> dict:
+    """
+    Log a metric's exception and return its ``error`` row.
+
+    Call it from inside the ``except`` block, so the traceback is logged.
+
+    Parameters
+    ----------
+    exc : Exception
+        The exception the metric raised.
+    what : str
+        What went wrong, for the log line (``"failed"``, ``"could not be built"``).
+    ids : tuple
+        ``(dataset_id, model_id, explainer_id, metric_id)`` of the row.
+    seed : int
+        The metric's seed, recorded on the row.
+    name : str
+        The metric's configured name, for the log line.
+    label : str
+        The metric's ``dataset/model/explainer/metric`` label, for the log line.
+
+    Returns
+    -------
+    dict
+        The ``error`` row naming the exception.
+    """
+    logger.exception(
+        "Metric '%s' %s for %s, skipping to the next metric.", name, what, label
+    )
+    return _result_row(*ids, "error", seed=seed, detail=f"{type(exc).__name__}: {exc}")
 
 
 def initial_setup(

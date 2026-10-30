@@ -1,8 +1,8 @@
-"""Unit tests for experiment_runner/losses.py — the config string to a torch loss."""
+"""Unit tests for experiment_runner/lookups.py - the config string to a torch loss."""
 
 import pytest
 import torch
-from experiment_runner.losses import LOSSES, as_tensors, build_loss
+from experiment_runner.lookups import LOSSES, as_tensors, build_loss
 from torch import nn
 
 
@@ -99,3 +99,10 @@ def test_params_without_a_name_raise():
 def test_a_bad_constructor_argument_is_a_config_error():
     with pytest.raises(ValueError, match="could not be constructed from"):
         build_loss("crossentropy", {"nonsense": 2})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["os.system", "torch.optim.Adam"])
+def test_a_dotted_path_that_is_not_a_module_class_is_rejected(path):
+    with pytest.raises(ValueError, match="not a subclass of Module"):
+        build_loss(path, {"command": "echo pwned"})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import inspect
 import logging
@@ -9,11 +10,16 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
+import quantus as q
 
 from ..models.base import predict_probs
-from ..utils.perturbation import BASELINES, resolve_perturb_func
 from ..utils.utils import dict_to_args
 from ..xai._types import DataType, Domain
+from .quantus_groups import (
+    quantus_requires_explain_func,
+    quantus_requires_native_domain,
+    quantus_requires_s_batch,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,93 +32,51 @@ logger = logging.getLogger(__name__)
 
 # Params whose values (float in 0.0-1.0) represent a fraction of series length T
 # and are converted to integers at runtime: max(1, int(fraction * T)).
-# Keys = Quantus class name; values = set of param names that accept T-fractions.
+# Keys = Quantus class; values = set of param names that accept T-fractions.
 # Named _T to distinguish from future _fraction_params_C (channel-relative params).
-_fraction_params_T: dict[str, set[str]] = {  # noqa: N816 — _T denotes time axis
-    "FaithfulnessCorrelation": {"subset_size"},
-    "TopKIntersection": {"k"},
+_fraction_params_T: dict[type[q.Metric], set[str]] = {  # noqa: N816 — _T denotes time axis
+    q.FaithfulnessCorrelation: {"subset_size"},
+    q.TopKIntersection: {"k"},
 }
 
 # Per-metric constructor defaults for QuantusEvaluator, filling in values whose
 # Quantus defaults are sized for images rather than series.
-# Keys are Quantus class names; values map param names to scalars or callables.
+# Keys are Quantus classes; values map param names to scalars or callables.
 # Callables receive the x_batch array (shape B, C, T) and return a scalar, so a
 # default that depends on the *model* has no home here.
 # Float values for params listed in _fraction_params_T are treated as fractions
 # of series length T and converted to integers at runtime.
-eval_metric_defaults = {
-    "FaithfulnessCorrelation": {
+eval_metric_defaults: dict[type[q.Metric], dict] = {
+    q.FaithfulnessCorrelation: {
         # 5 % of series length; Quantus default (224) is ImageNet-sized
         "subset_size": 0.05,
     },
-    "TopKIntersection": {
+    q.TopKIntersection: {
         # 10 % of series length; Quantus default (1000) exceeds most TSC series
         "k": 0.1,
     },
-    "MPRT": {
+    q.MPRT: {
         # One score per randomised layer. With return_aggregate (the framework
         # default) Quantus asserts that one of the two correlation reductions is
         # on; without it the result is a dict rather than a score.
         "return_last_correlation": True,
     },
-    "SmoothMPRT": {
+    q.SmoothMPRT: {
         "return_last_correlation": True,
     },
 }
 
-# Callable-typed params that may also be given as a string name, resolved via
-# _resolve_callable_perturb_func; an unresolvable one raises.
-# TODO: extend resolution to other callable params once a canonical resolution
-#       strategy and signature tests are in place:
-#       similarity_func, norm_numerator, norm_denominator, aggregate_func,
-#       normalise_func, complexity_func, distance_func, discretise_func,
-#       output_func, default_plot_func
-_RESOLVABLE_CALLABLE_PARAMS: frozenset[str] = frozenset({"perturb_func"})
 
-
-def _resolve_callable_perturb_func(value: str) -> Callable:
-    """
-    Resolve a string name to a Quantus perturbation callable.
-
-    Thin wrapper over :func:`xai4tsc.utils.perturbation.resolve_perturb_func`
-    (the single, shared resolver): the top-level ``quantus`` namespace, then a
-    dotted import path (e.g. ``"mymodule.fn"``). Baseline names are refused:
-    they resolve to TSHAP's :func:`~xai4tsc.utils.perturbation.baseline_replacement`,
-    which takes one ``(C, T)`` series and time indices, while Quantus calls a
-    ``perturb_func`` with ``(B, C*T)`` rows and passes the baseline separately.
-
-    Parameters
-    ----------
-    value : str
-        Function name or dotted import path.
-
-    Returns
-    -------
-    callable
-
-    Raises
-    ------
-    ValueError
-        If *value* is a baseline name or resolves to nothing.
-    """
-    if value in BASELINES:
-        raise ValueError(
-            f"perturb_func {value!r} is a TSHAP baseline name, not a Quantus "
-            "perturbation function. For a Quantus metric write "
-            "perturb_func: baseline_replacement_by_indices with "
-            f"perturb_baseline: {value}."
-        )
-    return resolve_perturb_func(value)
-
-
-def _apply_fraction_params(class_name: str, params: dict, data: np.ndarray) -> dict:
+def _apply_fraction_params(
+    quantus_class: type[q.Metric], params: dict, data: np.ndarray
+) -> dict:
     """
     Convert fraction params (float in 0.0-1.0) to integers using series length T.
 
     Parameters
     ----------
-    class_name : str
-        Quantus class name, used to look up which params are fraction params.
+    quantus_class : type[quantus.Metric]
+        Quantus metric class, used to look up which params are fraction params.
     params : dict
         Param dict to process (not mutated).
     data : np.ndarray
@@ -123,7 +87,7 @@ def _apply_fraction_params(class_name: str, params: dict, data: np.ndarray) -> d
     dict
         Copy of *params* with fraction values replaced by integers.
     """
-    fraction_keys = _fraction_params_T.get(class_name, set())
+    fraction_keys = _fraction_params_T.get(quantus_class, set())
     if not fraction_keys:
         return params
     t = data.shape[-1]
@@ -131,39 +95,6 @@ def _apply_fraction_params(class_name: str, params: dict, data: np.ndarray) -> d
     for k, v in params.items():
         if k in fraction_keys and isinstance(v, float) and 0.0 < v <= 1.0:
             result[k] = max(1, int(v * t))
-        else:
-            result[k] = v
-    return result
-
-
-def _resolve_string_callables(params: dict, class_name: str) -> dict:
-    """
-    Replace string values for callable params with resolved callables.
-
-    Parameters
-    ----------
-    params : dict
-        Param dict to process (not mutated).
-    class_name : str
-        Quantus class name, used in warning messages.
-
-    Returns
-    -------
-    dict
-        Copy of *params* with strings resolved.
-
-    Raises
-    ------
-    ValueError
-        If a string cannot be resolved; the message names *class_name*.
-    """
-    result = {}
-    for k, v in params.items():
-        if k in _RESOLVABLE_CALLABLE_PARAMS and isinstance(v, str):
-            try:
-                result[k] = _resolve_callable_perturb_func(v)
-            except ValueError as exc:
-                raise ValueError(f"{class_name}: {exc}") from exc
         else:
             result[k] = v
     return result
@@ -205,10 +136,10 @@ class EvaluatorBase(ABC):
     """
     Base class for all XAI evaluation metrics.
 
-    Subclass this and implement :meth:`evaluate`, then register the subclass with
-    :func:`xai4tsc.register_metric` to make it available by name. The registry value
-    is a *callable producing an evaluator*, so a subclass (instantiated with its
-    constructor params) satisfies the contract directly.
+    Subclass this and implement :meth:`evaluate`, then pass an instance to
+    :func:`~xai4tsc.evaluation.evaluate`. A ``METRICS`` value is a *callable
+    producing an evaluator*, so a subclass (instantiated with its constructor
+    params) fits that catalog directly.
 
     Example::
 
@@ -217,8 +148,6 @@ class EvaluatorBase(ABC):
 
             def evaluate(self, model, explanation, data, labels, device="cpu", **kw):
                 return float(np.mean(np.abs(explanation.exp_values)))
-
-        xai4tsc.register_metric("MyMetric", MyEvaluator)
 
     Domain applicability
     --------------------
@@ -329,19 +258,19 @@ class QuantusEvaluator(EvaluatorBase):
 
     .. _Quantus: https://github.com/understandingai/Quantus
 
-    Initialized with a metric **name** (a key of the ``QUANTUS_METRICS`` lookup table),
-    not a class — so the registry can map every Quantus metric in via one class, e.g.
-    ``partial(QuantusEvaluator, name)``.
+    Initialized with the Quantus metric **class** and its constructor parameters;
+    the Quantus instance itself is built at evaluation time, because some of its
+    defaults depend on the data and the model.
 
     Example::
 
         evaluator = QuantusEvaluator(
-            "Faithfulness Correlation",
+            quantus.FaithfulnessCorrelation,
             normalise=True,
             abs=True,
             disable_warnings=True,
         )
-        score = evaluator.evaluate(model, explanation, data, labels)
+        score = xai4tsc.evaluate(evaluator, model, explanation, data, labels)
 
     Domain applicability
     --------------------
@@ -349,52 +278,50 @@ class QuantusEvaluator(EvaluatorBase):
     reads: one that reads only the attribution applies in any
     domain, while one that perturbs the input and re-queries the model needs the
     model-native domain. :attr:`requires_native_domain` is therefore set per metric
-    *name* from :data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`; the class
+    class from :data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`; the class
     attribute is the conservative ``True`` default.
     """
 
     requires_native_domain: ClassVar[bool] = True
-    """Conservative default; the instance relaxes it per metric name."""
+    """Conservative default; the instance relaxes it per metric class."""
 
-    def __init__(self, name: str, **metric_class_params: object) -> None:
+    def __init__(
+        self, quantus_class: type[q.Metric], **metric_class_params: object
+    ) -> None:
         """
-        Instantiate the evaluator for a named Quantus metric.
+        Instantiate the evaluator for a Quantus metric class.
 
         Parameters
         ----------
-        name : str
-            A key of the ``QUANTUS_METRICS`` lookup table (the metric's display name).
+        quantus_class : type[quantus.Metric]
+            The Quantus metric class, e.g. ``quantus.PixelFlipping``. A class
+            missing from :data:`~xai4tsc.evaluation.quantus_groups.QUANTUS_GROUPS`
+            is treated as needing the model-native domain.
         **metric_class_params
-            Keyword arguments forwarded to the resolved Quantus class ``__init__``.
+            Keyword arguments forwarded to the Quantus class ``__init__``.
             Float values between 0.0 and 1.0 for params listed in
             ``_fraction_params_T`` are treated as fractions of series
             length T and converted to integers at evaluation time.
-            String values for ``perturb_func`` are resolved to callables
-            from the ``quantus`` namespace or via dotted import path.
+            A ``perturb_func`` is a callable, as Quantus expects.
 
         Raises
         ------
-        ValueError
-            If *name* is not a registered Quantus metric.
+        TypeError
+            If *quantus_class* is not a ``quantus.Metric`` subclass, e.g. a
+            metric's display name.
         """
-        from .evaluate import QUANTUS_METRICS
-        from .quantus_groups import (
-            quantus_requires_explain_func,
-            quantus_requires_native_domain,
-            quantus_requires_s_batch,
-        )
-
-        if name not in QUANTUS_METRICS:
-            raise ValueError(
-                f"Unknown Quantus metric '{name}'. "
-                f"Valid names: {sorted(QUANTUS_METRICS)}."
+        is_class = isinstance(quantus_class, type)
+        if not (is_class and issubclass(quantus_class, q.Metric)):
+            raise TypeError(
+                "QuantusEvaluator takes a quantus.Metric subclass, e.g. "
+                f"quantus.PixelFlipping, got {quantus_class!r}."
             )
-        self._metric_class = QUANTUS_METRICS[name]
+        self.quantus_class = quantus_class
         self._metric_class_params = metric_class_params
-        self.metric_name = name
-        self.requires_native_domain = quantus_requires_native_domain(name)
-        self._requires_explain_func = quantus_requires_explain_func(name)
-        self._requires_ground_truth = quantus_requires_s_batch(name)
+        self.metric_name = quantus_class.__name__
+        self.requires_native_domain = quantus_requires_native_domain(quantus_class)
+        self._requires_explain_func = quantus_requires_explain_func(quantus_class)
+        self._requires_ground_truth = quantus_requires_s_batch(quantus_class)
 
     def evaluate(
         self,
@@ -446,22 +373,21 @@ class QuantusEvaluator(EvaluatorBase):
         float or np.ndarray
             The metric's score(s).
         """
-        class_name = self._metric_class.__name__
+        quantus_class = self.quantus_class
 
         # 1. Fill in framework defaults for params the user didn't specify.
-        raw_defaults = eval_metric_defaults.get(class_name, {})
+        raw_defaults = eval_metric_defaults.get(quantus_class, {})
         auto_params = {
             k: v(data) if callable(v) else v
             for k, v in raw_defaults.items()
             if k not in self._metric_class_params
         }
-        auto_params = _apply_fraction_params(class_name, auto_params, data)
+        auto_params = _apply_fraction_params(quantus_class, auto_params, data)
 
-        # 2. Process user-supplied params: convert fractions and resolve callables.
+        # 2. Process user-supplied params: convert fractions.
         user_params = _apply_fraction_params(
-            class_name, dict(self._metric_class_params), data
+            quantus_class, dict(self._metric_class_params), data
         )
-        user_params = _resolve_string_callables(user_params, class_name)
 
         # Quantus aggregates with np.mean when return_aggregate is on, so a single
         # NaN sample poisons the whole score.
@@ -469,7 +395,7 @@ class QuantusEvaluator(EvaluatorBase):
         # unknown keyword arguments outright.
         seed_param = (
             {"seed": seed}
-            if seed is not None and _accepts_named(self._metric_class.__init__, "seed")
+            if seed is not None and _accepts_named(quantus_class.__init__, "seed")
             else {}
         )
         merged = {
@@ -482,7 +408,10 @@ class QuantusEvaluator(EvaluatorBase):
         # 3. Metrics that re-explain need a callable, and one needs the class count.
         extra_call: dict[str, object] = {}
         if self._requires_explain_func:
-            merged = {**self._model_dependent_params(class_name, model, data), **merged}
+            merged = {
+                **self._model_dependent_params(quantus_class, model, data),
+                **merged,
+            }
             extra_call["explain_func"] = self._make_explain_func(explanation, device)
 
         # 4. Localisation metrics score against the dataset's ground truth, and
@@ -492,8 +421,8 @@ class QuantusEvaluator(EvaluatorBase):
             s_batch, keep = self._ground_truth_batch(explanation, data)
             extra_call["s_batch"] = s_batch
 
-        init_params = dict_to_args(merged, self._metric_class.__init__)
-        metric = self._metric_class(**(init_params or {}))
+        init_params = dict_to_args(merged, quantus_class.__init__)
+        metric = quantus_class(**(init_params or {}))
 
         # Quantus keeps a non-empty explain_func_kwargs by reference and writes
         # `device` into it, and only the outer call_params dict was copied on the
@@ -637,9 +566,9 @@ class QuantusEvaluator(EvaluatorBase):
 
         Robustness and randomisation metrics re-explain perturbed or randomised
         inputs, so they need to run the same explainer again on a model that is not
-        the one the explanation was made with. The explainer is rebuilt from the
-        explanation's own record rather than reused, so each evaluation starts from
-        a clean instance.
+        the one the explanation was made with. They run a deep copy of the
+        explanation's explainer rather than the instance itself, so each evaluation
+        starts from the same state and the stored explainer is left untouched.
 
         The explanation's record is authoritative for *how* the explainer is
         called: its ``explainer_call_params`` are replayed, so a re-explanation is
@@ -652,8 +581,7 @@ class QuantusEvaluator(EvaluatorBase):
         Parameters
         ----------
         explanation : Explanation
-            Supplies the explainer's registry key, its construction parameters and
-            the per-call parameters to replay.
+            Supplies the explainer and the per-call parameters to replay.
         device : str
             Compute device for the re-explanations.
 
@@ -661,24 +589,8 @@ class QuantusEvaluator(EvaluatorBase):
         -------
         callable
             ``explain_func(model, inputs, targets, **kwargs) -> np.ndarray``.
-
-        Raises
-        ------
-        ValueError
-            If the explanation names an explainer that is not registered.
         """
-        from ..xai.explain import build_explainer
-
-        try:
-            explainer = build_explainer(
-                explanation.explainer, explanation.explainer_params
-            )
-        except NotImplementedError as exc:
-            raise ValueError(
-                f"Cannot re-explain with '{explanation.explainer}': it is not a "
-                "registered explainer. Metrics that re-explain need to rebuild the "
-                "explainer that produced the attribution."
-            ) from exc
+        explainer = copy.deepcopy(explanation.explainer)
 
         def explain_func(
             model: nn.Module,
@@ -721,7 +633,7 @@ class QuantusEvaluator(EvaluatorBase):
 
     @staticmethod
     def _model_dependent_params(
-        class_name: str, model: nn.Module, data: np.ndarray
+        quantus_class: type[q.Metric], model: nn.Module, data: np.ndarray
     ) -> dict:
         """
         Return init params that can only be derived from the model.
@@ -731,8 +643,8 @@ class QuantusEvaluator(EvaluatorBase):
 
         Parameters
         ----------
-        class_name : str
-            The Quantus metric's class name.
+        quantus_class : type[quantus.Metric]
+            The Quantus metric class.
         model : torch.nn.Module
             The model being explained.
         data : np.ndarray
@@ -743,7 +655,7 @@ class QuantusEvaluator(EvaluatorBase):
         dict
             Params to merge *under* the user's own, so an explicit value wins.
         """
-        if class_name != "RandomLogit":
+        if quantus_class is not q.RandomLogit:
             return {}
         # Quantus defaults num_classes to 1000 (ImageNet) and samples an off-class
         # index from it, derive from the model instead.

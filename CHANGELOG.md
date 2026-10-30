@@ -8,19 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Experiment-runner reliability release. The `metrics.csv` schema changes,
-`xai4tsc.Explanation` gains a required field, and label encoding, the loss and the
-optimizer now take library objects instead of strings.
+`xai4tsc.Explanation.explainer` now holds the explainer object, and label
+encoding, the loss and the optimizer now take library objects instead of strings.
 
 **Results from earlier versions will not reproduce exactly.** Randomness is now
 derived per result rather than once per run, so model weight init, the split and
 the explained-sample selection all draw differently. Statuses and row sets are
 unchanged; scores move once. Split-cache folder names change once with them.
 
-**Migration**: code that constructs an `Explanation` by hand must pass
-`explainer_params` (use `{}` if there is nothing to record). Explanations produced
-by `generate_explanation()` are unaffected. `train_model()` and `evaluate_model()`
-now require a destination: pass `save_path=`, or build the model through
-`load_model(..., save_path=...)`. Code that relied on the old fall-back to the
+**Migration**: code that constructs an `Explanation` by hand must pass the
+explainer object that produced it as `explainer`, not its name. Explanations
+produced by `generate_explanation()` are unaffected. `train_model()` and
+`evaluate_model()` now require a destination: pass `save_path=`, or build the
+model through `load_model(..., save_path=...)`. Code that relied on the old fall-back to the
 working directory has to name a directory. `ModelBase.load_from_checkpoint` is
 removed: build the class and load the weights
 (`MyCNN(...).configure(device=...)` then `load_state_dict`), or reload through
@@ -29,8 +29,8 @@ class and reads the constructor arguments back from the checkpoint's config. The
 `use_predefined_splits` moved from `UcrUeaDataset.__init__` to `split()`:
 `UcrUeaDataset(name, use_predefined_splits=True)` becomes
 `UcrUeaDataset(name).split(..., use_predefined_splits=True)`, and passing it to
-`load_dataset()` now raises `TypeError` naming the new home rather than returning a
-dataset that would split the other way. The
+the constructor raises `TypeError` rather than returning a dataset that would
+split the other way. The
 `rel_type_kwargs` key `bubble_size` is now `point_size`, matching the style it
 sizes. `train_model()` and `evaluate_model()` take their training
 hyperparameters as keyword arguments instead of a `hyperparams` dict
@@ -60,6 +60,13 @@ change.
 
 ### Changed
 
+- **The package API takes objects instead of names.** Explainers, evaluators,
+  transforms and perturbation functions are passed as objects, and the remaining
+  string options are typed `Literal` and checked when the object is built, so a
+  type checker or the first call catches a typo. The registries stay as plain
+  catalogs for look-ups. The `register_*` functions are gone, and the
+  name-resolving logic only the runner used moved into the runner, which keeps
+  the line between package and runner strict.
 - **Model performance is collected into `models.csv`.** `evaluate_model`'s summary
   used to be returned and dropped on the floor by the runner, so comparing two
   models meant opening each model's own `*_test_results.csv`. It is now also

@@ -2,6 +2,7 @@
 
 import logging
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -9,9 +10,12 @@ from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap
 
-from .utils import rescale_array
+from .utils import _check_option, rescale_array
 
 logger = logging.getLogger(__name__)
+
+
+RelType = Literal["points", "background", "intensity", "graph", "bar", None]
 
 
 def _sample_paths(
@@ -52,7 +56,7 @@ def _sample_paths(
 def plot_relevance(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
-    rel_type: str = "points",
+    rel_type: RelType = "points",
     rel_type_kwargs: dict | None = None,
     linewidth: float = 1.4,
     threshold: float = 0.0,
@@ -79,8 +83,6 @@ def plot_relevance(
     rel_type : str
         Visualisation style: ``"points"`` (default), ``"background"``,
         ``"intensity"``, ``"graph"``, ``"bar"``, or ``None`` for no overlay.
-        An unrecognised value renders the default points overlay rather than
-        raising, and is used verbatim in the output filename.
     rel_type_kwargs : dict
         Extra keyword arguments forwarded to :func:`add_relevance`.
     linewidth : float
@@ -107,6 +109,7 @@ def plot_relevance(
     Path or None
         Path to the last saved file, or ``None`` if not saved.
     """
+    _check_option("rel_type", rel_type, RelType)
     if rel_type_kwargs is None:
         rel_type_kwargs = {}
     if relevance is None:
@@ -224,7 +227,7 @@ def add_relevance(
     ax: Axes,
     signal: np.ndarray,
     relevance: np.ndarray,
-    rel_type: str = "points",
+    rel_type: RelType = "points",
     threshold: float = 0.0,
     cmap: str = "bwr",
     cmap_boost: float = 0.0,
@@ -244,8 +247,6 @@ def add_relevance(
     rel_type : str
         Visualisation style: ``"points"`` (default), ``"background"``,
         ``"intensity"``, ``"graph"``, ``"bar"``, or ``None`` for no overlay.
-        An unrecognised value renders the default points overlay rather than
-        raising, and is used verbatim in the output filename.
     threshold : float
         Relevance values below this absolute magnitude are suppressed.
     cmap : str or Colormap
@@ -261,6 +262,7 @@ def add_relevance(
     Axes
         The modified axes.
     """
+    _check_option("rel_type", rel_type, RelType)
     # relevance threshold & boost
     rel = np.where(
         np.abs(relevance) >= threshold,
@@ -356,7 +358,6 @@ def add_relevance(
     elif rel_type is None:
         return ax
     else:
-        # "points" and anything unrecognised both land here
         # relevance thresholding & boost
         x = np.where(np.abs(relevance) >= threshold)[0]
         y = signal[x]
@@ -378,7 +379,7 @@ def add_relevance(
 def plot_relevance_f(
     signal: np.ndarray,
     relevance: np.ndarray | None = None,
-    rel_type: str = "points",
+    rel_type: RelType = "points",
     save_path: Path | str | None = None,
     **kwargs: object,
 ) -> Path | None:

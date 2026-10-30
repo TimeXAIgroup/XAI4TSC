@@ -1,7 +1,7 @@
 """
 Runner adapter for :mod:`xai4tsc.evaluation`.
 
-Unpacks metric configuration dicts and delegates to the package
+Builds the evaluator a metric configuration dict names, for the package
 :func:`~xai4tsc.evaluation.evaluate` function.
 """
 
@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from xai4tsc.evaluation import evaluate
-from xai4tsc.evaluation.evaluate import METRICS
 from xai4tsc.utils.utils import dict_to_args
+
+from .lookups import METRICS, QUANTUS_METRICS, build_perturb_func
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,60 +20,46 @@ if TYPE_CHECKING:
     import numpy as np
     from torch import nn
 
+    from xai4tsc.evaluation import EvaluatorBase
     from xai4tsc.xai._types import Explanation
 
 logger = logging.getLogger("xai4tsc.runner.evaluate")
 
 
-def _evaluate(
-    model: nn.Module,
-    metric_conf: dict,
-    explanation: Explanation,
-    data: np.ndarray | None = None,
-    labels: np.ndarray | None = None,
-    device: str = "cpu",
-    seed: int | None = None,
-) -> float | np.ndarray | None:
+def build_evaluator(metric_conf: dict) -> EvaluatorBase:
     """
-    Runner wrapper: unpack metric_conf dict and delegate to evaluate().
+    Build the evaluator a metric entry names.
 
     Parameters
     ----------
-    model :
-        The PyTorch model being evaluated.
     metric_conf : dict
-        Metric configuration dict with keys ``"metric"``,
-        ``"metric_class_params"``, and ``"metric_call_params"``.
-    explanation : Explanation
-        Explanation dataclass containing ``exp_values`` and metadata.
-    data : np.ndarray, optional
-        Input samples for the metric.
-    labels : np.ndarray, optional
-        Ground-truth labels.
-    device : str
-        Compute device.
-    seed : int or None
-        Seed derived for this result, handed to :func:`~xai4tsc.evaluate`, which
-        offers it only to a backend that declares a ``seed`` - the randomisation
-        metrics (the MPRT family, Random Logit). The rest ignore it, and a seed
-        the config states wins over this one.
+        Metric configuration dict with keys ``"metric"`` (a ``METRICS`` key) and
+        ``"metric_class_params"``. The params are filtered to the metric's
+        constructor, so shared Quantus-only params (e.g. ``normalise``) do not
+        break a native evaluator.
 
     Returns
     -------
-    float or np.ndarray or None
-        Metric score returned by :func:`~xai4tsc.evaluation.evaluate`.
+    EvaluatorBase
+        The configured evaluator, to pass to :func:`~xai4tsc.evaluate` with the
+        entry's ``metric_call_params``.
+
+    Raises
+    ------
+    ValueError
+        If a Quantus metric's ``perturb_func`` names no Quantus perturbation
+        function.
     """
-    return evaluate(
-        model,
-        metric_conf["metric"],
-        explanation=explanation,
-        data=data,
-        labels=labels,
-        metric_class_params=metric_conf["metric_class_params"],
-        metric_call_params=metric_conf["metric_call_params"],
-        device=device,
-        seed=seed,
-    )
+    name = metric_conf["metric"]
+    class_params = dict(metric_conf.get("metric_class_params") or {})
+    perturb = class_params.get("perturb_func")
+    if name in QUANTUS_METRICS and isinstance(perturb, str):
+        try:
+            class_params["perturb_func"] = build_perturb_func(perturb)
+        except ValueError as exc:
+            raise ValueError(f"{name}: {exc}") from exc
+    factory = METRICS[name]
+    return factory(**(dict_to_args(class_params, factory) or {}))
 
 
 def _animate(

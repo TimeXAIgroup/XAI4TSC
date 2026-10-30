@@ -29,7 +29,6 @@ from xai4tsc.models.models import (
     _ResidualBlock,
     load_ext_model,
     load_model,
-    register_model,
     save_model,
 )
 
@@ -59,37 +58,6 @@ class _TinyModel(ModelBase):
 
     def forward(self, x):
         return self.fc(x.mean(-1))
-
-
-# ── register_model ────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_register_model_adds_to_registry_and_instantiates(tmp_path):
-    register_model("tinymodel", _TinyModel)
-    try:
-        assert MODELS["tinymodel"] is _TinyModel
-        model = load_model(
-            {"model": "tinymodel", "init_params": {"in_channels": 1, "num_classes": 2}},
-            device="cpu",
-            save_path=tmp_path,
-        )
-        assert isinstance(model, _TinyModel)
-        assert model.name == "tinymodel"
-    finally:
-        MODELS.pop("tinymodel", None)
-
-
-@pytest.mark.unit
-def test_register_model_rejects_non_modelbase():
-    from torch import nn
-
-    class _PlainModule(nn.Module):
-        pass
-
-    with pytest.raises(TypeError, match="ModelBase subclass"):
-        register_model("plainmodule", _PlainModule)
-    assert "plainmodule" not in MODELS
 
 
 # ── save_model ────────────────────────────────────────────────────────────────

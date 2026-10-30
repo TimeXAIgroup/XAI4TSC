@@ -9,10 +9,12 @@ are consumable unchanged).
 
 import numpy as np
 import pytest
+import quantus as q
 from experiment_runner import explain as runner_explain
 
-from xai4tsc.evaluation.evaluate import evaluate
+from xai4tsc.evaluation import QuantusEvaluator, evaluate
 from xai4tsc.xai.explain import generate_explanation
+from xai4tsc.xai.feature_attribution import TSHAPExplainer
 
 
 @pytest.mark.integration
@@ -23,19 +25,18 @@ def test_tshap_centroid_background_end_to_end(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="tshap",
+        explainer=TSHAPExplainer(
+            window_length=0.1,
+            stride=3,
+            perturb_baseline="centroid",
+            background_data=train_data,
+        ),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
         indices=[0, 1],
         device="cpu",
-        params={
-            "window_length": 0.1,
-            "stride": 3,
-            "perturb_baseline": "centroid",
-            "background_data": train_data,
-        },
     )
 
     assert exp.exp_values.shape == test_data[[0, 1]].shape
@@ -58,14 +59,13 @@ def test_tshap_roi_and_per_channel_run(trained_model, split_dataset):
         },
     ):
         exp = generate_explanation(
-            method="tshap",
+            explainer=TSHAPExplainer(**params),
             model=trained_model,
             data=test_data,
             labels=test_labels,
             encoder=encoder,
             indices=[0, 1],
             device="cpu",
-            params=params,
         )
         assert exp.exp_values.shape == test_data[[0, 1]].shape
         assert np.all(np.isfinite(exp.exp_values))
@@ -78,14 +78,13 @@ def test_tshap_consumable_by_quantus_metric(trained_model, split_dataset):
     test_data, test_labels = splits[1][0], splits[1][1]
 
     exp = generate_explanation(
-        method="tshap",
+        explainer=TSHAPExplainer(window_length=0.1, stride=3, perturb_baseline="mean"),
         model=trained_model,
         data=test_data,
         labels=test_labels,
         encoder=encoder,
         indices=[0, 1],
         device="cpu",
-        params={"window_length": 0.1, "stride": 3, "perturb_baseline": "mean"},
     )
 
     # Quantus guards reject degenerate-sign attributions (e.g. all-negative)
@@ -96,19 +95,19 @@ def test_tshap_consumable_by_quantus_metric(trained_model, split_dataset):
     exp.exp_values = np.abs(exp.exp_values)
 
     score = evaluate(
+        QuantusEvaluator(
+            q.Complexity,
+            normalise=True,
+            abs=True,
+            disable_warnings=True,
+            return_aggregate=True,
+        ),
         model=trained_model,
-        metric="Complexity",
         explanation=exp,
         data=test_data[exp.indices],
         labels=test_labels[exp.indices],
-        metric_class_params={
-            "normalise": True,
-            "abs": True,
-            "disable_warnings": True,
-            "return_aggregate": True,
-        },
-        metric_call_params={"softmax": False},
         device="cpu",
+        call_params={"softmax": False},
     )
 
     scalar = float(score[0]) if hasattr(score, "__len__") else float(score)

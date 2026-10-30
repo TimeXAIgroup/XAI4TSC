@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import quantus as q
 import torch
 
 import xai4tsc
-from xai4tsc.data import class_names, load_dataset
-from xai4tsc.evaluation.evaluate import evaluate
+from xai4tsc.data import UcrUeaDataset, class_names
+from xai4tsc.evaluation import QuantusEvaluator, evaluate
 from xai4tsc.xai.explain import generate_explanation
+from xai4tsc.xai.feature_attribution import IntegratedGradientsExplainer
 
 
 def main(out_dir: str, cache_dir: str | None = None) -> dict:
@@ -32,9 +34,9 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
     seed = 0xDEADBEEF
     torch.manual_seed(seed)
 
-    # Load data (UCR download or local numpy files) and split it 80/10/10.
-    # The returned list is ordered [train, test, val] - validation comes last.
-    ds = load_dataset("GunPoint", cache_dir=cache_dir)
+    # Load a UCR dataset (LocalDataset reads local numpy files) and split it
+    # 80/10/10. The returned list is ordered [train, test, val] - validation last.
+    ds = UcrUeaDataset("GunPoint", cache_dir=cache_dir)
     splits, encoder = ds.split(train_split=0.8, val_split=0.1, random_state=seed)
     ds.save_splits(out_dir)
     train_data, train_labels, _ = splits[0]
@@ -69,7 +71,7 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
 
     # Generate explanations, available explainers are listed in xai4tsc.xai.EXPLAINERS
     exp = generate_explanation(
-        method="integrated_gradients",
+        explainer=IntegratedGradientsExplainer(),
         model=model,
         data=test_data,
         labels=test_labels,
@@ -80,12 +82,11 @@ def main(out_dir: str, cache_dir: str | None = None) -> dict:
 
     # Evaluate the explanations
     complexity = evaluate(
+        QuantusEvaluator(q.Complexity, normalise=True, abs=True, disable_warnings=True),
         model=model,
-        metric="Complexity",
         explanation=exp,
         data=test_data[exp.indices],
         labels=test_labels[exp.indices],
-        metric_class_params={"normalise": True, "abs": True, "disable_warnings": True},
         device="cpu",
     )
     print(f"Test accuracy: {results['accuracy']}")

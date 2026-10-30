@@ -45,9 +45,6 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
     ),
     ("data_config", "format"): (LocalDataset.__init__, "data_format"),
     ("data_config", "layout"): (LocalDataset.__init__, "layout"),
-    # The string form, which is what a config carries; `generate_explanation`
-    # takes the same setting as a `Domain` member and so cannot own this key.
-    ("data_config", "data_domain"): (LocalDataset.__init__, "data_domain"),
     ("train_config", "hyperparams.epochs"): (ModelBase.train_model, "epochs"),
     ("train_config", "hyperparams.batchsize"): (ModelBase.train_model, "batchsize"),
     ("train_config", "hyperparams.learn_rate"): (ModelBase.train_model, "learn_rate"),

@@ -22,12 +22,14 @@ from xai4tsc.evaluation.timefrequency_perturbation import (
     TimeFrequencyEvaluator,
     TimeFrequencyEvaluatorGaussian,
 )
-from xai4tsc.utils import RFFTransform, get_transform
+from xai4tsc.utils import RFFTransform, STFTransform
 from xai4tsc.xai import Domain
 from xai4tsc.xai._types import Explanation
-from xai4tsc.xai.explain import _get_explanation
+from xai4tsc.xai.explain import EXPLAINERS, _get_explanation
 
-_STFT = {"name": "stft", "params": {"n_fft": 16, "win_length": 16, "hop_length": 4}}
+
+def _stft():
+    return STFTransform(n_fft=16, win_length=16, hop_length=4)
 
 
 class _TinyNet(nn.Module):
@@ -48,12 +50,11 @@ class _TinyNet(nn.Module):
 
 def _explain(method, params, data, labels, model):
     return _get_explanation(
-        method=method,
+        explainer=EXPLAINERS[method](**params),
         model=model,
         data=data,
         labels=labels,
         encoder=None,
-        params=params,
         targets="label",
         device="cpu",
         orig_indices=np.arange(len(data)),
@@ -74,11 +75,6 @@ def test_rfftransform_round_trip(t_len):
     recon = r.inverse(fwd)
     assert recon.shape == x.shape
     assert torch.allclose(recon, x, atol=1e-5)
-
-
-@pytest.mark.unit
-def test_get_transform_rfft():
-    assert isinstance(get_transform({"name": "rfft", "params": {}}), RFFTransform)
 
 
 @pytest.mark.unit
@@ -147,12 +143,11 @@ def test_frequency_perturbation_on_real_relevance():
     )
     res = np.asarray(
         evaluate(
+            FrequencyEvaluator(features_in_step=3),
             model=model,
-            metric="Frequency Perturbation",
             explanation=exp,
             data=data,
             labels=labels,
-            metric_class_params={"features_in_step": 3},
         )
     )
     assert res.shape[0] == 4
@@ -165,48 +160,15 @@ def test_frequency_perturbation_on_complex_relevance():
     data = np.random.default_rng(2).standard_normal((3, 1, 32)).astype(np.float32)
     labels = np.array([0, 1, 2], dtype=np.int64)
     model = _TinyNet(1, 32, 3).eval()
-    exp = _explain("frequency", {"base": "integrated_gradients"}, data, labels, model)
+    exp = _explain("frequency", {}, data, labels, model)
     assert np.iscomplexobj(exp.exp_values)
     res = np.asarray(
         evaluate(
+            FrequencyEvaluator(features_in_step=4),
             model=model,
-            metric="Frequency Perturbation",
             explanation=exp,
             data=data,
             labels=labels,
-            metric_class_params={"features_in_step": 4},
-        )
-    )
-    assert res.shape[0] == 3
-    assert np.isfinite(res).all()
-
-
-@pytest.mark.unit
-def test_evaluate_filters_quantus_only_params_for_native_metric():
-    # Shared Quantus-only params (e.g. normalise/abs) must be filtered out before a
-    # native evaluator is constructed, not raise a TypeError.
-    data = np.random.default_rng(7).standard_normal((3, 1, 32)).astype(np.float32)
-    labels = np.array([0, 1, 0], dtype=np.int64)
-    model = _TinyNet(1, 32, 2).eval()
-    exp = _explain(
-        "freqrise",
-        {"domain": "fft", "num_batches": 2, "batch_size": 4, "num_cells": 8, "seed": 0},
-        data,
-        labels,
-        model,
-    )
-    res = np.asarray(
-        evaluate(
-            model=model,
-            metric="Frequency Perturbation",
-            explanation=exp,
-            data=data,
-            labels=labels,
-            metric_class_params={
-                "features_in_step": 3,
-                "normalise": True,  # Quantus-only — must be dropped
-                "abs": True,  # Quantus-only — must be dropped
-            },
         )
     )
     assert res.shape[0] == 3
@@ -226,12 +188,11 @@ def test_frequency_perturbation_aoc_mode():
         model,
     )
     res = evaluate(
+        FrequencyEvaluator(features_in_step=3, return_aoc_per_sample=True),
         model=model,
-        metric="Frequency Perturbation",
         explanation=exp,
         data=data,
         labels=labels,
-        metric_class_params={"features_in_step": 3, "return_aoc_per_sample": True},
     )
     assert isinstance(res, list)
     assert len(res) == 3
@@ -243,7 +204,7 @@ def test_frequency_perturbation_aoc_mode():
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "metric", ["Time-Frequency Perturbation", "Time-Frequency Perturbation Gaussian"]
+    "metric", [TimeFrequencyEvaluator, TimeFrequencyEvaluatorGaussian]
 )
 def test_timefrequency_perturbation(metric):
     data = np.random.default_rng(4).standard_normal((2, 1, 64)).astype(np.float32)
@@ -251,19 +212,18 @@ def test_timefrequency_perturbation(metric):
     model = _TinyNet(1, 64, 2).eval()
     exp = _explain(
         "timefrequency",
-        {"base": "guided_backpropagation", "transform": _STFT},
+        {"transform": _stft()},
         data,
         labels,
         model,
     )
     res = np.asarray(
         evaluate(
+            metric(features_in_step=5),
             model=model,
-            metric=metric,
             explanation=exp,
             data=data,
             labels=labels,
-            metric_class_params={"features_in_step": 5},
         )
     )
     assert res.shape[0] == 2
@@ -285,7 +245,6 @@ def _gt_meta(n, freq=7, pos=0, length=None, channel=0):
 def _freq_explanation(a, data, metadata, transform):
     return Explanation(
         explainer="x",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=a,
         data=data,
@@ -319,12 +278,11 @@ def test_tfauc_perfect_localization_scores_one():
     a[:, :, 7] = 9.0  # all relevance on the discriminative bin
     exp = _freq_explanation(a, data, _gt_meta(n, freq=7), rfft)
     res = evaluate(
+        TimeFrequencyAUCEvaluator(return_aggregate=True),
         model=_TinyNet(1, t_len, 2).eval(),
-        metric="Time-Frequency AUC",
         explanation=exp,
         data=data,
         labels=np.zeros(n, dtype=np.int64),
-        metric_class_params={"return_aggregate": True},
     )
     assert res == pytest.approx(1.0)
 
@@ -339,12 +297,11 @@ def test_tfauc_per_sample_and_random_baseline():
     a = np.random.default_rng(2).random((n, 1, n_freq)).astype(np.float32)
     exp = _freq_explanation(a, data, _gt_meta(n, freq=11), rfft)
     res = evaluate(
+        TimeFrequencyAUCEvaluator(return_aggregate=False),
         model=_TinyNet(1, t_len, 2).eval(),
-        metric="Time-Frequency AUC",
         explanation=exp,
         data=data,
         labels=np.zeros(n, dtype=np.int64),
-        metric_class_params={"return_aggregate": False},
     )
     assert isinstance(res, list) and len(res) == n
     assert all(0.0 <= r <= 1.0 for r in res)
@@ -362,12 +319,11 @@ def test_tfauc_no_ground_truth_regions_is_nan():
     empty_meta = [{"ground_truth": {}, "non_discriminative": []} for _ in range(n)]
     exp = _freq_explanation(a, data, empty_meta, rfft)
     res = evaluate(
+        TimeFrequencyAUCEvaluator(return_aggregate=True),
         model=_TinyNet(1, t_len, 2).eval(),
-        metric="Time-Frequency AUC",
         explanation=exp,
         data=data,
         labels=np.zeros(n, dtype=np.int64),
-        metric_class_params={"return_aggregate": True},
     )
     assert np.isnan(res)
 

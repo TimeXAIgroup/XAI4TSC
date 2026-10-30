@@ -68,9 +68,9 @@ xai4tsc/
     ├── data/
     │   ├── datasets.py         # UcrUeaDataset, LocalDataset, SyntheticDataset
     │   └── ...                 # base classes, data loaders
-    ├── models/                 # ModelBase, built-in models, registry
+    ├── models/                 # ModelBase, built-in models, catalog
     ├── xai/                    # Explainer ABC, generate_explanation(), built-in explainers
-    ├── evaluation/             # evaluate(), Quantus metric registry
+    ├── evaluation/             # evaluate(), Quantus metric catalog
     └── utils/                  # Shared utilities 
 ```
 

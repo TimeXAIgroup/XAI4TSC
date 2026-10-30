@@ -1,5 +1,5 @@
 """
-Unit tests for wrapper explainers and the shared ``build_explainer`` helper.
+Unit tests for wrapper explainers.
 
 Covers SIGN's correctness identity (``raw_gradient * sign(input - mu)``), its
 incompatible-base warnings, and dispatch through ``_get_explanation``.
@@ -12,16 +12,13 @@ import pytest
 import torch
 from torch import nn
 
-from xai4tsc.xai import (
-    SignExplainer,
-    WrapperExplainer,
-    build_explainer,
-)
+from xai4tsc.xai import SignExplainer, WrapperExplainer
 from xai4tsc.xai._types import Explanation
 from xai4tsc.xai.explain import _get_explanation
 from xai4tsc.xai.feature_attribution import (
     GuidedBackpropagationExplainer,
     IntegratedGradientsExplainer,
+    OcclusionExplainer,
 )
 
 _WRAPPERS_LOGGER = "xai4tsc.xai.wrappers"
@@ -43,7 +40,6 @@ def _make_exp(data: np.ndarray) -> Explanation:
     n = data.shape[0]
     return Explanation(
         explainer="sign",
-        explainer_params={},
         explanation_type="feature_attribution",
         exp_values=None,
         data=data,
@@ -54,42 +50,25 @@ def _make_exp(data: np.ndarray) -> Explanation:
     )
 
 
-# ── build_explainer ───────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_build_explainer_returns_instance_for_known_method():
-    inst = build_explainer("integrated_gradients", {"n_steps": 7})
-    assert isinstance(inst, IntegratedGradientsExplainer)
-    assert inst._attribute_kwargs["n_steps"] == 7
-
-
-@pytest.mark.unit
-def test_build_explainer_unknown_method_raises():
-    with pytest.raises(NotImplementedError, match="not supported"):
-        build_explainer("definitely_not_a_method", None)
-
-
 # ── SignExplainer construction ────────────────────────────────────────────────
 
 
 @pytest.mark.unit
-def test_sign_builds_base_and_inherits_explanation_type():
-    sign = build_explainer(
-        "sign", {"base": {"method": "guided_backpropagation"}, "mu": 0.0}
-    )
-    assert isinstance(sign, SignExplainer)
+def test_sign_wraps_base_and_inherits_explanation_type():
+    base = GuidedBackpropagationExplainer()
+    sign = SignExplainer(base, mu=0.0)
     assert isinstance(sign, WrapperExplainer)
-    assert isinstance(sign._base, GuidedBackpropagationExplainer)
+    assert sign._base is base
     assert sign.explanation_type == sign._base.explanation_type
     assert sign.data_applicability == sign._base.data_applicability
     assert sign.mu == 0.0
 
 
 @pytest.mark.unit
-def test_sign_accepts_bare_string_base():
-    sign = SignExplainer(base="guided_backpropagation")
-    assert isinstance(sign._base, GuidedBackpropagationExplainer)
+@pytest.mark.parametrize("base", ["guided_backpropagation", {"method": "deeplift"}])
+def test_wrapper_rejects_a_base_that_is_not_an_explainer(base):
+    with pytest.raises(TypeError, match="ExplainerBase instance"):
+        SignExplainer(base)
 
 
 # ── SignExplainer correctness identity ────────────────────────────────────────
@@ -105,9 +84,8 @@ def test_sign_equals_raw_gradient_times_sign(mu):
     targets = [0, 1, 2, 0]
 
     # Raw-gradient base (multiply_by_inputs=False) so SIGN supplies the weighting.
-    base_cfg = {"method": "integrated_gradients", "multiply_by_inputs": False}
-    base = build_explainer("integrated_gradients", {"multiply_by_inputs": False})
-    sign = build_explainer("sign", {"base": base_cfg, "mu": mu})
+    base = IntegratedGradientsExplainer(multiply_by_inputs=False)
+    sign = SignExplainer(base, mu=mu)
 
     base_rel = base.explain(model, exp, "cpu", targets)
     sign_rel = sign.explain(model, exp, "cpu", targets)
@@ -123,15 +101,15 @@ def test_sign_equals_raw_gradient_times_sign(mu):
 @pytest.mark.unit
 def test_sign_warns_on_non_gradient_base(caplog):
     with caplog.at_level(logging.WARNING, logger=_WRAPPERS_LOGGER):
-        SignExplainer(base={"method": "occlusion"})
+        SignExplainer(OcclusionExplainer())
     assert "not a GradientExplainer" in caplog.text
 
 
 @pytest.mark.unit
 def test_sign_enforces_multiply_by_inputs_false(caplog):
-    base = {"method": "integrated_gradients", "multiply_by_inputs": True}
+    base = IntegratedGradientsExplainer(multiply_by_inputs=True)
     with caplog.at_level(logging.WARNING, logger=_WRAPPERS_LOGGER):
-        sign = SignExplainer(base=base)
+        sign = SignExplainer(base)
     # User-supplied True is overridden (with a warning) so the base emits the
     # raw gradient that SIGN re-weights.
     assert "overriding multiply_by_inputs" in caplog.text
@@ -139,17 +117,17 @@ def test_sign_enforces_multiply_by_inputs_false(caplog):
 
 
 @pytest.mark.unit
-def test_sign_does_not_mutate_caller_base_config():
-    base = {"method": "integrated_gradients", "multiply_by_inputs": True}
-    SignExplainer(base=base)
-    # The override happens on a copy, not the caller's dict.
-    assert base["multiply_by_inputs"] is True
+def test_sign_does_not_mutate_caller_base():
+    base = IntegratedGradientsExplainer(multiply_by_inputs=True)
+    SignExplainer(base)
+    # The override happens on a copy, not the caller's explainer.
+    assert base._multiply_by_inputs is True
 
 
 @pytest.mark.unit
 def test_sign_no_warning_for_raw_gradient_base(caplog):
     with caplog.at_level(logging.WARNING, logger=_WRAPPERS_LOGGER):
-        SignExplainer(base={"method": "guided_backpropagation"})
+        SignExplainer(GuidedBackpropagationExplainer())
     assert caplog.text == ""
 
 
@@ -162,20 +140,24 @@ def test_sign_dispatch_via_get_explanation_label_targets():
     data = rng.standard_normal((4, 1, 6)).astype(np.float32)
     model = _TinyNet(1, 6, 3).eval()
 
+    sign = SignExplainer(IntegratedGradientsExplainer(multiply_by_inputs=False))
     exp = _get_explanation(
-        method="SIGN",
+        explainer=sign,
         model=model,
         data=data,
         labels=np.array([0, 1, 2, 0], dtype=np.int64),
         encoder=None,
-        params={
-            "base": {"method": "integrated_gradients", "multiply_by_inputs": False},
-        },
         targets="label",
         device="cpu",
         orig_indices=np.arange(4),
     )
 
-    assert exp.explainer == "sign"
+    assert exp.explainer is sign
     assert exp.explanation_type == "feature_attribution"
     assert exp.exp_values.shape == data.shape
+
+
+@pytest.mark.unit
+def test_integrated_gradients_rejects_an_unknown_integration_method():
+    with pytest.raises(ValueError, match=r"integration_method must be one of \[.*"):
+        IntegratedGradientsExplainer(integration_method="simpson")

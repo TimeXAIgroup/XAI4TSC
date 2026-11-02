@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import logging
 import re
+import sys
 from pathlib import Path
 from types import FunctionType
 from typing import get_args
@@ -139,7 +140,12 @@ def load_class_from_path(path: str | Path, class_name: str) -> type:
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not create import spec for {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[src_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(src_name, None)  # as importlib does for a failed import
+        raise
 
     try:
         return getattr(module, class_name)

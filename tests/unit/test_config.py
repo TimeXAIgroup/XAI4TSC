@@ -420,6 +420,34 @@ def test_sanity_check_external_wrong_base_raises(ext_source, clean_registries):
         config_sanity_check(cfg)
 
 
+@pytest.mark.unit
+def test_external_class_under_a_built_in_name_raises(ext_source, clean_registries):
+    cfg = _minimal_user_config()
+    cfg["general"]["allow_external_code"] = True
+    cfg["train_config"]["models"] = [
+        {"model": "FCN", "class_name": "ExtModel", "class_path": str(ext_source)}
+    ]
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    with pytest.raises(ValueError, match=r"'FCN' is already .*FCN.*'ExtModel'"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
+def test_the_same_external_class_can_be_loaded_twice(ext_source, clean_registries):
+    from experiment_runner.lookups import MODELS
+
+    cfg = _minimal_user_config()
+    cfg["general"]["allow_external_code"] = True
+    cfg["train_config"]["models"] = [
+        {"model": "Ext", "class_name": "ExtModel", "class_path": str(ext_source)}
+    ]
+    cfg = config_resolve(cfg, MASTER_CONFIG)
+    assert config_sanity_check(cfg) is True
+    first = MODELS["ext"]
+    assert config_sanity_check(cfg) is True
+    assert MODELS["ext"] is first
+
+
 # ── result_identities ─────────────────────────────────────────────────────────
 
 

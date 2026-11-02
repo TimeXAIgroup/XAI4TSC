@@ -31,6 +31,7 @@ import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 
 import quantus
 import torch
@@ -72,6 +73,50 @@ SYNTHETIC_DATASETS: dict[str, type] = dict(xai4tsc.SYNTHETIC_DATASETS)
 """Config ``dataset`` -> synthetic dataset class."""
 
 
+def _check_name_collision(kind: str, entry: dict, existing: object) -> None:
+    """
+    Refuse a ``class_path`` entry whose name already denotes a different class.
+
+    The same file and class name again (a second config in one process) is fine,
+    and is compared without importing the file a second time.
+
+    Parameters
+    ----------
+    kind : str
+        The entry's id key (``"model"``, ``"method"``, ``"metric"``).
+    entry : dict
+        The config entry.
+    existing : object
+        What the table already holds under the entry's name.
+
+    Raises
+    ------
+    ValueError
+        If the entry's class is not the one the table holds.
+    """
+    path, class_name = entry.get("class_path"), entry.get("class_name")
+    if not (path and class_name):
+        return
+    try:
+        source = Path(inspect.getfile(existing)).resolve()
+    except TypeError:  # a partial or other non-class entry
+        source = None
+    if getattr(existing, "__name__", None) == class_name and source == (
+        Path(path).resolve()
+    ):
+        return
+    held = (
+        f"{existing.__module__}.{existing.__qualname__}"
+        if isinstance(existing, type)
+        else repr(existing)
+    )
+    raise ValueError(
+        f"{kind} '{entry[kind]}' is already {held}, "
+        f"so class '{class_name}' from {path} would be ignored; give it another "
+        "name."
+    )
+
+
 def load_external_components(config: dict) -> None:
     """
     Add the config's ``class_name`` / ``class_path`` components to the tables.
@@ -97,6 +142,9 @@ def load_external_components(config: dict) -> None:
         (:class:`~xai4tsc.models.base.ModelBase`,
         :class:`~xai4tsc.xai.ExplainerBase`,
         :class:`~xai4tsc.evaluation.EvaluatorBase`).
+    ValueError
+        If a ``class_path`` entry names a component the table already holds as a
+        different class, which would otherwise be used instead without notice.
     """
     from xai4tsc.utils.utils import load_class_from_path
 
@@ -142,6 +190,7 @@ def load_external_components(config: dict) -> None:
         for entry in config.get(section, {}).get(list_key, []):
             key = fold(entry[id_key])
             if key in table:
+                _check_name_collision(id_key, entry, table[key])
                 continue
             if (cls := _load(id_key, base, entry[id_key], entry)) is not None:
                 table[key] = cls

@@ -1585,7 +1585,9 @@ def test_predict_probs_defaults_to_softmax_for_a_module_without_the_attribute():
 def test_an_unknown_output_activation_raises_at_construction():
     # Early, because a typo would otherwise silently change every probability
     # the model ever reports rather than failing.
-    with pytest.raises(ValueError, match="output_activation must be one of"):
+    with pytest.raises(
+        ValueError, match=r"output_activation must be one of .*BCEWithLogitsLoss"
+    ):
         FCN(in_channels=1, num_classes=2, output_activation="relu")
 
 

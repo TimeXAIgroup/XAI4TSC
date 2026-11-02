@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812 — PyTorch ecosystem convention
 from torch import nn
 
-from ..models.base import ModelBase, OutputActivation, check_output_activation
+from ..models.base import ModelBase, OutputActivation
 from ..utils.utils import dict_to_args, load_class_from_path, merge_dicts
 
 logger = logging.getLogger(__name__)
@@ -486,9 +486,8 @@ class FCN(ModelBase):
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         channels = [in_channels, *filters]
         blocks = []
         for i in range(3):
@@ -565,9 +564,8 @@ class LeNet(ModelBase):
         head_hidden: int = 128,
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         channels = [in_channels, 32, 64, 128]
         pools = [nn.MaxPool1d(2), nn.MaxPool1d(2), nn.AdaptiveAvgPool1d(1)]
         blocks = []
@@ -693,9 +691,8 @@ class ResNet(ModelBase):
         kernel_sizes: tuple[int, int, int] = (8, 5, 3),
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         self.blocks = nn.Sequential(
             _ResidualBlock(in_channels, n_feature_maps, kernel_sizes),
             _ResidualBlock(n_feature_maps, n_feature_maps * 2, kernel_sizes),
@@ -784,9 +781,8 @@ class LSTM(ModelBase):
         dropout: float = 0.0,
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         self.lstm = nn.LSTM(
             input_size=in_channels,
             hidden_size=hidden_size,
@@ -882,9 +878,8 @@ class PatchTST(ModelBase):
         dropout: float = 0.1,
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         if d_model % nhead != 0:
             msg = f"d_model ({d_model}) must be divisible by nhead ({nhead})."
             raise ValueError(msg)
@@ -1100,9 +1095,8 @@ class XLSTM(ModelBase):
         dropout: float = 0.0,
         output_activation: OutputActivation = "softmax",
     ) -> None:
-        super().__init__()
+        super().__init__(output_activation=output_activation)
         self._record_init_params(locals())
-        self.output_activation = check_output_activation(output_activation)
         if embed_dim % num_heads != 0:
             msg = (
                 f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})."

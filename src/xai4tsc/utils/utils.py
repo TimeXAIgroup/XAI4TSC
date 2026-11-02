@@ -185,7 +185,7 @@ def _filename_slug(name: object, fallback: str) -> str:
     return slug or fallback
 
 
-def _check_option[T](name: str, value: T, options: object) -> T:
+def _check_option[T](name: str, value: T, options: object, hint: str = "") -> T:
     """
     Validate an enum-like option, returning it unchanged.
 
@@ -200,6 +200,8 @@ def _check_option[T](name: str, value: T, options: object) -> T:
         The value given.
     options : object
         The ``Literal[...]`` type listing the allowed values.
+    hint : str, optional
+        Advice appended to the error message, e.g. when to pick which value.
 
     Returns
     -------
@@ -213,5 +215,6 @@ def _check_option[T](name: str, value: T, options: object) -> T:
     """
     allowed = get_args(options)
     if value not in allowed:
-        raise ValueError(f"{name} must be one of {list(allowed)}, got {value!r}.")
+        message = f"{name} must be one of {list(allowed)}, got {value!r}."
+        raise ValueError(f"{message} {hint}" if hint else message)
     return value

@@ -6,7 +6,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,7 +24,7 @@ from torch import nn, optim
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
 
-from ..utils.utils import _filename_slug
+from ..utils.utils import _check_option, _filename_slug
 
 logger = logging.getLogger(__name__)
 
@@ -109,48 +109,18 @@ def _json_safe(value: object) -> bool:
 
 
 OutputActivation = Literal["softmax", "sigmoid"]
-"""The ``output_activation`` values a model accepts."""
-
-OUTPUT_ACTIVATIONS = get_args(OutputActivation)
 """
-The output activations :func:`predict_probs` knows how to apply.
+The ``output_activation`` values a model accepts, which :func:`predict_probs` applies.
 
 ``"softmax"`` is the single-label default: the outputs compete and a row sums to
 1. ``"sigmoid"`` is the multi-label one: each output is an independent
 probability and a row does not sum to anything in particular.
 """
 
-
-def check_output_activation(name: OutputActivation) -> OutputActivation:
-    """
-    Validate an output-activation name, returning it unchanged.
-
-    Called from a model's constructor rather than from
-    :func:`predict_probs`, so a typo fails when the model is built instead of
-    silently changing every probability the model ever reports.
-
-    Parameters
-    ----------
-    name : str
-        A member of :data:`OUTPUT_ACTIVATIONS`.
-
-    Returns
-    -------
-    str
-        *name*.
-
-    Raises
-    ------
-    ValueError
-        If *name* is not a known activation.
-    """
-    if name not in OUTPUT_ACTIVATIONS:
-        raise ValueError(
-            f"output_activation must be one of {list(OUTPUT_ACTIVATIONS)}, got "
-            f"{name!r}. 'softmax' is for one-of-K outputs, 'sigmoid' for "
-            "independent per-label outputs trained with BCEWithLogitsLoss."
-        )
-    return name
+_OUTPUT_ACTIVATION_HINT = (
+    "'softmax' is for one-of-K outputs, 'sigmoid' for independent per-label "
+    "outputs trained with BCEWithLogitsLoss."
+)
 
 
 def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarray:
@@ -187,12 +157,17 @@ def predict_probs(model: nn.Module, data: np.ndarray | torch.Tensor) -> np.ndarr
     param = next(model.parameters(), None)
     if param is not None:
         tensor = tensor.to(param.device)
-    activation = getattr(model, "output_activation", "softmax")
+    activation = _check_option(
+        "output_activation",
+        getattr(model, "output_activation", "softmax"),
+        OutputActivation,
+        _OUTPUT_ACTIVATION_HINT,
+    )
     with torch.no_grad():
         logits = model(tensor)
         probs = (
             torch.sigmoid(logits)
-            if check_output_activation(activation) == "sigmoid"
+            if activation == "sigmoid"
             else F.softmax(logits, dim=1)
         )
         return probs.detach().cpu().numpy()
@@ -407,6 +382,8 @@ class ModelBase(nn.Module, ABC):
 
     name: str
     """Identifier used in file names and logs.  Defaults to the class name."""
+    output_activation: OutputActivation
+    """``"softmax"`` or ``"sigmoid"``, applied by :func:`predict_probs`."""
     device: torch.device | None = None
     """Compute device the model lives on."""
     save_path: Path | None = None
@@ -421,9 +398,24 @@ class ModelBase(nn.Module, ABC):
     _loaded_from: Path | None = None
     """Checkpoint this model's weights were loaded from, if any."""
 
-    def __init__(self) -> None:
+    def __init__(self, output_activation: OutputActivation = "softmax") -> None:
+        """
+        Set the name and check the output activation.
+
+        Parameters
+        ----------
+        output_activation : OutputActivation
+            How :func:`predict_probs` turns this model's logits into
+            probabilities.
+        """
         super().__init__()
         self.name = type(self).__name__
+        self.output_activation = _check_option(
+            "output_activation",
+            output_activation,
+            OutputActivation,
+            _OUTPUT_ACTIVATION_HINT,
+        )
 
     def _record_init_params(self, init_locals: dict) -> None:
         """

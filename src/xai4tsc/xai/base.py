@@ -126,6 +126,7 @@ class GradientExplainer(ExplainerBase, ABC):
 
     explanation_type = "feature_attribution"
     _attribute_kwargs: ClassVar[dict] = {}
+    multiply_by_inputs: bool = False
 
     @abstractmethod
     def _get_captum_attribution(self, model: torch.nn.Module) -> Attribution:

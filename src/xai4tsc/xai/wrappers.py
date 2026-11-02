@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     import torch
 
     from ._types import Explanation
-    from .base import ExplainerBase
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ class SignExplainer(WrapperExplainer):
     ``multiply_by_inputs=False`` on the base (Integrated Gradients, DeepLIFT),
     overriding ``True`` on a copy of the base with a warning; gradient-only methods
     (Guided Backpropagation, Deconvolution) already satisfy this. A non-gradient
-    base cannot produce the SIGN variant and is flagged with a warning.
+    base cannot produce the SIGN variant and is refused.
 
     LRP-SIGN is *not* expressible this way — for LRP, SIGN is an input-layer
     relevance rule applied during the backward pass. That variant would be a
@@ -48,35 +47,40 @@ class SignExplainer(WrapperExplainer):
 
     Parameters
     ----------
-    base : ExplainerBase
+    base : GradientExplainer
         The gradient base explainer to extend, e.g.
         ``IntegratedGradientsExplainer(multiply_by_inputs=False)``.
     mu : float
         Sign threshold. Inputs ``< mu`` map to ``-1``, the rest to ``+1``.
     """
 
-    def __init__(self, base: ExplainerBase, mu: float = 0.0) -> None:
+    def __init__(self, base: GradientExplainer, mu: float = 0.0) -> None:
+        """
+        Wrap *base*, switching off its input weighting on a copy if it has one.
+
+        Raises
+        ------
+        TypeError
+            If *base* is not a :class:`~xai4tsc.xai.base.GradientExplainer`.
+        """
+        if not isinstance(base, GradientExplainer):
+            raise TypeError(
+                "SIGN is defined for gradient-based methods; base "
+                f"'{type(base).__name__}' is not a GradientExplainer."
+            )
         # SIGN replaces the "x input" weighting with "x sign(input)", so the base
         # must emit the raw gradient. The override goes on a copy so the caller's
         # explainer keeps its setting.
-        if getattr(base, "_multiply_by_inputs", False):
+        if base.multiply_by_inputs:
             logger.warning(
                 "SIGN: overriding multiply_by_inputs=True to False on base '%s' "
                 "so sign(input) replaces the input weighting.",
                 type(base).__name__,
             )
             base = copy.copy(base)
-            base._multiply_by_inputs = False
+            base.multiply_by_inputs = False
         super().__init__(base)
         self.mu = mu
-        # SIGN's identity only holds for gradient-space bases. Warn (rather than
-        # silently produce a non-SIGN map) for an incompatible base.
-        if not isinstance(self._base, GradientExplainer):
-            logger.warning(
-                "SIGN is defined for gradient-based methods; base '%s' is not a "
-                "GradientExplainer, so the result is not the paper's SIGN variant.",
-                type(self._base).__name__,
-            )
 
     def explain(
         self,

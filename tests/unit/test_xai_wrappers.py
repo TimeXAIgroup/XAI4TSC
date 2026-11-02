@@ -66,8 +66,8 @@ def test_sign_wraps_base_and_inherits_explanation_type():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("base", ["guided_backpropagation", {"method": "deeplift"}])
-def test_wrapper_rejects_a_base_that_is_not_an_explainer(base):
-    with pytest.raises(TypeError, match="ExplainerBase instance"):
+def test_sign_rejects_a_base_that_is_not_an_explainer(base):
+    with pytest.raises(TypeError, match="not a GradientExplainer"):
         SignExplainer(base)
 
 
@@ -99,10 +99,9 @@ def test_sign_equals_raw_gradient_times_sign(mu):
 
 
 @pytest.mark.unit
-def test_sign_warns_on_non_gradient_base(caplog):
-    with caplog.at_level(logging.WARNING, logger=_WRAPPERS_LOGGER):
+def test_sign_refuses_a_non_gradient_base():
+    with pytest.raises(TypeError, match="not a GradientExplainer"):
         SignExplainer(OcclusionExplainer())
-    assert "not a GradientExplainer" in caplog.text
 
 
 @pytest.mark.unit
@@ -113,7 +112,7 @@ def test_sign_enforces_multiply_by_inputs_false(caplog):
     # User-supplied True is overridden (with a warning) so the base emits the
     # raw gradient that SIGN re-weights.
     assert "overriding multiply_by_inputs" in caplog.text
-    assert sign._base._multiply_by_inputs is False
+    assert sign._base.multiply_by_inputs is False
 
 
 @pytest.mark.unit
@@ -121,7 +120,7 @@ def test_sign_does_not_mutate_caller_base():
     base = IntegratedGradientsExplainer(multiply_by_inputs=True)
     SignExplainer(base)
     # The override happens on a copy, not the caller's explainer.
-    assert base._multiply_by_inputs is True
+    assert base.multiply_by_inputs is True
 
 
 @pytest.mark.unit

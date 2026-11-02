@@ -17,6 +17,8 @@ from packaging.version import InvalidVersion, Version
 
 from xai4tsc.utils.plot import RelType
 from xai4tsc.utils.utils import merge_dicts
+from xai4tsc.xai.base import GradientExplainer
+from xai4tsc.xai.wrappers import SignExplainer
 
 from .defaults import _RUNNER_OWNED, apply_package_defaults, hyperparam_names
 from .lookups import (
@@ -982,6 +984,19 @@ def _validate_entry(
             issues,
             allow_kwargs,
         )
+        # SIGN raises on a non-gradient base only when built, after training.
+        base_cls = EXPLAINERS.get(str(entry["base"].get("method", "")).lower())
+        if (
+            isinstance(cls, type)
+            and issubclass(cls, SignExplainer)
+            and isinstance(base_cls, type)
+            and not issubclass(base_cls, GradientExplainer)
+        ):
+            issues.error(
+                f"{where}.base",
+                f"SIGN needs a gradient-based base; '{entry['base']['method']}' "
+                "is not a GradientExplainer.",
+            )
 
 
 def _validate_entries(config: dict, issues: ConfigIssues) -> None:

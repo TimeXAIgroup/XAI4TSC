@@ -930,6 +930,16 @@ def test_nested_base_entry_is_validated_too():
 
 
 @pytest.mark.unit
+def test_sign_with_a_non_gradient_base_is_refused_before_training():
+    cfg = _entry_config(
+        explanation_config=[{"method": "SIGN", "base": {"method": "Occlusion"}}]
+    )
+
+    with pytest.raises(ValueError, match="not a GradientExplainer"):
+        config_sanity_check(cfg)
+
+
+@pytest.mark.unit
 def test_default_settings_keys_and_runner_keys_are_accepted(caplog):
     """An entry may override any default_settings key, plus its structural ones."""
     cfg = _entry_config(

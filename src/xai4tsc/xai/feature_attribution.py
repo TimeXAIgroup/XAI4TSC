@@ -80,7 +80,7 @@ class IntegratedGradientsExplainer(GradientExplainer):
         baselines: int = 0,
         internal_batch_size: int | None = None,
     ) -> None:
-        self._multiply_by_inputs = multiply_by_inputs
+        self.multiply_by_inputs = multiply_by_inputs
         self._attribute_kwargs = {
             "n_steps": n_steps,
             "method": _check_option(
@@ -92,7 +92,7 @@ class IntegratedGradientsExplainer(GradientExplainer):
             self._attribute_kwargs["internal_batch_size"] = internal_batch_size
 
     def _get_captum_attribution(self, model: torch.nn.Module) -> IntegratedGradients:
-        return IntegratedGradients(model, multiply_by_inputs=self._multiply_by_inputs)
+        return IntegratedGradients(model, multiply_by_inputs=self.multiply_by_inputs)
 
 
 class DeepLiftExplainer(GradientExplainer):
@@ -111,12 +111,12 @@ class DeepLiftExplainer(GradientExplainer):
     data_applicability: ClassVar[set[DataType]] = {DataType.AGNOSTIC}
 
     def __init__(self, multiply_by_inputs: bool = True, eps: float = 1e-10) -> None:
-        self._multiply_by_inputs = multiply_by_inputs
+        self.multiply_by_inputs = multiply_by_inputs
         self._eps = eps
 
     def _get_captum_attribution(self, model: torch.nn.Module) -> DeepLift:
         return DeepLift(
-            model, multiply_by_inputs=self._multiply_by_inputs, eps=self._eps
+            model, multiply_by_inputs=self.multiply_by_inputs, eps=self._eps
         )
 
 

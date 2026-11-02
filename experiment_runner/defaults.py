@@ -43,7 +43,6 @@ _PACKAGE_BACKED: dict[tuple[str, str], tuple[Callable, str]] = {
         DatasetBase.split,
         "use_predefined_splits",
     ),
-    ("data_config", "format"): (LocalDataset.__init__, "data_format"),
     ("data_config", "layout"): (LocalDataset.__init__, "layout"),
     ("train_config", "hyperparams.epochs"): (ModelBase.train_model, "epochs"),
     ("train_config", "hyperparams.batchsize"): (ModelBase.train_model, "batchsize"),

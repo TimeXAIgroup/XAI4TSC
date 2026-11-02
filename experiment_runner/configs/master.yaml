@@ -94,12 +94,9 @@ data_config:
                             # "multihot" accepts `classes`, the label identity of each
                             # column in order, which is what names the outputs in the
                             # per-output results: {classes: ["7Hz", "19Hz", "37Hz"]}.
-    format: "numpy"         # "numpy", "arff", "csv", "wfdb"
-    layout: "auto"          # axis order of a local array (ignored for UCR/UEA and synthetic):
-                            #   "auto": transpose when axis 1 > axis 2, with a warning
-                            #   "bct":  trust as (B, C, T) -- use this when the data genuinely
-                            #           has more channels than timesteps, which "auto" corrupts
-                            #   "btc":  always transpose
+    layout: "bct"           # axis order of a local array (ignored for UCR/UEA and synthetic):
+                            #   "bct": keep as (B, C, T)
+                            #   "btc": transpose from (B, T, C)
     download: true          # Download UCR dataset if not found locally
     path: null              # Local path; if set, LocalDataset is used instead of UcrUeaDataset
     is_presplit: false      # true = load directly via load_saved_splits(), bypass cache
@@ -126,13 +123,12 @@ data_config:
                             # 'dataset' is ALWAYS the human-readable name. Every other key
                             # is a per-entry override of a default_settings value above.
                             # Synthetic datasets are dispatched by the SYNTHETIC_DATASETS
-                            # registry key and take no path/download/format.
+                            # registry key and take no path/download/layout.
     - dataset: "GunPoint"   # a UCR/UEA archive dataset, fetched by name
       max_samples: 500      # overrides default_settings for this entry only
 
     - dataset: "my_recording"   # 'path' switches to LocalDataset instead of UcrUeaDataset
       path: ./data/my_recording
-      format: "numpy"       # "numpy" | "arff" | "csv" | "wfdb"
       layout: "bct"         # state the axis order: Batch x Channel x Timesteps
       is_presplit: false    # true = the folder already holds train/test splits
 
@@ -147,7 +143,8 @@ data_config:
 
     - dataset: "Synth_Multilabel_Freq"
                                 # synthetic: multi-label bursts localized in time and
-                                #   frequency, generated on first use and cached, with
+                                #   frequency, generated on each run (only the split
+                                #   folder is cached when cache_path is set), with
                                 #   per-sample ground truth for the localization metrics
       encode: "multihot"        # its labels are multi-hot rows; one output per
                                 # frequency. Pair with loss_func: "bcewithlogits"

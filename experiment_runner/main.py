@@ -28,7 +28,6 @@ import yaml
 from xai4tsc.data import (
     DatasetBase,
     LocalDataset,
-    SyntheticDataset,
     UcrUeaDataset,
     class_names,
 )
@@ -277,63 +276,44 @@ def _run(config: dict, issues: ConfigIssues) -> int:
                 )
             else:
                 use_predefined_splits = dataset["use_predefined_splits"]
-                is_synthetic = dataset["dataset"] in SYNTHETIC_DATASETS
                 ds = _build_dataset(dataset, cache_dir)
 
-                # Synthetic auto-detect: a pre-split layout already in the
-                # synthetic cache dir is loaded directly (skip generation + split).
-                synth_dir = (
-                    ds.cache_subdir(ds.cache_dir)
-                    if is_synthetic and ds.cache_dir is not None
-                    else None
+                split_cache = get_split_cache_path(
+                    cache_path if reproducible else None,
+                    dataset["dataset"],
+                    dataset["train_split"],
+                    dataset["val_split"],
+                    split_seed,
+                    dataset["encode"],
+                    allow_padding=dataset["allow_padding"],
+                    allow_imputation=dataset["allow_imputation"],
+                    max_samples=dataset.get("max_samples"),
+                    sample_strategy=dataset["sample_strategy"],
+                    max_series_length=dataset.get("max_series_length"),
+                    series_position=dataset["series_position"],
+                    stratify=dataset["stratify"],
+                    use_predefined_splits=use_predefined_splits,
+                    path=dataset.get("path") or None,
                 )
-                if synth_dir is not None and SyntheticDataset.is_split_layout(
-                    synth_dir
-                ):
-                    logger.info(
-                        "Loading pre-split synthetic dataset from %s", synth_dir
-                    )
+                split_dir = split_cache / "splits" if split_cache else None
+                if split_dir and split_dir.exists():
+                    logger.info("Loading cached splits from %s", split_dir)
                     splits, encoder = ds.load_saved_splits(
-                        synth_dir, encoder=label_encoder
+                        split_dir, encoder=label_encoder
                     )
                 else:
-                    split_cache = get_split_cache_path(
-                        cache_path if reproducible else None,
-                        dataset["dataset"],
-                        dataset["train_split"],
-                        dataset["val_split"],
-                        split_seed,
-                        dataset["encode"],
-                        allow_padding=dataset["allow_padding"],
-                        allow_imputation=dataset["allow_imputation"],
-                        max_samples=dataset.get("max_samples"),
-                        sample_strategy=dataset["sample_strategy"],
-                        max_series_length=dataset.get("max_series_length"),
-                        series_position=dataset["series_position"],
+                    splits, encoder = ds.split(
+                        train_split=dataset["train_split"],
+                        val_split=dataset["val_split"],
+                        encoder=label_encoder,
+                        impute_missing=dataset["allow_imputation"],
+                        rng=resolve_rng(split_seed),
                         stratify=dataset["stratify"],
                         use_predefined_splits=use_predefined_splits,
-                        data_format=dataset["format"],
-                        path=dataset.get("path") or None,
                     )
-                    split_dir = split_cache / "splits" if split_cache else None
-                    if split_dir and split_dir.exists():
-                        logger.info("Loading cached splits from %s", split_dir)
-                        splits, encoder = ds.load_saved_splits(
-                            split_dir, encoder=label_encoder
-                        )
-                    else:
-                        splits, encoder = ds.split(
-                            train_split=dataset["train_split"],
-                            val_split=dataset["val_split"],
-                            encoder=label_encoder,
-                            impute_missing=dataset["allow_imputation"],
-                            rng=resolve_rng(split_seed),
-                            stratify=dataset["stratify"],
-                            use_predefined_splits=use_predefined_splits,
-                        )
-                        if split_cache:
-                            logger.info("Saving splits to cache: %s", split_cache)
-                            ds.save_splits(split_cache)
+                    if split_cache:
+                        logger.info("Saving splits to cache: %s", split_cache)
+                        ds.save_splits(split_cache)
 
             train_data, train_labels = splits[0][0], splits[0][1]
             test_data, test_labels = splits[1][0], splits[1][1]
@@ -1083,7 +1063,7 @@ def _build_dataset(dataset: dict, cache_dir: Path | None) -> DatasetBase:
     dataset : dict
         A resolved ``data_config.datasets`` entry.
     cache_dir : Path | None
-        Cache root for downloads and generated data.
+        Cache root for UCR/UEA downloads.
 
     Returns
     -------
@@ -1101,7 +1081,6 @@ def _build_dataset(dataset: dict, cache_dir: Path | None) -> DatasetBase:
     if name in SYNTHETIC_DATASETS:
         return SYNTHETIC_DATASETS[name](
             name=name,
-            cache_dir=cache_dir,
             **restriction,
             **dataset.get("init_params", {}),
         )
@@ -1109,9 +1088,7 @@ def _build_dataset(dataset: dict, cache_dir: Path | None) -> DatasetBase:
         return LocalDataset(
             path,
             name=name,
-            data_format=dataset["format"],
             layout=dataset["layout"],
-            pad_series=dataset["allow_padding"],
             **restriction,
         )
     return UcrUeaDataset(

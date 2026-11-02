@@ -91,46 +91,55 @@ def test_ensure_datasets_cached_skips_when_all_present(tmp_path, monkeypatch):
         raise AssertionError("no download should happen when all cached")
 
     monkeypatch.setattr(dd, "_download_bulk", _boom)
-    monkeypatch.setattr(dd, "_download_individual", _boom)
 
     dd.ensure_datasets_cached(tmp_path, names)  # must not raise
 
 
 @pytest.mark.unit
-def test_ensure_datasets_cached_bulk_when_majority_missing(tmp_path, monkeypatch):
+def test_ensure_datasets_cached_bulk_when_majority_missing(
+    tmp_path, monkeypatch, caplog
+):
     # Use real UCR names so they land in the UCR branch of the heuristic.
     names = sorted(dd._UCR_SET)[:4]
     bulk_calls = []
-    individual_calls = []
-    monkeypatch.setattr(
-        dd, "_download_bulk", lambda _cache, url: bulk_calls.append(url)
-    )
-    monkeypatch.setattr(
-        dd, "_download_individual", lambda _cache, name: individual_calls.append(name)
-    )
 
-    dd.ensure_datasets_cached(tmp_path, names, uses_ucr_wildcard=True)
+    def _failing_bulk(_cache, url):
+        bulk_calls.append(url)
+        return False
+
+    monkeypatch.setattr(dd, "_download_bulk", _failing_bulk)
+
+    with caplog.at_level("WARNING", logger="xai4tsc.runner.download"):
+        dd.ensure_datasets_cached(tmp_path, names, uses_ucr_wildcard=True)
 
     # ≥50% missing + wildcard active → bulk archive requested...
     assert bulk_calls == [dd.UCR_BULK_URL]
-    # ...and since the mocked bulk wrote nothing, the per-dataset fallback runs
-    # for every still-missing dataset.
-    assert sorted(individual_calls) == names
+    # ...and its failure says sktime now fetches each missing dataset on load.
+    assert "sktime will download each of the 4 missing dataset(s)" in caplog.text
 
 
 @pytest.mark.unit
-def test_ensure_datasets_cached_individual_when_no_wildcard(tmp_path, monkeypatch):
-    names = sorted(dd._UCR_SET)[:3]
-    bulk_calls = []
-    individual_calls = []
-    monkeypatch.setattr(
-        dd, "_download_bulk", lambda _cache, url: bulk_calls.append(url)
-    )
-    monkeypatch.setattr(
-        dd, "_download_individual", lambda _cache, name: individual_calls.append(name)
-    )
+def test_ensure_datasets_cached_warns_about_an_incomplete_folder(tmp_path, caplog):
+    name = sorted(dd._UCR_SET)[0]
+    (tmp_path / name).mkdir()
 
-    dd.ensure_datasets_cached(tmp_path, names, uses_ucr_wildcard=False)
+    with caplog.at_level("WARNING", logger="xai4tsc.runner.download"):
+        dd.ensure_datasets_cached(tmp_path, [name])
 
-    assert bulk_calls == []  # no wildcard → never bulk
-    assert sorted(individual_calls) == names
+    assert str(tmp_path / name) in caplog.text
+    assert (tmp_path / name).is_dir()  # warned, not deleted
+
+
+@pytest.mark.unit
+def test_ensure_datasets_cached_downloads_nothing_without_wildcard(
+    tmp_path, monkeypatch
+):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("no up-front download without a wildcard")
+
+    monkeypatch.setattr(dd, "_download_bulk", _boom)
+    monkeypatch.setattr(dd, "_download_file", _boom)
+
+    dd.ensure_datasets_cached(tmp_path, sorted(dd._UCR_SET)[:3])
+
+    assert list(tmp_path.iterdir()) == []

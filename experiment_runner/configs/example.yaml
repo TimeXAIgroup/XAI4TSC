@@ -5,7 +5,7 @@
 #     python -m experiment_runner.main
 #
 # It needs no download: the synthetic `Synth_Multilabel_Freq` dataset is generated
-# locally (and cached). It trains two model architectures, explains them with three
+# locally. It trains two model architectures, explains them with three
 # time-domain XAI methods, and scores those explanations with time-domain
 # metrics.
 #
@@ -15,7 +15,7 @@
 experiment_name: "example_time"
 xai4tsc_version: ">=2.0.0.dev0,<3"
 
-# Generated datasets, splits, and checkpoints are cached here and reused.
+# Downloaded datasets and splits are cached here and reused.
 cache_path: "./cache/"
 
 general:

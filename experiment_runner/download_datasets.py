@@ -1,20 +1,19 @@
 """
 Pre-download UCR/UEA dataset archives into the experiment cache.
 
-When a config uses the ``UCR`` or ``UEA`` wildcard, ``ensure_datasets_cached``
-is called before the experiment loop.  It:
+``ensure_datasets_cached`` is called before the experiment loop.  It:
 
 1. Checks which datasets are already in the cache (fast no-op if all present).
-2. Downloads the full bulk archive zip in one shot when the wildcard is active.
+2. Downloads the full bulk archive zip in one shot when the wildcard is active
+   and at least half the requested datasets are missing.
 3. Extracts and flattens the zip so each dataset lands at
-   ``{cache_dir}/{name}/{name}_TRAIN.ts`` — the path sktime expects via
+   ``{cache_dir}/{name}/{name}_TRAIN.ts`` - the path sktime expects via
    its ``extract_path`` parameter.
-4. Falls back to individual per-dataset zips for any remaining missing datasets
-   (or when only specific datasets, not the full wildcard, are requested).
 
-Download errors are logged as warnings and do not abort the experiment; failures
-will surface as ``FileNotFoundError`` or network errors when sktime tries to
-load the missing dataset during the experiment.
+Any dataset still missing afterwards (no wildcard, or a failed bulk download)
+is downloaded by sktime into the same layout when ``UcrUeaDataset`` loads it.
+A download error then fails that dataset inside the experiment loop, which
+continues with the next one.
 """
 
 import logging
@@ -36,7 +35,6 @@ logger = logging.getLogger("xai4tsc.runner.download")
 _BASE_URL = "https://timeseriesclassification.com/aeon-toolkit"
 UCR_BULK_URL = f"{_BASE_URL}/Archives/Univariate2018_ts.zip"
 UEA_BULK_URL = f"{_BASE_URL}/Archives/Multivariate2018_ts.zip"
-_INDIVIDUAL_URL = _BASE_URL + "/{name}.zip"
 
 _UCR_SET = set(_UCR_NAMES)
 _UEA_SET = set(_UEA_NAMES)
@@ -64,7 +62,8 @@ def ensure_datasets_cached(
         Fully-expanded list of dataset names (after UCR/UEA wildcard resolution).
     uses_ucr_wildcard:
         ``True`` when the original config used ``dataset: "UCR"``.  Triggers
-        bulk archive download instead of individual per-dataset downloads.
+        the bulk archive download; without a wildcard nothing is downloaded
+        here and sktime fetches each missing dataset when it is loaded.
     uses_uea_wildcard:
         Same for ``dataset: "UEA"``.
     """
@@ -102,24 +101,30 @@ def ensure_datasets_cached(
         bulk_failed |= not _download_bulk(cache_dir, UEA_BULK_URL)
         uea_missing = {n for n in uea_missing if not _is_cached(cache_dir, n)}
 
-    remaining = sorted(ucr_missing | uea_missing)
-    if remaining:
-        listing = ", ".join(remaining[:10]) + (" …" if len(remaining) > 10 else "")
-        if bulk_failed:
-            # The fast path is gone; say so, and say what it now costs, because the
-            # run still succeeds and the only other sign is how long it takes.
+    for name in missing:
+        folder = cache_dir / name
+        # sktime skips its download whenever the folder exists, so this dataset
+        # would fail on every run until someone removes the folder.
+        if folder.is_dir() and not _is_cached(cache_dir, name):
             logger.warning(
-                "Bulk archive unavailable - falling back to %d sequential "
-                "per-dataset download(s), which is considerably slower: %s",
-                len(remaining),
-                listing,
+                "Dataset folder %s exists without complete TRAIN/TEST .ts files; "
+                "sktime will not download into it. Delete it to re-download.",
+                folder,
             )
-        else:
-            logger.info(
-                "Downloading %d individual dataset(s): %s", len(remaining), listing
-            )
-        for name in remaining:
-            _download_individual(cache_dir, name)
+
+    remaining = sorted(ucr_missing | uea_missing)
+    if remaining and bulk_failed:
+        # The fast path is gone; say so, and say what it now costs, because the
+        # run still succeeds and the only other sign is how long it takes.
+        listing = ", ".join(remaining[:10]) + (" …" if len(remaining) > 10 else "")
+        logger.warning(
+            "Bulk archive download failed - sktime will download each of the %d "
+            "missing dataset(s) when it is loaded, which is considerably slower: %s",
+            len(remaining),
+            listing,
+        )
+    elif remaining:
+        logger.info("sktime downloads each missing dataset when it is loaded.")
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +247,7 @@ def _download_bulk(cache_dir: Path, url: str) -> bool:
     -------
     bool
         ``True`` if the archive was fetched and extracted, ``False`` if it failed.
-        A failure is recoverable: the caller falls back to per-dataset downloads.
+        A failure is recoverable: sktime downloads each missing dataset on load.
     """
     zip_name = url.rsplit("/", 1)[-1]
     zip_path = cache_dir / f"_tmp_{zip_name}"
@@ -250,7 +255,7 @@ def _download_bulk(cache_dir: Path, url: str) -> bool:
         _download_file(url, zip_path)
         _extract_and_flatten(zip_path, cache_dir)
     except Exception as exc:
-        # Recoverable: the caller retries the datasets one by one, so this is a
+        # Recoverable: sktime fetches the datasets one by one on load, so this is a
         # warning rather than an error, with the traceback kept for --debug.
         logger.warning("Bulk archive download failed for %s: %s", url, exc)
         logger.debug("Bulk download traceback", exc_info=True)
@@ -260,50 +265,3 @@ def _download_bulk(cache_dir: Path, url: str) -> bool:
     finally:
         if zip_path.exists():
             zip_path.unlink()
-
-
-def _download_individual(cache_dir: Path, name: str) -> None:
-    """
-    Download a single dataset zip and extract it.
-
-    Individual zips come in two layouts:
-
-    * Files at root: ``{name}_TRAIN.ts``, ``{name}_TEST.ts``
-    * Subdirectory: ``{name}/{name}_TRAIN.ts``, ``{name}/{name}_TEST.ts``
-
-    Both are normalised to ``cache_dir/{name}/{name}_TRAIN.ts``.
-    """
-    url = _INDIVIDUAL_URL.format(name=name)
-    zip_path = cache_dir / f"_tmp_{name}.zip"
-    tmp_dir = cache_dir / f"_tmp_extract_{name}"
-    dest_dir = cache_dir / name
-    try:
-        _download_file(url, zip_path)
-        tmp_dir.mkdir(exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmp_dir)
-
-        if dest_dir.exists():
-            # Already cached (old .npy files etc.) — just move .ts files in.
-            for f in tmp_dir.rglob("*.ts"):
-                target = dest_dir / f.name
-                if not target.exists():
-                    f.rename(target)
-        else:
-            # Check whether files are in a {name}/ subdirectory or at root.
-            subdir = tmp_dir / name
-            if subdir.is_dir():
-                subdir.rename(dest_dir)
-            else:
-                dest_dir.mkdir()
-                for f in tmp_dir.iterdir():
-                    f.rename(dest_dir / f.name)
-
-        logger.info("Cached individual dataset '%s'.", name)
-    except Exception:
-        logger.warning("Failed to download individual dataset '%s' from %s.", name, url)
-    finally:
-        if zip_path.exists():
-            zip_path.unlink()
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)

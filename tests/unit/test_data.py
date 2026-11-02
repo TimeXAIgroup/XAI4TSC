@@ -333,25 +333,6 @@ def test_local_dataset_load_returns_bct_and_labels(tmp_path):
 
 
 @pytest.mark.unit
-def test_local_dataset_load_transposes_btc_to_bct(tmp_path):
-    # Write data as (B, T, C) with T > C to trigger the _ensure_bct heuristic.
-    btc = np.zeros((6, 30, 2), dtype=np.float32)
-    np.save(tmp_path / "data.npy", btc)
-    (tmp_path / "labels.json").write_text(json.dumps([{"label": 0} for _ in range(6)]))
-    ds = LocalDataset(tmp_path, name="spectro")
-    loaded_data, _, _ = ds.load()
-    assert loaded_data.shape == (6, 2, 30)  # transposed to (B, C, T)
-
-
-@pytest.mark.unit
-def test_local_dataset_unknown_format_raises(tmp_path):
-    ds = LocalDataset(tmp_path, name="test", data_format="csv")
-    # CSV loader is registered but not implemented.
-    with pytest.raises(NotImplementedError):
-        ds.load()
-
-
-@pytest.mark.unit
 def test_local_dataset_max_samples_restricts_in_split(tmp_path):
     _write_numpy_dataset(tmp_path, n=30, channels=1, length=20)
     ds = LocalDataset(tmp_path, name="test", max_samples=10)
@@ -399,41 +380,6 @@ def test_pad_variable_length_multichannel():
     # Shorter row padded on both channels.
     np.testing.assert_array_equal(out[0, 0, 4:], np.zeros(2, dtype=np.float32))
     np.testing.assert_array_equal(out[0, 1, 4:], np.zeros(2, dtype=np.float32))
-
-
-# ── _ensure_bct ─────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_ensure_bct_transposes_when_t_gt_c(caplog):
-    # (B, T, C) with T=10 > C=3 → transposed to (B, C, T) with a warning.
-    btc = np.zeros((2, 10, 3), dtype=np.float32)
-    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
-        out = _ensure_bct(btc)
-    assert out.shape == (2, 3, 10)
-    # The message must flag the ambiguity and name the way to resolve it, rather
-    # than matching one particular wording.
-    assert "transpos" in caplog.text.lower()
-    assert "layout" in caplog.text.lower()
-
-
-@pytest.mark.unit
-def test_ensure_bct_no_transpose_when_already_bct():
-    # C=3 < T=10 already in (B, C, T) order → returned unchanged.
-    bct = np.arange(2 * 3 * 10, dtype=np.float32).reshape(2, 3, 10)
-    out = _ensure_bct(bct)
-    assert out.shape == (2, 3, 10)
-    np.testing.assert_array_equal(out, bct)
-
-
-@pytest.mark.unit
-def test_ensure_bct_no_transpose_when_c_eq_t(caplog):
-    # Square middle/last axes (5 == 5) must not trigger the heuristic.
-    square = np.zeros((2, 5, 5), dtype=np.float32)
-    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
-        out = _ensure_bct(square)
-    assert out.shape == (2, 5, 5)
-    assert "transposing" not in caplog.text.lower()
 
 
 # ── _impute_data ────────────────────────────────────────────────────────────────
@@ -592,10 +538,10 @@ def test_load_numpy_prefers_separate_metadata_file(tmp_path):
 
 class _SynthStub(SyntheticDataset):
     """
-    Minimal concrete SyntheticDataset for exercising the ABC (caching/splits).
+    Minimal concrete SyntheticDataset for exercising the ABC (splits).
 
     The shipped dataset overrides split() to apply its own partition, so the ABC's
-    own cache / split-roundtrip behaviour is covered with this tiny stand-in.
+    own split-roundtrip behaviour is covered with this tiny stand-in.
     """
 
     _COMBOS = np.array(
@@ -806,7 +752,7 @@ def test_synthetic_opt_out_honours_the_configured_fractions():
     Before this it applied its own partition unconditionally, so a caller asking
     for different fractions was told they were ignored and got the dataset's.
     """
-    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20, cache_dir=None)
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20)
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
@@ -827,7 +773,7 @@ def test_synthetic_opt_out_still_scopes_its_ground_truth():
     afterwards. Without this the localization metrics would score every class
     against the same mask.
     """
-    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20, cache_dir=None)
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20)
     splits, encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
@@ -856,9 +802,7 @@ def test_synthetic_opt_out_keeps_metadata_aligned_under_max_samples():
     The ground truth is matched to samples by position, so a silent misalignment
     here would score every attribution against another sample's regions.
     """
-    ds = SynthMultilabelFreqDataset(
-        num_samples_per_pattern=20, cache_dir=None, max_samples=40
-    )
+    ds = SynthMultilabelFreqDataset(num_samples_per_pattern=20, max_samples=40)
     splits, _encoder = ds.split(
         train_split=0.5,
         val_split=0.25,
@@ -900,7 +844,7 @@ def test_local_metadata_survives_sample_restriction(tmp_path):
 
 
 @pytest.mark.unit
-def test_package_api_generates_and_splits(tmp_path):
+def test_package_api_generates_and_splits():
     """
     The documented package call must work, which it could not before.
 
@@ -909,7 +853,6 @@ def test_package_api_generates_and_splits(tmp_path):
     only shipped synthetic dataset was reachable from the runner alone.
     """
     ds = SynthMultilabelFreqDataset(
-        cache_dir=tmp_path,
         num_samples_per_pattern=8,
         sample_length=64,
         sampling_rate=32,
@@ -925,43 +868,6 @@ def test_package_api_generates_and_splits(tmp_path):
     assert all(x.shape[1:] == (1, 64) for x, _, _ in splits)
     assert isinstance(encoder, PowersetLabelEncoder)
     assert len(encoder.classes_) == 8
-    # Cached as a raw blob, so the second call does not regenerate.
-    assert SyntheticDataset.is_raw_layout(ds.cache_subdir(tmp_path))
-
-
-@pytest.mark.unit
-def test_generation_is_cached_and_not_repeated(tmp_path):
-    calls = {"n": 0}
-    real = SynthMultilabelFreqDataset.generate_dataset
-
-    ds = SynthMultilabelFreqDataset(
-        cache_dir=tmp_path,
-        num_samples_per_pattern=2,
-        sample_length=64,
-        frequency_window_length=16,
-    )
-
-    def counting(self):
-        calls["n"] += 1
-        return real(self)
-
-    ds.generate_dataset = counting.__get__(ds, SynthMultilabelFreqDataset)
-    first = ds.load()[0]
-    second = ds.load()[0]
-    assert calls["n"] == 1
-    np.testing.assert_array_equal(first, second)
-
-
-@pytest.mark.unit
-def test_cache_key_follows_the_generation_parameters():
-    """A parameter change must land in a different cache folder."""
-    base = SynthMultilabelFreqDataset()
-    other = SynthMultilabelFreqDataset(sample_length=256)
-    assert base._cache_key() != other._cache_key()
-    assert base.cache_subdir("/tmp/c").parts[-2] == "synthetic"
-    assert base._cache_key().startswith("Synth_Multilabel_Freq_s42")
-    # The partition slices the blob rather than changing it, so it must not key it.
-    assert base._cache_key() == SynthMultilabelFreqDataset(train_ratio=0.5)._cache_key()
 
 
 @pytest.mark.unit
@@ -1120,9 +1026,8 @@ def test_rejects_parameters_it_cannot_generate():
 def test_loads_a_saved_presplit_layout(tmp_path):
     # A saved layout is still loadable directly, and still gets its regions scoped
     # to the classes each frequency marks.
-    ds = SynthMultilabelFreqDataset(cache_dir=tmp_path)
-    cache = ds.cache_subdir(tmp_path)
-    cache.mkdir(parents=True)
+    ds = SynthMultilabelFreqDataset()
+    cache = tmp_path
     combos = [[0, 0, 0], [1, 0, 1], [0, 1, 0], [1, 1, 1]]
     for split, n in [("train", 4), ("test", 2), ("val", 2)]:
         np.save(cache / f"{split}_data.npy", np.zeros((n, 1, 16), dtype=np.float32))
@@ -1135,46 +1040,19 @@ def test_loads_a_saved_presplit_layout(tmp_path):
                 [{"ground_truth": [region], "non_discriminative": []} for _ in range(n)]
             )
         )
-    assert SyntheticDataset.is_split_layout(cache)
     splits, encoder = ds.load_saved_splits(cache, encoder=PowersetLabelEncoder())
     assert len(splits) == 3
     assert splits[0][0].shape == (4, 1, 16)
     assert isinstance(encoder, PowersetLabelEncoder)
     assert "ground_truth" in pd.DataFrame(splits[1][2]).columns
-    # The scoped splits are what get_splits() returns, not the unscoped ones.
-    assert ds.get_splits()[0] is splits
     # Four combinations here, of which [1,0,1] and [1,1,1] have bit 0 (7 Hz) set.
     scoped = pd.DataFrame(splits[1][2])["ground_truth"].iloc[0][0]
     assert tuple(scoped["classes"]) == (2, 3)
 
 
 @pytest.mark.unit
-def test_synthetic_first_look_cache_skips_regeneration(tmp_path):
-    calls = {"n": 0}
-    real = _SynthStub.generate_dataset
-
-    def counting(self):
-        calls["n"] += 1
-        return real(self)
-
-    ds = _SynthStub(cache_dir=tmp_path, n=16, t=8, seed=2)
-    ds.generate_dataset = counting.__get__(ds, _SynthStub)
-
-    d1 = ds.load()[0]  # miss → generates + persists
-    d2 = ds.load()[0]  # hit → loads from disk, no regen
-    assert calls["n"] == 1
-    np.testing.assert_array_equal(d1, d2)
-    cache = ds.cache_subdir(tmp_path)
-    assert {f.name for f in cache.glob("*")} >= {
-        "data.npy",
-        "labels.json",
-        "metadata.json",
-    }
-
-
-@pytest.mark.unit
 def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
-    ds = _SynthStub(cache_dir=tmp_path, n=24, t=8, multihot=True, seed=4)
+    ds = _SynthStub(n=24, t=8, multihot=True, seed=4)
     _splits, encoder = ds.split(
         train_split=0.75, val_split=0.0, encoder=PowersetLabelEncoder(), stratify=False
     )
@@ -1182,7 +1060,7 @@ def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
     # Separate metadata.json is written, not embedded in labels.json.
     assert (tmp_path / "splits" / "train_metadata.json").exists()
 
-    ds2 = _SynthStub(cache_dir=tmp_path)
+    ds2 = _SynthStub()
     splits2, encoder2 = ds2.load_saved_splits(
         tmp_path / "splits", encoder=PowersetLabelEncoder()
     )
@@ -1194,31 +1072,13 @@ def test_synthetic_split_round_trip_preserves_metadata_and_classes(tmp_path):
     assert "ground_truth" in pd.DataFrame(splits2[0][2]).columns
 
 
-@pytest.mark.unit
-def test_synthetic_layout_predicates(tmp_path):
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    np.save(raw / "data.npy", np.zeros((2, 1, 4), dtype=np.float32))
-    assert SyntheticDataset.is_raw_layout(raw)
-    assert not SyntheticDataset.is_split_layout(raw)
-
-    split = tmp_path / "split"
-    split.mkdir()
-    np.save(split / "train_data.npy", np.zeros((2, 1, 4), dtype=np.float32))
-    np.save(split / "test_data.npy", np.zeros((2, 1, 4), dtype=np.float32))
-    assert SyntheticDataset.is_split_layout(split)
-    assert not SyntheticDataset.is_raw_layout(split)
-
-    assert not SyntheticDataset.is_raw_layout(tmp_path / "missing")
-
-
 # ── _ensure_bct layout ────────────────────────────────────────────────────────
 
 
 @pytest.mark.unit
 def test_ensure_bct_layout_bct_keeps_c_gt_t_data_intact():
-    # The case "auto" corrupts: genuinely (B, C, T) with more channels than
-    # timesteps, e.g. a spectrogram.
+    # Genuinely (B, C, T) with more channels than timesteps, e.g. a spectrogram,
+    # which a shape guess would corrupt.
     arr = np.zeros((4, 40, 20))
     out = _ensure_bct(arr, "bct")
     assert out.shape == (4, 40, 20)
@@ -1226,22 +1086,8 @@ def test_ensure_bct_layout_bct_keeps_c_gt_t_data_intact():
 
 
 @pytest.mark.unit
-def test_ensure_bct_layout_bct_emits_no_warning(caplog):
-    with caplog.at_level("WARNING", logger="xai4tsc.data.base"):
-        _ensure_bct(np.zeros((4, 40, 20)), "bct")
-    assert caplog.text == ""
-
-
-@pytest.mark.unit
 def test_ensure_bct_layout_btc_always_transposes():
-    # Even when axis 1 < axis 2, so the heuristic would have left it alone.
     assert _ensure_bct(np.zeros((4, 20, 40)), "btc").shape == (4, 40, 20)
-
-
-@pytest.mark.unit
-def test_ensure_bct_layout_auto_is_the_default_and_unchanged():
-    arr = np.zeros((4, 40, 20))
-    assert _ensure_bct(arr).shape == _ensure_bct(arr, "auto").shape == (4, 20, 40)
 
 
 @pytest.mark.unit
@@ -1256,7 +1102,6 @@ def test_ensure_bct_rejects_unknown_layout():
     [
         ("sample_strategy", "'stratified'"),
         ("series_position", "'last'"),
-        ("data_format", "'arff'"),
         ("layout", "'btc'"),
     ],
 )
@@ -1267,12 +1112,13 @@ def test_local_dataset_rejects_an_unknown_option_at_construction(option, allowed
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("layout", ["auto", "bct", "btc"])
+@pytest.mark.parametrize("layout", [None, "bct", "btc"])
 def test_local_dataset_honours_layout(tmp_path, layout):
-    # Stored as (6, 30, 2): axis 1 > axis 2, so "auto" reads it as (B, T, C).
+    # Stored as (6, 30, 2): axis 1 > axis 2, so a shape guess would transpose it.
     _write_numpy_dataset(tmp_path, n=6, channels=30, length=2)
-    out = LocalDataset(tmp_path, name="d", layout=layout).load()[0]
-    expected = (6, 30, 2) if layout == "bct" else (6, 2, 30)
+    kwargs = {} if layout is None else {"layout": layout}
+    out = LocalDataset(tmp_path, name="d", **kwargs).load()[0]
+    expected = (6, 2, 30) if layout == "btc" else (6, 30, 2)
     assert out.shape == expected
 
 

@@ -26,32 +26,28 @@ SampleStrategy = Literal["random", "first", "last", "stratified"]
 SeriesPosition = Literal["first", "last"]
 """Which end of a long series :class:`DatasetBase` keeps under ``max_series_length``."""
 
-Layout = Literal["auto", "bct", "btc"]
+Layout = Literal["bct", "btc"]
 """Axis order of a stored array, read by :func:`_ensure_bct`."""
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
 
 
-def _ensure_bct(data: np.ndarray, layout: Layout = "auto") -> np.ndarray:
+def _ensure_bct(data: np.ndarray, layout: Layout) -> np.ndarray:
     """
     Return *data* in the framework's canonical ``(B, C, T)`` order.
 
-    The framework always expects ``(batch, channels, timesteps)``. Local user data
-    is often saved as ``(B, T, C)``, so ``layout="auto"`` guesses from the shape -
-    but a shape alone cannot distinguish ``(B, T, C)`` from a ``(B, C, T)`` dataset
-    that genuinely has more channels than timesteps (a spectrogram, say), and the
-    guess corrupts the latter. ``"bct"`` and ``"btc"`` state the order instead of
-    guessing. **Never call this on UCR/UEA data from sktime**, which is already
-    ``(B, C, T)``.
+    The framework always expects ``(batch, channels, timesteps)``. A shape alone
+    cannot tell ``(B, T, C)`` from a ``(B, C, T)`` dataset that genuinely has more
+    channels than timesteps (a spectrogram, say), so the caller states the order.
+    Never call this on UCR/UEA data from sktime, which is already ``(B, C, T)``.
 
     Parameters
     ----------
     data : np.ndarray
         Loaded data array.
     layout : str
-        ``"auto"`` (default) transposes when axis 1 exceeds axis 2, with a warning;
-        ``"bct"`` trusts the data as-is; ``"btc"`` always transposes a 3-D array.
+        ``"bct"`` trusts the data as-is; ``"btc"`` transposes a 3-D array.
 
     Returns
     -------
@@ -61,22 +57,10 @@ def _ensure_bct(data: np.ndarray, layout: Layout = "auto") -> np.ndarray:
     Raises
     ------
     ValueError
-        If *layout* is not one of ``"auto"``, ``"bct"`` or ``"btc"``.
+        If *layout* is not one of ``"bct"`` or ``"btc"``.
     """
     _check_option("layout", layout, Layout)
-    if data.ndim != 3 or layout == "bct":
-        return data
-    if layout == "btc":
-        return data.transpose(0, 2, 1)
-    if data.shape[1] > data.shape[2]:
-        logger.warning(
-            "Data shape %s has more values on axis 1 than axis 2, so it is being "
-            "read as (B, T, C) and transposed to (B, C, T). If it is already "
-            "(B, C, T) with more channels than timesteps, this corrupts it: set "
-            "layout='bct' to keep it as-is, or layout='btc' to confirm the "
-            "transpose and silence this warning.",
-            data.shape,
-        )
+    if data.ndim == 3 and layout == "btc":
         return data.transpose(0, 2, 1)
     return data
 
@@ -913,21 +897,6 @@ class DatasetBase(ABC):
             encoder,
             stratify=stratify,
         )
-        return self._splits, self._encoder
-
-    def get_splits(self) -> tuple:
-        """
-        Return the cached splits produced by :meth:`split`.
-
-        Raises
-        ------
-        RuntimeError
-            If :meth:`split` has not been called yet.
-        """
-        if self._splits is None:
-            raise RuntimeError(
-                "Call split() or load_saved_splits() before get_splits()."
-            )
         return self._splits, self._encoder
 
     # ── Persistence ───────────────────────────────────────────────────────────

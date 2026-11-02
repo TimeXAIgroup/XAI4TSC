@@ -60,7 +60,7 @@ the data at hand and call its ``split`` method.
 
    ds = xai4tsc.UcrUeaDataset("GunPoint", cache_dir="cache/datasets")
    # ds = xai4tsc.LocalDataset("data/my_dataset", name="my_dataset", layout="bct")
-   # ds = xai4tsc.SynthMultilabelFreqDataset(cache_dir="cache/datasets")
+   # ds = xai4tsc.SynthMultilabelFreqDataset()
    splits, encoder = ds.split(train_split=0.8, val_split=0.1)
 
 Building and reloading models

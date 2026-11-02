@@ -255,6 +255,27 @@ def test_runner_reports_and_returns_dataset_failures(
 
 
 @pytest.mark.integration
+def test_a_failing_dataset_does_not_stop_the_next(
+    ucr_dataset_path, tmp_path, monkeypatch
+):
+    """A dataset that fails to load is reported and the loop runs the next one."""
+    monkeypatch.chdir(Path(__file__).parent.parent.parent)
+    cache_root = Path(os.environ.get("XAI4TSC_TEST_CACHE", "./tests/cache"))
+    results_rel = "tests/_runner_fail_next"
+
+    config = _resolve_config(cache_root, results_rel)
+    config["data_config"]["datasets"].insert(
+        0, {"dataset": "Missing", "is_presplit": True, "path": str(tmp_path / "no")}
+    )
+    failures = main(str(_write_config(config, tmp_path)))
+
+    assert failures == 1
+    log = (_experiment_dir(results_rel) / "experiment.log").read_text()
+    assert "1/2 dataset(s) completed, 0 skipped, 1 failed" in log
+    assert "Failed dataset(s): Missing" in log
+
+
+@pytest.mark.integration
 def test_runner_counts_skipped_datasets_separately(
     ucr_dataset_path, tmp_path, monkeypatch
 ):
@@ -691,10 +712,10 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     tmp_path, monkeypatch
 ):
     """
-    `layout: bct` stops the shape heuristic corrupting genuine C>T data.
+    The default `layout: bct` keeps genuine C>T data as stored.
 
-    With `layout: auto` the array is read as (B, T, C) and transposed, so the
-    model is built on the wrong axis. The data is also scored: Quantus used to run
+    A shape guess would read the array as (B, T, C) and transpose it, so the
+    model would be built on the wrong axis. The data is also scored: Quantus used to run
     the same shape guess in `infer_channel_first` and transpose `x_batch` for a C>T
     input while leaving `a_batch` alone, until the adapter started stating the
     canonical layout instead of letting it be inferred.
@@ -706,8 +727,8 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     data_dir.mkdir()
     rng = np.random.default_rng(0)
     labels = rng.integers(0, 2, 40)
-    # 40 channels, 24 timesteps: axis 1 > axis 2, so "auto" would transpose it,
-    # while 24 timesteps is still long enough for LeNet's pooling stack.
+    # 40 channels, 24 timesteps: axis 1 > axis 2, so a shape guess would transpose
+    # it, while 24 timesteps is still long enough for LeNet's pooling stack.
     arr = rng.normal(size=(40, 40, 24)) + labels[:, None, None]
     np.save(data_dir / "data.npy", arr.astype(np.float32))
     (data_dir / "label.json").write_text(
@@ -715,9 +736,7 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     )
 
     config = _resolve_config(tmp_path / "cache", results_rel)
-    config["data_config"]["datasets"] = [
-        {"dataset": "wide", "path": str(data_dir), "layout": "bct"}
-    ]
+    config["data_config"]["datasets"] = [{"dataset": "wide", "path": str(data_dir)}]
     config["train_config"]["models"] = [
         {"model": "LeNet", "init_params": {"in_channels": 40, "num_classes": 2}}
     ]
@@ -736,48 +755,6 @@ def test_local_dataset_with_more_channels_than_timesteps_keeps_its_shape(
     assert not df.empty, "no metric rows for the C>T data"
     assert (df["status"] == "ok").all(), df.loc[df["status"] != "ok"].to_dict("records")
     assert df["score"].notna().all()
-
-
-@pytest.mark.integration
-def test_changing_format_does_not_reuse_a_cache_built_by_another_loader(
-    tmp_path, monkeypatch
-):
-    """
-    `format` is part of the split-cache key.
-
-    Without it, a numpy-built cache entry is served for a `csv` request and the
-    requested loader is never called, so an unimplemented format looks like a
-    success.
-    """
-    monkeypatch.chdir(Path(__file__).parent.parent.parent)
-    cache_root = tmp_path / "cache"
-
-    data_dir = tmp_path / "local"
-    data_dir.mkdir()
-    rng = np.random.default_rng(0)
-    labels = rng.integers(0, 2, 40)
-    np.save(data_dir / "data.npy", (rng.normal(size=(40, 1, 48))).astype(np.float32))
-    (data_dir / "label.json").write_text(
-        json.dumps([{"label": str(int(y))} for y in labels])
-    )
-
-    entry = {"dataset": "local_ds", "path": str(data_dir)}
-    base = _resolve_config(cache_root, "tests/_runner_fmt_numpy")
-    base["data_config"]["datasets"] = [{**entry, "format": "numpy"}]
-    base["train_config"]["models"] = [
-        {"model": "LeNet", "init_params": {"in_channels": 1, "num_classes": 2}}
-    ]
-    assert main(str(_write_config(base, tmp_path))) == 0
-    numpy_caches = list((cache_root / "splits").iterdir())
-    assert numpy_caches, "no split cache written for the numpy run"
-
-    # Same dataset name and path, different loader: must not reuse the entry above.
-    csv_cfg = _resolve_config(cache_root, "tests/_runner_fmt_csv")
-    csv_cfg["data_config"]["datasets"] = [{**entry, "format": "csv"}]
-    csv_cfg["train_config"]["models"] = base["train_config"]["models"]
-    # The CSV loader is not implemented, so the dataset must fail rather than
-    # silently succeed from the numpy cache.
-    assert main(str(_write_config(csv_cfg, tmp_path))) == 1
 
 
 # ── reproducible: false (R1) ──────────────────────────────────────────────────

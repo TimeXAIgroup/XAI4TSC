@@ -90,7 +90,8 @@ Four ready-to-run configs ship under `experiment_runner/configs/`:
 - `example.yaml` — the go-to demo (and the default when `--conf` is omitted):
   the synthetic `Synth_Multilabel_Freq` dataset, two models, and time-domain
   explainers and metrics. Needs no download, and nothing to generate by hand -
-  the dataset is generated on first use and cached.
+  the dataset is generated on each run; only the split folder is cached when
+  `cache_path` is set.
 - `example_frequency.yaml` — the same dataset explained with FreqRISE in the
   frequency and time-frequency domains, scored with the frequency metrics.
 - `ucr_benchmark.yaml` / `uea_benchmark.yaml` — full-archive sweeps with a

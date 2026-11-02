@@ -81,7 +81,6 @@ def get_split_cache_path(
     series_position: str = "first",
     stratify: bool = True,
     use_predefined_splits: bool = False,
-    data_format: str = "numpy",
     path: str | Path | None = None,
 ) -> Path | None:
     """
@@ -157,9 +156,6 @@ def get_split_cache_path(
         *use_predefined_splits* is ``True``.
     use_predefined_splits : bool
         Whether the official archive ``_TRAIN``/``_TEST`` files were used.
-    data_format : str
-        Loader used to read the data.  Different loaders can yield different
-        arrays from one directory, so a non-default format gets its own entry.
     path : str or Path, optional
         Local dataset directory.  Two datasets can share a *dataset_name* while
         pointing at different directories, so the path is folded into the key as a
@@ -177,8 +173,6 @@ def get_split_cache_path(
         suffix += f"_s{max_samples}{sample_strategy[0]}"
     if max_series_length is not None:
         suffix += f"_t{max_series_length}{series_position[0]}"
-    if data_format and data_format != "numpy":
-        suffix += f"_f{data_format}"
     if path is not None:
         digest = hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:8]
         suffix += f"_d{digest}"

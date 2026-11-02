@@ -224,7 +224,7 @@ Example
 The shipped ``experiment_runner/configs/example.yaml`` is the go-to demo and the
 config the runner uses by default (``python -m experiment_runner``). It
 needs no download: the synthetic ``Synth_Multilabel_Freq`` dataset is generated
-on first use and cached. It trains two model architectures (LeNet and FCN), explains them
+on each run, and only the split folder is cached when ``cache_path`` is set. It trains two model architectures (LeNet and FCN), explains them
 with three time-domain methods (Integrated Gradients, Guided Backpropagation,
 and TSHAP), and scores those explanations with the Complexity and Pixel-Flipping
 metrics:

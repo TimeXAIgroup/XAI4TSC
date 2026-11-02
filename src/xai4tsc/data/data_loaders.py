@@ -1,17 +1,16 @@
-"""File-format loaders (``FORMAT_LOADERS``) and JSON / metadata I/O helpers."""
+"""The numpy dataset loader and JSON / metadata I/O helpers."""
 
 import json
 import logging
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ── File-format loaders ───────────────────────────────────────────────────────
-# Each loader takes a directory Path and returns (data, labels, metadata).
+# ── Numpy loader ──────────────────────────────────────────────────────────────
+# Takes a directory Path and returns (data, labels, metadata).
 # data  : np.ndarray of shape (n_samples, n_channels, n_timesteps)
 # labels: pd.Series
 # metadata: pd.DataFrame | None
@@ -49,28 +48,6 @@ def _load_numpy(directory: Path) -> tuple:
         )
     return data, labels, metadata
 
-
-def _load_arff(directory: Path) -> tuple:
-    raise NotImplementedError("ARFF format loader is not yet implemented.")
-
-
-def _load_csv(directory: Path) -> tuple:
-    raise NotImplementedError("CSV format loader is not yet implemented.")
-
-
-def _load_wfdb(directory: Path) -> tuple:
-    raise NotImplementedError("WFDB format loader is not yet implemented.")
-
-
-DataFormat = Literal["numpy", "arff", "csv", "wfdb"]
-"""File formats :data:`FORMAT_LOADERS` has a loader for."""
-
-FORMAT_LOADERS = {
-    "numpy": _load_numpy,
-    "arff": _load_arff,
-    "csv": _load_csv,
-    "wfdb": _load_wfdb,
-}
 
 # ── Shared utility ────────────────────────────────────────────────────────────
 

@@ -26,7 +26,7 @@ from .base import (
     _impute_data,
     _resolve_encoder,
 )
-from .data_loaders import FORMAT_LOADERS, DataFormat
+from .data_loaders import _load_numpy
 
 logger = logging.getLogger(__name__)
 
@@ -403,10 +403,8 @@ class LocalDataset(DatasetBase):
         self,
         path: str | Path,
         name: str,
-        data_format: DataFormat = "numpy",
-        layout: Layout = "auto",
+        layout: Layout = "bct",
         data_domain: str | Domain = "time",
-        pad_series: bool = False,
         max_samples: int | None = None,
         sample_strategy: SampleStrategy = "random",
         max_series_length: int | None = None,
@@ -422,24 +420,15 @@ class LocalDataset(DatasetBase):
         name : str
             Human-readable identifier used for logging and cache-key generation.
             Required because paths may differ across machines.
-        data_format : str
-            File format: ``"numpy"`` (default), ``"arff"``, ``"csv"``, ``"wfdb"``.
         layout : str
-            Axis order of the stored array: ``"auto"`` (default) guesses from the
-            shape and transposes when axis 1 exceeds axis 2, ``"bct"`` trusts it as
-            ``(B, C, T)``, ``"btc"`` always transposes. Set ``"bct"`` for data that
-            genuinely has more channels than timesteps, which ``"auto"`` would
-            otherwise corrupt.
+            Axis order of the stored array: ``"bct"`` (default) keeps it as
+            ``(B, C, T)``, ``"btc"`` transposes it from ``(B, T, C)``.
         data_domain : str or Domain
             Signal domain the stored arrays are expressed in: ``"time"`` (default),
             ``"frequency"`` or ``"time_frequency"``. Only the user knows this about
             a file, it is set downstream as the model-native domain (see
             :class:`~xai4tsc.data.DatasetBase`). Non-time data must still be real
             ``float32``, e.g. magnitude spectra, not complex coefficients.
-        pad_series : bool
-            If ``True``, variable-length data (list of arrays) is zero-padded to
-            the length of the longest series before returning.  If ``False``
-            (default), a :class:`ValueError` is raised for ragged data.
         max_samples : int | None
             Subsample to at most this many samples.  See :class:`DatasetBase`.
         sample_strategy : str
@@ -458,22 +447,20 @@ class LocalDataset(DatasetBase):
         )
         self.path = Path(path)
         self.name = name
-        self.data_format = _check_option("data_format", data_format, DataFormat)
         self.layout = _check_option("layout", layout, Layout)
         self.data_domain = Domain(data_domain)
-        self.pad_series = pad_series
 
     def load(self) -> tuple:
         """
-        Load raw data from the local directory using the configured format loader.
+        Load raw data from the local directory.
 
         Returns
         -------
         tuple
             ``(data, labels, metadata)`` with data in ``(B, C, T)`` layout.
         """
-        data, labels, metadata = FORMAT_LOADERS[self.data_format](self.path)
-        # Apply (B, T, C) → (B, C, T) heuristic for local data only.
+        data, labels, metadata = _load_numpy(self.path)
+        # Local data only: UCR/UEA data is already (B, C, T).
         data = _ensure_bct(data, self.layout)
         logger.info("Loaded local dataset '%s' — %d samples", self.name, len(data))
         return data, labels, metadata
@@ -484,16 +471,8 @@ class SyntheticDataset(DatasetBase, ABC):
     Base class for programmatically generated datasets.
 
     Subclasses implement :meth:`generate_dataset` (pure, deterministic given the
-    constructor's ``seed`` + parameters). The concrete :meth:`load` here owns
-    **caching**: it first looks for a previously generated dataset on disk and
-    only regenerates on a miss.
-
-    Caching layout (under ``cache_dir/synthetic/<cache_key>/``):
-
-    - ``data.npy``      — generated array ``(B, C, T)``
-    - ``labels.json``   — labels as records (``[{"label": ...}, ...]``; multi-hot
-      labels are stored as lists)
-    - ``metadata.json`` — per-sample metadata records (optional)
+    constructor's ``seed`` + parameters). :meth:`load` generates the dataset
+    afresh on every call; nothing is persisted.
 
     **Metadata convention:** one row per sample, index-aligned with ``data`` in
     the same order. For ground-truth localization datasets it carries the
@@ -503,9 +482,6 @@ class SyntheticDataset(DatasetBase, ABC):
     Example::
 
         class GaussianDataset(SyntheticDataset):
-            def _cache_params(self):
-                return {"n": self.n_samples, "c": self.n_classes, "t": self.length}
-
             def generate_dataset(self):
                 rng = np.random.default_rng(self.seed)
                 data = rng.standard_normal((self.n_samples, 1, self.length))
@@ -516,7 +492,6 @@ class SyntheticDataset(DatasetBase, ABC):
     def __init__(
         self,
         name: str,
-        cache_dir: str | Path | None = None,
         seed: int = DEFAULT_SEED,
         max_samples: int | None = None,
         sample_strategy: SampleStrategy = "random",
@@ -524,15 +499,12 @@ class SyntheticDataset(DatasetBase, ABC):
         series_position: SeriesPosition = "first",
     ) -> None:
         """
-        Store identity, cache location, and generation seed.
+        Store identity and generation seed.
 
         Parameters
         ----------
         name : str
             Dataset identifier (also the registry key).
-        cache_dir : str | Path | None
-            Cache root.  When ``None`` the dataset is generated fresh on every
-            :meth:`load` with no persistence.
         seed : int
             Seed for deterministic generation.
         max_samples, sample_strategy, max_series_length, series_position
@@ -545,7 +517,6 @@ class SyntheticDataset(DatasetBase, ABC):
             series_position=series_position,
         )
         self.name = name
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.seed = seed
 
     @abstractmethod
@@ -559,87 +530,16 @@ class SyntheticDataset(DatasetBase, ABC):
         ``None``).
         """
 
-    def _cache_params(self) -> dict:
-        """Return generation parameters defining identity (override in subclasses)."""
-        return {}
-
-    def _cache_key(self) -> str:
-        """Stable cache folder name from name + seed + generation parameters."""
-        params = self._cache_params()
-        parts = [self.name, f"s{self.seed}"]
-        parts += [f"{k}{params[k]}" for k in sorted(params)]
-        return "_".join(str(p) for p in parts)
-
-    def cache_subdir(self, root: str | Path) -> Path:
-        """Return this dataset's cache directory under ``root/synthetic/``."""
-        return Path(root) / "synthetic" / self._cache_key()
-
-    @staticmethod
-    def is_split_layout(directory: str | Path) -> bool:
-        """Return ``True`` if *directory* holds a pre-split train/test layout."""
-        d = Path(directory)
-        if not d.is_dir():
-            return False
-        stems = [f.stem for f in d.glob("*.npy")]
-        return any("train" in s for s in stems) and any("test" in s for s in stems)
-
-    @staticmethod
-    def is_raw_layout(directory: str | Path) -> bool:
-        """Return ``True`` if *directory* holds a single generated blob (not split)."""
-        d = Path(directory)
-        if not d.is_dir():
-            return False
-        has_data = any(f.stat().st_size > 0 for f in d.glob("data*.npy"))
-        return has_data and not SyntheticDataset.is_split_layout(d)
-
     def load(self) -> tuple:
         """
-        Return raw ``(data, labels, metadata)``, generating + caching on a miss.
+        Return raw ``(data, labels, metadata)``, generated afresh.
 
-        With no ``cache_dir`` the dataset is generated fresh. Otherwise the cache
-        directory is checked first (first-look); on a hit the persisted blob is
-        loaded without regeneration, on a miss it is generated and persisted.
+        Returns
+        -------
+        tuple
+            The output of :meth:`generate_dataset`.
         """
-        if self.cache_dir is None:
-            return self.generate_dataset()
-
-        cache = self.cache_subdir(self.cache_dir)
-        if self.is_raw_layout(cache):
-            logger.info(
-                "Loading cached synthetic dataset '%s' from %s", self.name, cache
-            )
-            data, labels, metadata = FORMAT_LOADERS["numpy"](cache)
-            data = data.astype(np.float32)
-            labels = np.array(labels.tolist()) if hasattr(labels, "tolist") else labels
-            return data, labels, metadata
-
-        data, labels, metadata = self.generate_dataset()
-        self._persist_raw(cache, data, labels, metadata)
-        return data, labels, metadata
-
-    def _persist_raw(
-        self,
-        cache: Path,
-        data: np.ndarray,
-        labels: np.ndarray,
-        metadata: object,
-    ) -> None:
-        """Write the generated dataset to *cache* (data/labels/metadata files)."""
-        cache.mkdir(parents=True, exist_ok=True)
-        np.save(cache / "data.npy", np.asarray(data, dtype=np.float32))
-        pd.DataFrame({"label": np.asarray(labels).tolist()}).to_json(
-            cache / "labels.json", orient="records"
-        )
-        if metadata is not None:
-            df = (
-                metadata
-                if isinstance(metadata, pd.DataFrame)
-                else pd.DataFrame.from_records(metadata)
-            )
-            df.to_json(cache / "metadata.json", orient="records")
-        logger.info(
-            "Generated and cached synthetic dataset '%s' to %s", self.name, cache
-        )
+        return self.generate_dataset()
 
 
 class SynthMultilabelFreqDataset(SyntheticDataset):
@@ -694,7 +594,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
     def __init__(
         self,
         name: str = "Synth_Multilabel_Freq",
-        cache_dir: str | Path | None = None,
         seed: int = 42,
         sample_length: int = 500,
         sampling_rate: int = 100,
@@ -724,9 +623,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         ----------
         name : str
             Dataset identifier (also the registry key).
-        cache_dir : str or Path or None
-            Cache root. ``None`` generates fresh on every :meth:`load` with no
-            persistence.
         seed : int
             Seed for generation and for the partition, as the source repository
             uses one seed for both.
@@ -777,7 +673,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         """
         super().__init__(
             name=name,
-            cache_dir=cache_dir,
             seed=seed,
             max_samples=max_samples,
             sample_strategy=sample_strategy,
@@ -847,32 +742,6 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
                 if f not in self.discriminative_frequencies
             ]
         )
-
-    def _cache_params(self) -> dict:
-        """
-        Return the generation parameters that define the cached blob's identity.
-
-        The partition ratios are deliberately absent: they slice the cached blob
-        rather than change it, so two runs that split it differently share one
-        generated copy.
-
-        Returns
-        -------
-        dict
-            Short keys mapped to their values, joined into the cache folder name.
-        """
-        return {
-            "a": self.sin_amplitude,
-            "dg": self.num_full_distractions,
-            "dw": self.num_window_distractions,
-            "f": "-".join(str(f) for f in self.discriminative_frequencies),
-            "fs": self.sampling_rate,
-            "n": self.num_samples_per_pattern,
-            "ov": f"{self.overlap_min}-{self.overlap_max}",
-            "sd": self.noise_std,
-            "t": self.sample_length,
-            "w": self.frequency_window_length,
-        }
 
     def generate_dataset(self) -> tuple:
         """
@@ -1098,7 +967,7 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         use_predefined_splits: bool = True,
     ) -> tuple:
         """
-        Generate (or load from cache) and split, by this dataset's own partition.
+        Generate and split, by this dataset's own partition.
 
         With *use_predefined_splits* (the default), the partition is the source
         repository's: two chained stratified ``train_test_split`` calls seeded by

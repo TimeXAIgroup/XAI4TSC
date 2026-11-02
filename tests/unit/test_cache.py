@@ -143,22 +143,7 @@ def test_get_split_cache_path_is_stable_across_calls():
     assert first == second
 
 
-# ── format / path in the key ──────────────────────────────────────────────────
-
-
-@pytest.mark.unit
-def test_default_format_and_no_path_leave_the_name_unchanged():
-    # Tokens are emitted only when non-default, so caches written by earlier
-    # versions stay valid.
-    assert _folder_name() == _folder_name(data_format="numpy", path=None)
-
-
-@pytest.mark.unit
-def test_non_default_format_changes_the_key():
-    csv = _folder_name(data_format="csv")
-    assert csv != _folder_name()
-    assert "_fcsv" in csv
-    assert csv.endswith("_strat")  # the terminal token stays last
+# ── path in the key ──────────────────────────────────────────────────
 
 
 @pytest.mark.unit

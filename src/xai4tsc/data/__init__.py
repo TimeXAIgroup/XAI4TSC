@@ -3,12 +3,12 @@ Dataset loading and splitting for time series classification.
 
 Submodules:
 
-- :mod:`~xai4tsc.data.datasets` — the :class:`UcrUeaDataset` /
+- :mod:`~xai4tsc.data.datasets` - the :class:`UcrUeaDataset` /
   :class:`LocalDataset` / :class:`SyntheticDataset` classes and the
   ``SYNTHETIC_DATASETS`` catalog.
-- :mod:`~xai4tsc.data.data_loaders` — file-format loaders (``FORMAT_LOADERS``)
+- :mod:`~xai4tsc.data.data_loaders` - the numpy dataset loader
   and JSON / metadata I/O helpers.
-- :mod:`~xai4tsc.data.base` — the :class:`DatasetBase` ABC (splitting, label
+- :mod:`~xai4tsc.data.base` - the :class:`DatasetBase` ABC (splitting, label
   encoding, save/load of pre-split data) and the two encoders for multi-hot
   labels: :class:`MultiHotLabelEncoder`, which keeps one column per output, and
   :class:`PowersetLabelEncoder`, which collapses each combination to one index.
@@ -25,7 +25,7 @@ from .base import (
     class_names,
     decode_labels,
 )
-from .data_loaders import FORMAT_LOADERS, load_json, load_metadata
+from .data_loaders import load_json, load_metadata
 from .datasets import (
     SYNTHETIC_DATASETS,
     LocalDataset,
@@ -35,7 +35,6 @@ from .datasets import (
 )
 
 __all__ = [
-    "FORMAT_LOADERS",
     "SYNTHETIC_DATASETS",
     "DatasetBase",
     "LocalDataset",

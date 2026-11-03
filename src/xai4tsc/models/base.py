@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -27,6 +27,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from ..utils.utils import _check_option, _filename_slug
 
 logger = logging.getLogger(__name__)
+
+DataOnDevice = Literal[True, False, "auto"]
+"""Values ``train_model`` accepts for ``data_on_device``."""
 
 
 def _target_tensor(labels: np.ndarray) -> torch.Tensor:
@@ -56,9 +59,83 @@ def _target_tensor(labels: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(arr, dtype=dtype))
 
 
+def _batches(
+    tensors: tuple[torch.Tensor, ...],
+    batchsize: int,
+    device: torch.device,
+    order: torch.Tensor | None = None,
+) -> Iterator[tuple[torch.Tensor, ...]]:
+    """
+    Yield consecutive batches of *tensors* on *device*, one index operation each.
+
+    A batch is a slice of every tensor, so data already on *device* is not copied
+    at all. CPU data bound for a CUDA device is gathered into one of two reused
+    pinned buffers and copied without blocking, so the next batch is gathered
+    while the previous one is still in flight; the whole dataset is never pinned.
+
+    Parameters
+    ----------
+    tensors : tuple of torch.Tensor
+        Tensors of equal length, all on the same device.
+    batchsize : int
+        Samples per batch; the last batch holds the remainder.
+    device : torch.device
+        Where the batches are used.
+    order : torch.Tensor, optional
+        Sample indices in the order to visit them, on the tensors' device.
+        ``None`` (default) visits them in stored order.
+
+    Yields
+    ------
+    tuple of torch.Tensor
+        One batch of every tensor, on *device*.
+    """
+    n = len(tensors[0])
+    staged = tensors[0].device.type == "cpu" and device.type == "cuda"
+    if staged:
+        buffers = [
+            [
+                torch.empty(
+                    (min(batchsize, n), *t.shape[1:]), dtype=t.dtype, pin_memory=True
+                )
+                for t in tensors
+            ]
+            for _ in range(2)
+        ]
+        copied: list[torch.cuda.Event | None] = [None, None]
+    for step, start in enumerate(range(0, n, batchsize)):
+        stop = min(start + batchsize, n)
+        idx = None if order is None else order[start:stop]
+        if not staged:
+            yield tuple(
+                (t[start:stop] if idx is None else t[idx]).to(device) for t in tensors
+            )
+            continue
+        slot = step % 2
+        if copied[slot] is not None:
+            # A pinned buffer is reused only once its last copy has landed.
+            copied[slot].synchronize()
+        batch = []
+        for t, buffer in zip(tensors, buffers[slot], strict=True):
+            out = buffer[: stop - start]
+            if idx is None:
+                out.copy_(t[start:stop])
+            else:
+                torch.index_select(t, 0, idx, out=out)
+            batch.append(out.to(device, non_blocking=True))
+        copied[slot] = torch.cuda.Event()
+        copied[slot].record(torch.cuda.current_stream(device))
+        yield tuple(batch)
+
+
+def _sum_dtype(device: torch.device) -> torch.dtype:
+    """Return the dtype to sum losses in: float64, except on MPS, which lacks it."""
+    return torch.float32 if device.type == "mps" else torch.float64
+
+
 def _batch_accuracy_counts(
     outputs: torch.Tensor, targets: torch.Tensor
-) -> tuple[int, int]:
+) -> tuple[torch.Tensor, int]:
     """
     Return ``(correct, total)`` for one batch, by the rank of *targets*.
 
@@ -77,14 +154,15 @@ def _batch_accuracy_counts(
 
     Returns
     -------
-    tuple[int, int]
-        Correct predictions and the number compared.
+    tuple[torch.Tensor, int]
+        Correct predictions, as a tensor on the outputs' device so reading it
+        does not wait for the device every batch, and the number compared.
     """
     if targets.ndim > 1:
         preds = (outputs > 0).to(targets.dtype)
-        return int((preds == targets).sum().item()), int(targets.numel())
+        return (preds == targets).sum(), targets.numel()
     preds = torch.max(outputs.data, 1)[1]
-    return int((preds == targets).sum().item()), int(targets.size(0))
+    return (preds == targets).sum(), targets.size(0)
 
 
 def _json_safe(value: object) -> bool:
@@ -538,7 +616,8 @@ class ModelBase(nn.Module, ABC):
         Parameters
         ----------
         x : torch.Tensor
-            Input tensor of shape ``(B, C, T)``.
+            Input tensor of shape ``(B, C, T)``. During training it can be a view
+            of the training data, so it must not be modified in place.
 
         Returns
         -------
@@ -596,6 +675,8 @@ class ModelBase(nn.Module, ABC):
         labels_val: np.ndarray | None = None,
         save_path: Path | str | None = None,
         start_epoch: int | None = None,
+        data_on_device: DataOnDevice = "auto",
+        device_memory_fraction: float = 0.5,
     ) -> "ModelBase":
         """
         Run the full training loop with early stopping.
@@ -666,11 +747,31 @@ class ModelBase(nn.Module, ABC):
             :attr:`best_epoch` (set by
             :func:`~xai4tsc.models.models.load_model`) and otherwise to ``0``.
             ``epochs`` is always the number of epochs to run **in this call**.
+        data_on_device : bool or "auto"
+            Whether the training and validation data are copied to the model's
+            device once, before the first epoch, instead of batch by batch.
+            ``"auto"`` (default) does so only on a CUDA or MPS device, and only
+            when the data takes less than *device_memory_fraction* of its free
+            memory (on MPS: the memory Metal recommends for the GPU, less what it
+            already holds);
+            otherwise the data stays on the CPU, which always works. ``True``
+            copies it to any device, and fails with torch's out-of-memory error
+            if it does not fit; ``False`` keeps it on the CPU.
+        device_memory_fraction : float
+            Share of the free CUDA or MPS memory, in ``(0, 1)``, that
+            ``data_on_device="auto"`` may fill with data, ``0.5`` by default.
+            The model's activations and the optimizer state need room as well,
+            so lower it when training runs out of memory after the copy.
 
         Returns
         -------
         ModelBase
             ``self`` after training (best checkpoint restored).
+
+        Notes
+        -----
+        The reported epoch loss is the mean loss per sample, each batch's loss
+        weighted by its size, and it is read from the device once per epoch.
         """
         self.save_path = self._resolve_save_path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
@@ -688,12 +789,15 @@ class ModelBase(nn.Module, ABC):
         )
         optimizer_instance = self._resolve_optimizer(optimizer, learn_rate)
 
-        loader = DataLoader(
-            TensorDataset(data_tensor, labels_tensor),
-            batch_size=batchsize,
+        val_data = self._validation_data(data_val, labels_val, epochs)
+        device = torch.device(self.device or "cpu")
+        train_data, val_data = self._place_data(
+            (data_tensor, labels_tensor),
+            val_data,
+            device,
+            data_on_device,
+            device_memory_fraction,
         )
-
-        val_loader = self._validation_loader(data_val, labels_val, batchsize, epochs)
         self._check_loss(
             loss_function, data_tensor[:batchsize], labels_tensor[:batchsize]
         )
@@ -709,31 +813,31 @@ class ModelBase(nn.Module, ABC):
         for offset in range(epochs):
             epoch = start_epoch + offset  # 0-based global epoch index
             self.train()
-            running_loss = 0.0
-            correct = 0
+            # Summed on the device and read once per epoch: an .item() per batch
+            # would make the CPU wait for the device every step.
+            loss_sum = torch.zeros((), dtype=_sum_dtype(device), device=device)
+            correct = torch.zeros((), dtype=torch.int64, device=device)
             total = 0
 
-            for x_batch, y_batch in loader:
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+            for x_batch, y_batch in _batches(train_data, batchsize, device):
                 optimizer_instance.zero_grad()
                 outputs = self(x_batch)
                 loss = loss_function(outputs, y_batch)
                 loss.backward()
                 optimizer_instance.step()
 
-                running_loss += loss.item()
+                loss_sum += loss.detach() * len(x_batch)
                 batch_correct, batch_total = _batch_accuracy_counts(outputs, y_batch)
                 correct += batch_correct
                 total += batch_total
 
-            epoch_loss = running_loss / len(loader)
-            epoch_acc = correct / total
+            epoch_loss = loss_sum.item() / len(data_tensor)
+            epoch_acc = correct.item() / total
             epoch_losses.append(epoch_loss)
             epoch_accs.append(epoch_acc)
 
             # Monitor validation loss when available, else training loss.
-            val_loss = self._validation_loss(val_loader, loss_function)
+            val_loss = self._validation_loss(val_data, loss_function, batchsize, device)
             monitor_loss = val_loss if val_loss is not None else epoch_loss
             if val_loss is not None:
                 logger.info(
@@ -913,15 +1017,14 @@ class ModelBase(nn.Module, ABC):
         finally:
             self.train(was_training)
 
-    def _validation_loader(
+    def _validation_data(
         self,
         data_val: np.ndarray | None,
         labels_val: np.ndarray | None,
-        batchsize: int,
         epochs: int,
-    ) -> DataLoader | None:
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """
-        Build the validation loader, or report why there will not be one.
+        Build the validation tensors, or report why there will not be any.
 
         Early stopping and best-checkpoint selection monitor whatever this
         returns a loss for, so a validation set that goes missing here silently
@@ -936,15 +1039,14 @@ class ModelBase(nn.Module, ABC):
             Validation data, if any.
         labels_val : np.ndarray or None
             Validation labels, if any.
-        batchsize : int
-            Samples per batch, matching the training loader.
         epochs : int
             Epochs this call will run, named in the no-validation message.
 
         Returns
         -------
-        DataLoader or None
-            ``None`` when no validation data was supplied at all.
+        tuple of torch.Tensor or None
+            ``(data, targets)`` on the CPU, or ``None`` when no validation data
+            was supplied at all.
 
         Raises
         ------
@@ -978,32 +1080,94 @@ class ModelBase(nn.Module, ABC):
                 "There is nothing to validate on; pass neither argument to "
                 "monitor training loss deliberately."
             )
-        return DataLoader(
-            TensorDataset(
-                torch.from_numpy(np.ascontiguousarray(data_val, dtype=np.float32)),
-                _target_tensor(labels_val),
-            ),
-            batch_size=batchsize,
+        return (
+            torch.from_numpy(np.ascontiguousarray(data_val, dtype=np.float32)),
+            _target_tensor(labels_val),
         )
+
+    def _place_data(
+        self,
+        train_data: tuple[torch.Tensor, torch.Tensor],
+        val_data: tuple[torch.Tensor, torch.Tensor] | None,
+        device: torch.device,
+        data_on_device: DataOnDevice,
+        device_memory_fraction: float,
+    ) -> tuple[tuple, tuple | None]:
+        """
+        Copy the training and validation data to *device* when asked or when it fits.
+
+        Parameters
+        ----------
+        train_data : tuple of torch.Tensor
+            Training ``(data, targets)`` on the CPU.
+        val_data : tuple of torch.Tensor or None
+            Validation ``(data, targets)`` on the CPU, if any.
+        device : torch.device
+            The model's device.
+        data_on_device : bool or "auto"
+            See :meth:`train_model`.
+        device_memory_fraction : float
+            See :meth:`train_model`.
+
+        Returns
+        -------
+        tuple
+            *train_data* and *val_data*, each on *device* or left on the CPU.
+
+        Raises
+        ------
+        ValueError
+            If *data_on_device* or *device_memory_fraction* is out of range.
+        """
+        _check_option("data_on_device", data_on_device, DataOnDevice)
+        if not 0 < device_memory_fraction <= 1:
+            raise ValueError(
+                "device_memory_fraction must be in (0, 1], "
+                f"got {device_memory_fraction!r}."
+            )
+        groups = [train_data] if val_data is None else [train_data, val_data]
+        nbytes = sum(t.nbytes for group in groups for t in group)
+        if data_on_device != "auto":
+            on_device = bool(data_on_device)
+        elif device.type == "cuda":
+            free, _ = torch.cuda.mem_get_info(device)
+            on_device = nbytes < device_memory_fraction * free
+        elif device.type == "mps":
+            # MPS shares RAM with the CPU, so the copy adds to the CPU's: measure
+            # against the share of RAM Metal recommends for the GPU, minus its use.
+            free = (
+                torch.mps.recommended_max_memory() - torch.mps.driver_allocated_memory()
+            )
+            on_device = nbytes < device_memory_fraction * free
+        else:
+            on_device = False
+        logger.info(
+            "Training data (%.1f MB) %s (data_on_device=%r).",
+            nbytes / 1e6,
+            f"on {device}" if on_device else "kept on the CPU",
+            data_on_device,
+        )
+        if not on_device:
+            return train_data, val_data
+        moved = [tuple(t.to(device) for t in group) for group in groups]
+        return moved[0], moved[1] if val_data is not None else None
 
     def _validation_loss(
         self,
-        val_loader: DataLoader | None,
+        val_data: tuple[torch.Tensor, torch.Tensor] | None,
         loss_func: nn.Module,
+        batchsize: int,
+        device: torch.device,
     ) -> float | None:
-        """Return mean loss over *val_loader*, or ``None`` when no loader given."""
-        if val_loader is None:
+        """Return the mean loss per sample over *val_data*, ``None`` without it."""
+        if val_data is None:
             return None
         self.eval()
-        total = 0.0
-        n_batches = 0
+        total = torch.zeros((), dtype=_sum_dtype(device), device=device)
         with torch.no_grad():
-            for x_batch, y_batch in val_loader:
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
-                total += loss_func(self(x_batch), y_batch).item()
-                n_batches += 1
-        return total / n_batches if n_batches else None
+            for x_batch, y_batch in _batches(val_data, batchsize, device):
+                total += loss_func(self(x_batch), y_batch) * len(x_batch)
+        return total.item() / len(val_data[0])
 
     # ── Persistence ──────────────────────────────────────────────────────────
 

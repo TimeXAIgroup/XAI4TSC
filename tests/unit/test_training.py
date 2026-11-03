@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn, optim
 
-from xai4tsc.models.base import _batch_accuracy_counts, _target_tensor
+from xai4tsc.models.base import _batch_accuracy_counts, _batches, _target_tensor
 from xai4tsc.models.models import load_model
 
 _TINY_FCN = {
@@ -195,7 +195,8 @@ def test_per_output_targets_train_with_bcewithlogits(tmp_path, caplog):
 def test_accuracy_counts_are_argmax_for_index_targets():
     outputs = torch.tensor([[2.0, 0.0], [0.0, 2.0], [2.0, 0.0]])
     targets = torch.tensor([0, 1, 1])
-    assert _batch_accuracy_counts(outputs, targets) == (2, 3)
+    correct, total = _batch_accuracy_counts(outputs, targets)
+    assert (int(correct), total) == (2, 3)
 
 
 @pytest.mark.unit
@@ -206,7 +207,7 @@ def test_accuracy_counts_are_per_output_for_two_dimensional_targets():
     outputs = torch.tensor([[2.0, -2.0, 2.0], [-2.0, 2.0, -2.0]])
     targets = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
     correct, total = _batch_accuracy_counts(outputs, targets)
-    assert (correct, total) == (5, 6)
+    assert (int(correct), total) == (5, 6)
     assert 0 <= 100 * correct / total <= 100
 
 
@@ -216,6 +217,133 @@ def test_a_square_batch_no_longer_reports_above_one_hundred_percent():
     targets = torch.randint(0, 2, (3, 3)).float()
     correct, total = _batch_accuracy_counts(outputs, targets)
     assert 100 * correct / total <= 100
+
+
+# ── batching and data placement ───────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_batches_cover_every_sample_with_a_short_last_batch():
+    data = torch.arange(10.0).reshape(10, 1, 1)
+    targets = torch.arange(10)
+    batches = list(_batches((data, targets), 4, torch.device("cpu")))
+    assert [len(x) for x, _ in batches] == [4, 4, 2]
+    assert torch.equal(torch.cat([y for _, y in batches]), targets)
+
+
+@pytest.mark.unit
+def test_validation_loss_is_the_mean_per_sample_over_a_short_last_batch(tmp_path):
+    # Batches of 4, 4 and 2: an unweighted mean of batch means would count the
+    # last two samples twice as much as the others.
+    rng = np.random.default_rng(0)
+    data = torch.from_numpy(rng.standard_normal((10, 1, 32)).astype("float32"))
+    targets = torch.tensor([0, 1] * 5)
+    model = _model(tmp_path)
+    loss_func = nn.CrossEntropyLoss()
+    got = model._validation_loss((data, targets), loss_func, 4, torch.device("cpu"))
+    with torch.no_grad():
+        expected = loss_func(model(data), targets).item()
+    assert got == pytest.approx(expected, rel=1e-6)
+
+
+def _trained_state(tmp_path, device, data_on_device):
+    data, labels = _batch()
+    torch.manual_seed(0)
+    model = load_model(_TINY_FCN, device=device, save_path=tmp_path / str(device))
+    model.train_model(
+        data,
+        labels,
+        data_val=data,
+        labels_val=labels,
+        data_on_device=data_on_device,
+        # 16 samples in batches of 3: the pinned buffers are reused and the last
+        # batch is short.
+        **{**_HP, "batchsize": 3},
+    )
+    return {k: v.cpu() for k, v in model.state_dict().items()}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="needs a CUDA device"
+            ),
+        ),
+    ],
+)
+def test_data_on_device_does_not_change_the_trained_weights(tmp_path, device):
+    on = _trained_state(tmp_path / "on", device, True)
+    off = _trained_state(tmp_path / "off", device, False)
+    # On a GPU the kernel a library picks can depend on where a batch's buffer
+    # lies in memory, which changes float32 rounding; on the CPU they are equal.
+    tolerance = {} if device == "cpu" else {"rtol": 1e-3, "atol": 1e-4}
+    for key in on:
+        torch.testing.assert_close(on[key], off[key], **tolerance)
+
+
+@pytest.mark.unit
+def test_auto_keeps_data_on_the_cpu_when_it_does_not_fit(tmp_path, monkeypatch, caplog):
+    data = torch.zeros(10, 1, 100)  # 4000 bytes
+    targets = torch.zeros(10, dtype=torch.int64)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1000, 10**9))
+    with caplog.at_level("INFO", logger="xai4tsc.models.base"):
+        train, val = _model(tmp_path)._place_data(
+            (data, targets), None, torch.device("cuda"), "auto", 1.0
+        )
+    assert train[0] is data and val is None
+    assert "kept on the CPU" in caplog.text
+
+
+@pytest.mark.unit
+def test_auto_honours_the_device_memory_fraction(tmp_path, monkeypatch):
+    # 4080 bytes of data and 6000 bytes free: it would fit whole, not in half.
+    data = torch.zeros(10, 1, 100)
+    targets = torch.zeros(10, dtype=torch.int64)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (6000, 10**9))
+    train, _ = _model(tmp_path)._place_data(
+        (data, targets), None, torch.device("cuda"), "auto", 0.5
+    )
+    assert train[0] is data
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fraction", [0.0, 1.5])
+def test_device_memory_fraction_outside_zero_one_raises(tmp_path, fraction):
+    with pytest.raises(ValueError, match="device_memory_fraction"):
+        _model(tmp_path)._place_data(
+            (torch.zeros(2, 1, 4), torch.zeros(2)),
+            None,
+            torch.device("cpu"),
+            "auto",
+            fraction,
+        )
+
+
+@pytest.mark.unit
+def test_auto_on_mps_measures_against_the_recommended_memory(tmp_path, monkeypatch):
+    # 4080 bytes of data; Metal recommends 10000 bytes, of which 4000 are in use.
+    data = torch.zeros(10, 1, 100)
+    targets = torch.zeros(10, dtype=torch.int64)
+    monkeypatch.setattr(torch.mps, "recommended_max_memory", lambda: 10000)
+    monkeypatch.setattr(torch.mps, "driver_allocated_memory", lambda: 4000)
+    train, _ = _model(tmp_path)._place_data(
+        (data, targets), None, torch.device("mps"), "auto", 0.5
+    )
+    assert train[0] is data, "4080 bytes do not fit in half of 6000"
+
+
+@pytest.mark.unit
+def test_auto_keeps_data_on_the_cpu_on_a_cpu_device(tmp_path):
+    data = torch.zeros(4, 1, 8)
+    train, _ = _model(tmp_path)._place_data(
+        (data, torch.zeros(4)), None, torch.device("cpu"), "auto", 1.0
+    )
+    assert train[0] is data
 
 
 # ── the optimizer: class, factory, instance ───────────────────────────────────

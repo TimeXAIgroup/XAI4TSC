@@ -22,6 +22,7 @@ asked it to change. The package side is :mod:`xai4tsc._random`.
 """
 
 import logging
+import os
 
 import numpy as np
 import torch
@@ -46,6 +47,23 @@ def seed_globals(seed: int | None) -> None:
         return
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def use_deterministic_kernels() -> None:
+    """
+    Make torch pick deterministic GPU kernels for the rest of the process.
+
+    Seeds alone do not repeat a GPU run: cuDNN and cuBLAS may choose kernels whose
+    rounding varies between runs. This sets cuDNN to fixed algorithms, asks torch
+    for deterministic implementations everywhere, and configures the cuBLAS
+    workspace (unless the environment already does), which must happen before the
+    first CUDA operation. An operation without a deterministic version warns
+    instead of failing, so one explainer or metric cannot abort a run.
+    """
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def boundary_seed(

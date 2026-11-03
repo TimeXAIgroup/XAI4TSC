@@ -62,7 +62,7 @@ from .lookups import (
     build_loss,
     build_optimizer,
 )
-from .seeding import boundary_seed, seed_globals
+from .seeding import boundary_seed, seed_globals, use_deterministic_kernels
 from .utils import (
     _METRICS_COLUMNS,
     _aggregate_metric,
@@ -178,8 +178,7 @@ def _run(config: dict, issues: ConfigIssues) -> int:
     reproducible = config["general"]["reproducible"]
     run_seed = config["general"]["seed"] if reproducible else None
     if reproducible:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        use_deterministic_kernels()
         seed_globals(run_seed)
         logger.info("Run seed: %s (per-result seeds derive from it)", run_seed)
     else:

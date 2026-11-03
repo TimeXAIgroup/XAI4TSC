@@ -758,7 +758,7 @@ class ModelBase(nn.Module, ABC):
             copies it to any device, and fails with torch's out-of-memory error
             if it does not fit; ``False`` keeps it on the CPU.
         device_memory_fraction : float
-            Share of the free CUDA or MPS memory, in ``(0, 1)``, that
+            Share of the free CUDA or MPS memory, in ``(0, 1]``, that
             ``data_on_device="auto"`` may fill with data, ``0.5`` by default.
             The model's activations and the optimizer state need room as well,
             so lower it when training runs out of memory after the copy.

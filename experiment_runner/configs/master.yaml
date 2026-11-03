@@ -42,7 +42,8 @@ general:
                             #   drawn unseeded and the split cache is bypassed entirely
                             #   (neither read nor written), since a random draw cannot be
                             #   described by a cache key. The dataset download cache is
-                            #   unaffected.
+                            #   unaffected. Results repeat exactly only on the same device
+                            #   and software versions (torch, CUDA).
   seed: 2025                # Run seed. Every result derives its own seed from this one
                             #   and its position in the config (dataset -> split / samples /
                             #   model -> explainer -> metric), so a single result reproduces on
@@ -220,7 +221,7 @@ train_config:
                             #   else keeps it on the CPU; true forces it (any device), false
                             #   keeps it on the CPU.
       device_memory_fraction: 0.5  # share of free GPU memory "auto" may fill with data, in
-                            #   (0, 1); lower it if training runs out of memory after the copy.
+                            #   (0, 1]; lower it if training runs out of memory after the copy.
     train: true             # switch: true trains, false (or omitting the key) does not.
   models:                   # REQUIRED. List of {model: <name>, init_params: {...}} entries.
                             # init_params left out or set to null are auto-detected:

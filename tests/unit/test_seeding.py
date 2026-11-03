@@ -1,11 +1,17 @@
 """Unit tests for seed derivation - the package helpers and the runner boundaries."""
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from experiment_runner.config import result_identities
-from experiment_runner.seeding import boundary_seed, seed_globals
+from experiment_runner.seeding import (
+    boundary_seed,
+    seed_globals,
+    use_deterministic_kernels,
+)
 
 from xai4tsc import DEFAULT_SEED, derive_seed, resolve_rng
 
@@ -179,3 +185,25 @@ def test_seed_globals_none_leaves_the_streams_advancing():
     seed_globals(None)
     second = (np.random.rand(), torch.rand(1).item())
     assert first != second
+
+
+@pytest.mark.unit
+def test_deterministic_kernels_keep_a_user_cublas_setting(monkeypatch):
+    saved = (
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+        torch.backends.cudnn.deterministic,
+        torch.backends.cudnn.benchmark,
+    )
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+    try:
+        use_deterministic_kernels()
+        assert torch.are_deterministic_algorithms_enabled()
+        # An op without a deterministic version must warn, not abort the run.
+        assert torch.is_deterministic_algorithms_warn_only_enabled()
+        assert torch.backends.cudnn.deterministic
+        assert not torch.backends.cudnn.benchmark
+        assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+    finally:
+        torch.use_deterministic_algorithms(saved[0], warn_only=saved[1])
+        torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = saved[2:]

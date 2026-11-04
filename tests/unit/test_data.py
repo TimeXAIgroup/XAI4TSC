@@ -957,6 +957,19 @@ def test_predefined_splits_raise_on_nan_unless_imputing(monkeypatch):
 
 
 @pytest.mark.unit
+def test_stratified_sample_restriction_spreads_the_remainder():
+    # Ten classes of five, 25 requested: each share is 2.5. Rounding gave every
+    # class 2 and the last one 7 of its 5 rows, which crashed.
+    labels = np.repeat(np.arange(10), 5)
+    ds = UcrUeaDataset("GunPoint", max_samples=25, sample_strategy="stratified")
+    idx = ds._select_sample_idx(len(labels), labels, np.random.default_rng(0))
+    assert len(idx) == len(set(idx)) == 25
+    np.testing.assert_array_equal(
+        np.bincount(labels[idx], minlength=10), [3] * 5 + [2] * 5
+    )
+
+
+@pytest.mark.unit
 def test_sample_restriction_keeps_metadata_aligned():
     """
     max_samples must drop metadata rows with the samples they describe.

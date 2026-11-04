@@ -712,9 +712,13 @@ class DatasetBase(ABC):
             return idx
         if strategy == "stratified":
             classes, counts = np.unique(labels_arr, return_counts=True)
-            per_class = np.round(counts / n * k).astype(int)
-            per_class[-1] += k - per_class.sum()
-            per_class = np.maximum(per_class, 0)
+            # Largest remainder: whole shares first, then one extra row each to the
+            # largest fractions. A class only gains a row when its share has a
+            # fraction, so it never asks for more rows than it has.
+            share = counts * k / n
+            per_class = np.floor(share).astype(int)
+            order = np.argsort(per_class - share, kind="stable")
+            per_class[order[: k - per_class.sum()]] += 1
             parts = [
                 rng.choice(np.where(labels_arr == c)[0], size=int(m), replace=False)
                 for c, m in zip(classes, per_class, strict=True)

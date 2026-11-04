@@ -9,7 +9,6 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
@@ -78,11 +77,57 @@ def _impute_data(data: np.ndarray) -> np.ndarray:
     -------
     np.ndarray
         Array of the same shape with NaN values replaced, dtype ``float32``.
+
+    Raises
+    ------
+    ValueError
+        If a channel holds only NaN, so there is no mean to fill it with.
     """
-    b, c, t = data.shape
-    imp = SimpleImputer(strategy="mean")
-    imputed = imp.fit_transform(data.reshape(b * c, t))
-    return imputed.reshape(b, c, t).astype(np.float32)
+    empty = np.isnan(data).all(axis=(0, 2))
+    if empty.any():
+        raise ValueError(
+            f"Channel(s) {np.flatnonzero(empty).tolist()} contain only NaN values, "
+            "so there is no per-channel mean to impute them with."
+        )
+    mean = np.nanmean(data, axis=(0, 2), keepdims=True)
+    return np.where(np.isnan(data), mean, data).astype(np.float32)
+
+
+def _handle_missing(data: np.ndarray, impute_missing: bool, what: str) -> np.ndarray:
+    """
+    Return *data* unchanged, imputed, or raise, depending on NaN and the flag.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Array of shape ``(B, C, T)``.
+    impute_missing : bool
+        Impute NaN with :func:`_impute_data` instead of raising.
+    what : str
+        Names the array in the message, e.g. ``"Dataset"``.
+
+    Returns
+    -------
+    np.ndarray
+        *data*, imputed if it held NaN.
+
+    Raises
+    ------
+    ValueError
+        If *data* holds NaN and *impute_missing* is ``False``.
+    """
+    n_nan = int(np.isnan(data).sum())
+    if not n_nan:
+        return data
+    if not impute_missing:
+        raise ValueError(
+            f"{what} contains {n_nan} NaN value(s). "
+            "Remove missing values before training, or set "
+            "impute_missing=True to replace them with the per-channel "
+            "mean."
+        )
+    logger.info("Imputing %d NaN value(s) in %s with per-channel mean.", n_nan, what)
+    return _impute_data(data)
 
 
 def _multi_hot_rows(y: np.ndarray, encoder_name: str) -> np.ndarray:
@@ -828,17 +873,7 @@ class DatasetBase(ABC):
         data, labels, metadata = self._restrict_samples(data, labels, metadata, rng)
         data = self._restrict_length_numpy(data)
 
-        if np.isnan(data).any():
-            n_nan = int(np.isnan(data).sum())
-            if not impute_missing:
-                raise ValueError(
-                    f"Dataset contains {n_nan} NaN value(s). "
-                    "Remove missing values before training, or set "
-                    "impute_missing=True to replace them with the per-channel "
-                    "mean."
-                )
-            logger.info("Imputing %d NaN value(s) with per-channel mean.", n_nan)
-            data = _impute_data(data)
+        data = _handle_missing(data, impute_missing, "Dataset")
         self._splits, self._encoder = _split_dataset(
             data,
             labels,

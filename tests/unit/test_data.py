@@ -375,20 +375,34 @@ def test_pad_variable_length_multichannel():
 
 
 @pytest.mark.unit
-def test_impute_data_replaces_nan_with_column_mean():
-    # SimpleImputer("mean") works column-wise over the reshaped (B*C, T) view,
-    # so a NaN at timestep t is filled with the mean of that timestep column.
+def test_impute_data_fills_each_channel_with_its_own_mean():
+    # Channel 0 averages 1.0 and channel 1 averages 100.0; a per-timestep fill
+    # would mix the two channels and give 51.0 or 50.5 instead.
     data = np.array(
-        [[[1.0, np.nan, 3.0, 4.0]], [[3.0, 2.0, np.nan, 6.0]]], dtype=np.float32
+        [
+            [[1.0, np.nan, 1.0], [100.0, 100.0, np.nan]],
+            [[1.0, 1.0, 1.0], [np.nan, 100.0, 100.0]],
+        ],
+        dtype=np.float32,
     )
     out = _impute_data(data)
-    assert out.shape == data.shape
     assert out.dtype == np.float32
-    assert not np.any(np.isnan(out))
-    # Column 1: only 2.0 present → imputed value is 2.0.
-    assert out[0, 0, 1] == pytest.approx(2.0)
-    # Column 2: only 3.0 present → imputed value is 3.0.
-    assert out[1, 0, 2] == pytest.approx(3.0)
+    np.testing.assert_array_equal(out[:, 0], np.ones((2, 3)))
+    np.testing.assert_array_equal(out[:, 1], np.full((2, 3), 100.0))
+
+
+@pytest.mark.unit
+def test_impute_data_handles_a_timestep_missing_everywhere():
+    data = np.array([[[1.0, np.nan]], [[3.0, np.nan]]], dtype=np.float32)
+    np.testing.assert_array_equal(_impute_data(data)[:, 0, 1], [2.0, 2.0])
+
+
+@pytest.mark.unit
+def test_impute_data_raises_on_an_all_nan_channel():
+    data = np.ones((2, 2, 3), dtype=np.float32)
+    data[:, 1] = np.nan
+    with pytest.raises(ValueError, match=r"Channel\(s\) \[1\]"):
+        _impute_data(data)
 
 
 # ── PowersetLabelEncoder ──────────────────────────────────────────────────────
@@ -922,6 +936,24 @@ def test_predefined_splits_stay_quiet_when_nothing_was_asked_for(caplog):
         ds._report_ignored_split_args(0.8, 0.0, True)
 
     assert caplog.text == ""
+
+
+@pytest.mark.unit
+def test_predefined_splits_raise_on_nan_unless_imputing(monkeypatch):
+    # The pooled path refuses NaN without impute_missing; the archive path must too.
+    train = np.ones((4, 1, 5))
+    train[0, 0, 2] = np.nan
+    parts = {
+        "TRAIN": (train, np.array(["a", "b"] * 2)),
+        "TEST": (np.ones((2, 1, 5)), np.array(["a", "b"])),
+    }
+    ds = UcrUeaDataset("GunPoint")
+    monkeypatch.setattr(ds, "_load_archive", lambda split, rng: parts[split])
+
+    with pytest.raises(ValueError, match="TRAIN split contains 1 NaN"):
+        ds.split(use_predefined_splits=True)
+    splits, _ = ds.split(use_predefined_splits=True, impute_missing=True)
+    assert splits[0][0][0, 0, 2] == 1.0
 
 
 @pytest.mark.unit

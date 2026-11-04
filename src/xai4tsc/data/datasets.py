@@ -21,7 +21,7 @@ from .base import (
     _assemble_splits,
     _ensure_bct,
     _fit_label_encoder,
-    _impute_data,
+    _handle_missing,
     _stratified_or_random,
 )
 from .data_loaders import _load_numpy
@@ -279,17 +279,9 @@ class UcrUeaDataset(DatasetBase):
         data_train, labels_train = self._load_archive("TRAIN", rng)
         data_test, labels_test = self._load_archive("TEST", rng)
 
-        if impute_missing:
-            for arr, split_name in [(data_train, "TRAIN"), (data_test, "TEST")]:
-                n_nan = int(np.isnan(arr).sum())
-                if n_nan:
-                    logger.info(
-                        "Imputing %d NaN value(s) in %s split with per-channel mean.",
-                        n_nan,
-                        split_name,
-                    )
-            data_train = _impute_data(data_train)
-            data_test = _impute_data(data_test)
+        # Imputed per file, before the common-length pad adds zeros.
+        data_train = _handle_missing(data_train, impute_missing, "TRAIN split")
+        data_test = _handle_missing(data_test, impute_missing, "TEST split")
 
         # Each file of a ragged set is padded to its own longest series; pad both
         # to the longer one so train and test share T.

@@ -477,6 +477,49 @@ def _assemble_splits(
     return splits
 
 
+def _stratified_or_random(
+    indices: np.ndarray,
+    test_size: float | int,
+    keys: object | None,
+    random_state: int | None,
+    warning: str,
+) -> list[np.ndarray]:
+    """
+    Split *indices* with ``train_test_split``, stratified by *keys* if possible.
+
+    sklearn raises when a class has too few members to stratify; that size is the
+    caller's to choose, so this logs *warning* and falls back to a random split
+    instead of failing.
+
+    Parameters
+    ----------
+    indices : np.ndarray
+        Row indices to divide.
+    test_size : float or int
+        Passed to ``train_test_split``.
+    keys : array-like or None
+        Stratification key per entry of *indices*; ``None`` splits randomly.
+    random_state : int or None
+        Passed to ``train_test_split``.
+    warning : str
+        Logged when stratification fails.
+
+    Returns
+    -------
+    list of np.ndarray
+        ``[kept, held_out]`` index arrays.
+    """
+    try:
+        return train_test_split(
+            indices, test_size=test_size, random_state=random_state, stratify=keys
+        )
+    except ValueError:
+        if keys is None:
+            raise
+        logger.warning(warning)
+        return train_test_split(indices, test_size=test_size, random_state=random_state)
+
+
 def _split_dataset(
     data: np.ndarray,
     labels: np.ndarray,
@@ -490,89 +533,35 @@ def _split_dataset(
     """Split data into train / test / (optional) val with label encoding."""
     encoder, labels = _fit_label_encoder(labels, encoder)
 
-    val_set = not math.isclose(val_split, 0.0)
     # Fraction held out of training (validation + test combined).
     holdout = round(1 - train_split, 4)
-
-    if metadata is not None:
-        all_data = list(zip(data, metadata.to_dict("records"), strict=True))
-    else:
-        all_data = data
-
-    strat_full = labels if stratify else None
-    try:
-        x_train, x_test, y_train, y_test = train_test_split(
-            all_data,
-            labels,
-            test_size=holdout,
-            random_state=random_state,
-            stratify=strat_full,
-        )
-    except ValueError:
-        logger.warning(
-            "Stratified split not possible (a class has too few samples); "
-            "falling back to random split."
-        )
-        x_train, x_test, y_train, y_test = train_test_split(
-            all_data, labels, test_size=holdout, random_state=random_state
-        )
-
-    x_val = y_val = None
-    if val_set:
+    train_idx, test_idx = _stratified_or_random(
+        np.arange(len(labels)),
+        holdout,
+        labels if stratify else None,
+        random_state,
+        "Stratified split not possible (a class has too few samples); "
+        "falling back to random split.",
+    )
+    index_sets = [train_idx, test_idx]
+    if not math.isclose(val_split, 0.0):
         # Within the holdout, the test portion is (1 - train - val) / (1 - train);
         # the remainder becomes the validation set.
         rel_test = (1 - train_split - val_split) / (1 - train_split)
-        strat_holdout = y_test if stratify else None
-        try:
-            x_val, x_test, y_val, y_test = train_test_split(
-                x_test,
-                y_test,
-                test_size=rel_test,
-                random_state=random_state,
-                stratify=strat_holdout,
-            )
-        except ValueError:
-            logger.warning(
-                "Stratified val split not possible; falling back to random split."
-            )
-            x_val, x_test, y_val, y_test = train_test_split(
-                x_test,
-                y_test,
-                test_size=rel_test,
-                random_state=random_state,
-            )
+        val_idx, test_idx = _stratified_or_random(
+            test_idx,
+            rel_test,
+            labels[test_idx] if stratify else None,
+            random_state,
+            "Stratified val split not possible; falling back to random split.",
+        )
+        index_sets = [train_idx, test_idx, val_idx]
 
-    if metadata is not None:
-        data_sets, metadata_sets = [], []
-        for _set in [x for x in [x_train, x_test, x_val] if x is not None]:
-            _data, _meta = zip(*_set, strict=True)
-            data_sets.append(np.array(_data, dtype=np.float32))
-            metadata_sets.append(list(_meta))
-        x_train, x_test = data_sets[0], data_sets[1]
-        metadata_train, metadata_test = metadata_sets[0], metadata_sets[1]
-        if val_set:
-            x_val, metadata_val = data_sets[2], metadata_sets[2]
-        else:
-            metadata_val = None
-    else:
-        metadata_train = metadata_test = metadata_val = None
-
-    logger.info("Training data shape: %s", x_train.shape)
-    logger.info("Test data shape: %s", x_test.shape)
-    if val_set:
-        logger.info("Validation data shape: %s", x_val.shape)
-
-    if val_set:
-        splits = [
-            (x_train, y_train, metadata_train),
-            (x_test, y_test, metadata_test),
-            (x_val, y_val, metadata_val),
-        ]
-    else:
-        splits = [
-            (x_train, y_train, metadata_train),
-            (x_test, y_test, metadata_test),
-        ]
+    splits = _assemble_splits(data, labels, metadata, index_sets)
+    for what, (x, _, _) in zip(
+        ("Training", "Test", "Validation"), splits, strict=False
+    ):
+        logger.info("%s data shape: %s", what, x.shape)
     return splits, encoder
 
 

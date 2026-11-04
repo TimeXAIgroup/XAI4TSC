@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sktime.datasets import load_UCR_UEA_dataset
 
 from .._domains import Domain
@@ -20,11 +19,10 @@ from .base import (
     SampleStrategy,
     SeriesPosition,
     _assemble_splits,
-    _encoded_targets,
     _ensure_bct,
     _fit_label_encoder,
     _impute_data,
-    _resolve_encoder,
+    _stratified_or_random,
 )
 from .data_loaders import _load_numpy
 
@@ -293,17 +291,27 @@ class UcrUeaDataset(DatasetBase):
             data_train = _impute_data(data_train)
             data_test = _impute_data(data_test)
 
+        # Each file of a ragged set is padded to its own longest series; pad both
+        # to the longer one so train and test share T.
+        t = max(data_train.shape[2], data_test.shape[2])
+        data = np.concatenate(
+            [
+                np.pad(x, ((0, 0), (0, 0), (0, t - x.shape[2])))
+                for x in (data_train, data_test)
+            ]
+        )
         # Fit encoder on union of both splits so all classes are represented
-        encoder = _resolve_encoder(encoder)
-        encoder.fit(np.concatenate([labels_train, labels_test]))
-        y_train = _encoded_targets(encoder, labels_train)
-        y_test = _encoded_targets(encoder, labels_test)
-
-        logger.info("Predefined TRAIN split shape: %s", data_train.shape)
-        logger.info("Predefined TEST split shape: %s", data_test.shape)
-
-        self._splits = [(data_train, y_train, None), (data_test, y_test, None)]
+        encoder, targets = _fit_label_encoder(
+            np.concatenate([labels_train, labels_test]), encoder
+        )
+        n_train, n = len(data_train), len(data)
+        self._splits = _assemble_splits(
+            data, targets, None, [np.arange(n_train), np.arange(n_train, n)]
+        )
         self._encoder = encoder
+
+        logger.info("Predefined TRAIN split shape: %s", self._splits[0][0].shape)
+        logger.info("Predefined TEST split shape: %s", self._splits[1][0].shape)
         return self._splits, self._encoder
 
     def _report_ignored_split_args(
@@ -1108,55 +1116,23 @@ class SynthMultilabelFreqDataset(SyntheticDataset):
         indices = np.arange(len(labels))
         keys = [str(row) for row in np.asarray(labels).astype(int)]
 
+        # A small num_samples_per_pattern can leave a combination too rare to
+        # stratify; that size is the user's to choose, so warn and split randomly.
+        warning = (
+            f"Stratified split not possible for '{self.name}' (a class combination "
+            "has too few samples); falling back to a random split. Raise "
+            "num_samples_per_pattern to stratify."
+        )
         train_size = round(self.train_ratio * len(indices))
-        train_idx, rest_idx = self._stratified_split(
-            indices, keys, len(indices) - train_size
+        train_idx, rest_idx = _stratified_or_random(
+            indices, len(indices) - train_size, keys, self.seed, warning
         )
         rest_keys = [keys[i] for i in rest_idx]
         test_size = round(self.test_ratio / (1 - self.train_ratio) * len(rest_idx))
-        val_idx, test_idx = self._stratified_split(rest_idx, rest_keys, test_size)
+        val_idx, test_idx = _stratified_or_random(
+            rest_idx, test_size, rest_keys, self.seed, warning
+        )
         return [train_idx, test_idx, val_idx]
-
-    def _stratified_split(
-        self, indices: np.ndarray, keys: list[str], holdout: int
-    ) -> tuple:
-        """
-        Split *indices*, stratified by *keys*, falling back to random if it cannot.
-
-        A small ``num_samples_per_pattern`` leaves too few samples of some class
-        combination to stratify, which sklearn reports as a bare error. The base
-        splitter warns and falls back in that case, so this does too rather than
-        failing a run over a size the user is free to choose.
-
-        Parameters
-        ----------
-        indices : np.ndarray
-            Row indices to divide.
-        keys : list of str
-            Stratification key per entry of *indices*.
-        holdout : int
-            Number of rows to hold out.
-
-        Returns
-        -------
-        tuple
-            ``(kept, holdout)`` index arrays.
-        """
-        try:
-            return train_test_split(
-                indices,
-                test_size=holdout,
-                stratify=keys,
-                random_state=self.seed,
-            )
-        except ValueError:
-            logger.warning(
-                "Stratified split not possible for '%s' (a class combination has "
-                "too few samples); falling back to a random split. Raise "
-                "num_samples_per_pattern to stratify.",
-                self.name,
-            )
-            return train_test_split(indices, test_size=holdout, random_state=self.seed)
 
     # ── Ground-truth class scoping ─────────────────────────────────────────────
 

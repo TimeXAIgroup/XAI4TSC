@@ -59,20 +59,10 @@ def _write_numpy_dataset(path, n=30, channels=1, length=20, n_classes=2):
     return data, labels
 
 
-def _make_nested_univ(lengths, n_channels=1, seed=0):
-    """
-    Build a sktime ``nested_univ`` DataFrame with variable-length cells.
-
-    One column per channel, one row per entry in *lengths*; each cell is a
-    ``pd.Series`` whose length is taken from *lengths* (so rows differ in length).
-    """
+def _make_ragged_cases(lengths, n_channels=1, seed=0):
+    """Build a list of ``(n_channels, length)`` cases, one per entry in *lengths*."""
     rng = np.random.default_rng(seed)
-    columns = {}
-    for c in range(n_channels):
-        columns[f"dim_{c}"] = [
-            pd.Series(rng.standard_normal(length)) for length in lengths
-        ]
-    return pd.DataFrame(columns)
+    return [rng.standard_normal((n_channels, length)) for length in lengths]
 
 
 # ── _split_dataset ─────────────────────────────────────────────────────────────
@@ -362,8 +352,7 @@ def test_a_dataset_without_a_partition_reports_the_request_and_splits(tmp_path, 
 
 @pytest.mark.unit
 def test_pad_variable_length_zero_pads_to_max():
-    nested = _make_nested_univ([3, 5, 4])
-    out = _pad_variable_length(nested)
+    out = _pad_variable_length(_make_ragged_cases([3, 5, 4]))
     assert out.shape == (3, 1, 5)
     assert out.dtype == np.float32
     # The length-3 row is right-padded with zeros in the last two positions.
@@ -374,8 +363,8 @@ def test_pad_variable_length_zero_pads_to_max():
 
 @pytest.mark.unit
 def test_pad_variable_length_multichannel():
-    nested = _make_nested_univ([4, 6], n_channels=2)
-    out = _pad_variable_length(nested)
+    cases = _make_ragged_cases([4, 6], n_channels=2)
+    out = _pad_variable_length(cases)
     assert out.shape == (2, 2, 6)
     # Shorter row padded on both channels.
     np.testing.assert_array_equal(out[0, 0, 4:], np.zeros(2, dtype=np.float32))

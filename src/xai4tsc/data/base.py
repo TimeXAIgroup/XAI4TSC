@@ -752,43 +752,6 @@ class DatasetBase(ABC):
             return data[:, :, -t:]
         return data[:, :, :t]
 
-    def _restrict_samples_nested(
-        self, x_nested: pd.DataFrame, y: np.ndarray, rng: np.random.Generator
-    ) -> tuple:
-        """Subsample a sktime nested DataFrame to at most ``max_samples`` rows."""
-        n = len(x_nested)
-        idx = self._select_sample_idx(n, y, rng)
-        if len(idx) == n:
-            return x_nested, y
-        logger.info(
-            "Subsampling nested dataset from %d to %d samples (strategy: %s).",
-            n,
-            len(idx),
-            getattr(self, "_sample_strategy", "random"),
-        )
-        return x_nested.iloc[idx].reset_index(drop=True), y[idx]
-
-    def _restrict_length_nested(self, x_nested: pd.DataFrame) -> pd.DataFrame:
-        """Truncate each ``pd.Series`` cell to ``max_series_length`` timesteps."""
-        t = getattr(self, "_max_series_length", None)
-        if t is None:
-            return x_nested
-        logger.info(
-            "Truncating nested series to %d timesteps (position: %s).",
-            t,
-            getattr(self, "_series_position", "first"),
-        )
-        if getattr(self, "_series_position", "first") == "last":
-
-            def clip(s: pd.Series) -> pd.Series:
-                return s.iloc[-t:]
-        else:
-
-            def clip(s: pd.Series) -> pd.Series:
-                return s.iloc[:t]
-
-        return x_nested.apply(lambda col: col.map(clip))
-
     # ── Splitting ─────────────────────────────────────────────────────────────
 
     def split(

@@ -52,32 +52,24 @@ def _powerset(items: tuple | list) -> list[tuple]:
     ]
 
 
-def _pad_variable_length(x_nested: pd.DataFrame) -> np.ndarray:
+def _pad_variable_length(cases: list[np.ndarray]) -> np.ndarray:
     """
-    Convert a sktime ``nested_univ`` DataFrame to a zero-padded ``(B, C, T)`` array.
-
-    All series are right-padded with zeros to the length of the longest series
-    in the dataset.
+    Right-pad a list of ``(C, T_i)`` cases with zeros to one ``(B, C, T)`` array.
 
     Parameters
     ----------
-    x_nested : pd.DataFrame
-        Panel data in sktime ``nested_univ`` format — each cell is a
-        ``pd.Series`` whose length may vary across rows.
+    cases : list of np.ndarray
+        One ``(n_channels, length)`` array per case; lengths may differ.
 
     Returns
     -------
     np.ndarray
         Array of shape ``(n_samples, n_channels, max_length)``, dtype ``float32``.
     """
-    n_samples = len(x_nested)
-    n_channels = len(x_nested.columns)
-    max_len = max(x_nested.iloc[:, 0].apply(len))
-    result = np.zeros((n_samples, n_channels, max_len), dtype=np.float32)
-    for i in range(n_samples):
-        for c in range(n_channels):
-            series = np.asarray(x_nested.iloc[i, c], dtype=np.float32)
-            result[i, c, : len(series)] = series
+    max_len = max(case.shape[1] for case in cases)
+    result = np.zeros((len(cases), cases[0].shape[0], max_len), dtype=np.float32)
+    for i, case in enumerate(cases):
+        result[i, :, : case.shape[1]] = case
     return result
 
 
@@ -137,17 +129,14 @@ class UcrUeaDataset(DatasetBase):
         self.download = download
         self.pad_series = pad_series
 
-    def _load_one_split(self, split: str, rng: np.random.Generator) -> tuple:
+    def _load_archive(self, split: str | None, rng: np.random.Generator) -> tuple:
         """
-        Load one official split (``"TRAIN"`` or ``"TEST"``) via sktime.
-
-        Applies sample/length restrictions and variable-length padding using the
-        same logic as :meth:`load`.
+        Load, restrict and, for variable-length data, pad one archive read.
 
         Parameters
         ----------
-        split : str
-            ``"TRAIN"`` or ``"TEST"``.
+        split : str or None
+            ``"TRAIN"``, ``"TEST"``, or ``None`` for both files pooled.
         rng : np.random.Generator
             Generator used for sample restriction.
 
@@ -155,24 +144,38 @@ class UcrUeaDataset(DatasetBase):
         -------
         tuple[np.ndarray, np.ndarray]
             ``(data, labels)`` with shape ``(n, C, T)`` and ``(n,)``.
+
+        Raises
+        ------
+        FileNotFoundError
+            If ``download=False`` and the ``.ts`` files are not in ``cache_dir``.
+        ValueError
+            If the series differ in length and ``pad_series=False``.
         """
-        ucr_name = self.name
-        extract_path = Path(self.cache_dir) if self.cache_dir else None
-        if extract_path is not None:
-            extract_path.mkdir(exist_ok=True, parents=True)
-            extract_path = extract_path.absolute()
-        logger.info("Loading official %s split for '%s' via sktime…", split, ucr_name)
+        extract_path = None
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(exist_ok=True, parents=True)
+            extract_path = self.cache_dir.absolute()
+
+        if not self.download:
+            if extract_path is None:
+                raise FileNotFoundError(
+                    f"Dataset '{self.name}': download=False but no cache_dir provided."
+                )
+            ts_dir = self.cache_dir / self.name
+            if not ts_dir.exists() or not any(ts_dir.glob("*.ts")):
+                raise FileNotFoundError(
+                    f"Dataset '{self.name}' not found in cache ({ts_dir}) "
+                    "and download=False."
+                )
+
+        part = split or "full"
+        logger.info("Loading UCR/UEA dataset '%s' (%s) via sktime…", self.name, part)
+        kwargs = {"name": self.name, "split": split, "return_X_y": True}
         try:
             data, labels = load_UCR_UEA_dataset(
-                name=ucr_name,
-                split=split,
-                return_X_y=True,
-                return_type="numpy3d",
-                extract_path=extract_path,
+                **kwargs, return_type="numpy3d", extract_path=extract_path
             )
-            labels_arr = np.asarray(labels)
-            data, labels_arr, _ = self._restrict_samples(data, labels_arr, None, rng)
-            data = self._restrict_length_numpy(data)
         except ValueError as exc:
             if "same shape" not in str(exc):
                 raise
@@ -183,26 +186,42 @@ class UcrUeaDataset(DatasetBase):
                     "pad_series=True to zero-pad all series to the maximum "
                     "length."
                 ) from exc
-            x_nested, labels = load_UCR_UEA_dataset(
-                name=ucr_name,
-                split=split,
-                return_X_y=True,
-                return_type="nested_univ",
-                extract_path=extract_path,
+            # Leave the except block first: its traceback holds sktime's parsed
+            # data, which would otherwise stay alive through the second read.
+            data = None
+        if data is not None:
+            labels_arr = np.asarray(labels)
+            data, labels_arr, _ = self._restrict_samples(data, labels_arr, None, rng)
+            data = self._restrict_length_numpy(data)
+        else:
+            logger.info(
+                "Dataset '%s' (%s) has variable-length series; zero-padding to "
+                "max length.",
+                self.name,
+                part,
+            )
+            frames, labels = load_UCR_UEA_dataset(
+                **kwargs, return_type="df-list", extract_path=extract_path
             )
             labels_arr = np.asarray(labels)
-            x_nested, labels_arr = self._restrict_samples_nested(
-                x_nested, labels_arr, rng
-            )
-            x_nested = self._restrict_length_nested(x_nested)
-            logger.info(
-                "Dataset '%s' %s split has variable-length series; "
-                "zero-padding to max length.",
-                self.name,
-                split,
-            )
-            data = _pad_variable_length(x_nested)
-        logger.info("Loaded '%s' %s split — %d samples", self.name, split, len(data))
+            # Restrict the list before padding, so padding cannot run out of memory.
+            idx = self._select_sample_idx(len(frames), labels_arr, rng)
+            if len(idx) < len(frames):
+                logger.info(
+                    "Subsampling dataset from %d to %d samples (strategy: %s).",
+                    len(frames),
+                    len(idx),
+                    self._sample_strategy,
+                )
+            labels_arr = labels_arr[idx]
+            # Each frame is (T_i, C); transpose to (C, T_i).
+            cases = [frames[i].to_numpy().T for i in idx]
+            t = self._max_series_length
+            if t is not None:
+                last = self._series_position == "last"
+                cases = [case[:, -t:] if last else case[:, :t] for case in cases]
+            data = _pad_variable_length(cases)
+        logger.info("Loaded '%s' (%s): %d samples", self.name, part, len(data))
         return data, labels_arr
 
     def load(self) -> tuple:
@@ -216,64 +235,7 @@ class UcrUeaDataset(DatasetBase):
         split cache.
         """
         rng = resolve_rng(DEFAULT_SEED, self._split_rng)
-        ucr_name = self.name
-        extract_path = Path(self.cache_dir) if self.cache_dir else None
-        if extract_path is not None:
-            extract_path.mkdir(exist_ok=True, parents=True)
-            extract_path = extract_path.absolute()
-
-        if not self.download:
-            if extract_path is None:
-                raise FileNotFoundError(
-                    f"Dataset '{self.name}': download=False but no cache_dir provided."
-                )
-            ts_dir = Path(self.cache_dir) / ucr_name
-            if not ts_dir.exists() or not any(ts_dir.glob("*.ts")):
-                raise FileNotFoundError(
-                    f"Dataset '{self.name}' not found in cache ({ts_dir}) "
-                    "and download=False."
-                )
-
-        logger.info("Loading UCR/UEA dataset '%s' via sktime…", ucr_name)
-        try:
-            data, labels = load_UCR_UEA_dataset(
-                name=ucr_name,
-                return_X_y=True,
-                return_type="numpy3d",
-                extract_path=extract_path,
-            )
-            labels_arr = np.asarray(labels)
-            data, labels_arr, _ = self._restrict_samples(data, labels_arr, None, rng)
-            data = self._restrict_length_numpy(data)
-        except ValueError as exc:
-            if "same shape" not in str(exc):
-                raise
-            if not self.pad_series:
-                raise ValueError(
-                    f"Dataset '{self.name}' contains variable-length time series "
-                    "and cannot be converted to a fixed-shape array.  Set "
-                    "pad_series=True to zero-pad all series to the maximum "
-                    "length."
-                ) from exc
-            logger.info(
-                "Dataset '%s' has variable-length series; zero-padding to max length.",
-                self.name,
-            )
-            x_nested, labels = load_UCR_UEA_dataset(
-                name=ucr_name,
-                return_X_y=True,
-                return_type="nested_univ",
-                extract_path=extract_path,
-            )
-            labels_arr = np.asarray(labels)
-            # Restrict on the nested DataFrame BEFORE padding to prevent OOM.
-            x_nested, labels_arr = self._restrict_samples_nested(
-                x_nested, labels_arr, rng
-            )
-            x_nested = self._restrict_length_nested(x_nested)
-            data = _pad_variable_length(x_nested)
-
-        logger.info("Loaded UCR dataset '%s' — %d samples", self.name, len(data))
+        data, labels_arr = self._load_archive(None, rng)
         return data, pd.Series(labels_arr), None
 
     def split(
@@ -316,8 +278,8 @@ class UcrUeaDataset(DatasetBase):
         self._report_ignored_split_args(train_split, val_split, stratify)
 
         rng = resolve_rng(random_state, rng)
-        data_train, labels_train = self._load_one_split("TRAIN", rng)
-        data_test, labels_test = self._load_one_split("TEST", rng)
+        data_train, labels_train = self._load_archive("TRAIN", rng)
+        data_test, labels_test = self._load_archive("TEST", rng)
 
         if impute_missing:
             for arr, split_name in [(data_train, "TRAIN"), (data_test, "TEST")]:
